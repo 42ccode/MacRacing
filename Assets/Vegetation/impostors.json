@@ -1,0 +1,50 @@
+[
+  {
+    "height_m" : 4.5567407608032227,
+    "file" : "tree_small_02-0.png",
+    "source" : "tree_small_02",
+    "extent_m" : 5.10354965209961
+  },
+  {
+    "file" : "tree_small_02-1.png",
+    "source" : "tree_small_02",
+    "height_m" : 4.5567407608032227,
+    "extent_m" : 5.10354965209961
+  },
+  {
+    "extent_m" : 5.10354965209961,
+    "file" : "tree_small_02-2.png",
+    "source" : "tree_small_02",
+    "height_m" : 4.5567407608032227
+  },
+  {
+    "extent_m" : 5.10354965209961,
+    "source" : "tree_small_02",
+    "file" : "tree_small_02-3.png",
+    "height_m" : 4.5567407608032227
+  },
+  {
+    "file" : "shrub_01-0.png",
+    "height_m" : 0.39597427845001221,
+    "source" : "shrub_01",
+    "extent_m" : 2.8970607662200929
+  },
+  {
+    "source" : "shrub_01",
+    "height_m" : 0.39597427845001221,
+    "file" : "shrub_01-1.png",
+    "extent_m" : 2.8970607662200929
+  },
+  {
+    "height_m" : 0.39597427845001221,
+    "file" : "shrub_01-2.png",
+    "extent_m" : 2.8970607662200929,
+    "source" : "shrub_01"
+  },
+  {
+    "file" : "shrub_01-3.png",
+    "height_m" : 0.39597427845001221,
+    "extent_m" : 2.8970607662200929,
+    "source" : "shrub_01"
+  }
+]

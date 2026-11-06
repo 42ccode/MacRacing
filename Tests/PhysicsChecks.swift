@@ -1,0 +1,109 @@
+import Foundation
+import simd
+
+@main
+struct PhysicsChecks {
+    static var failures = 0
+
+    static func check(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if condition() { print("PASS  \(message)") }
+        else { print("FAIL  \(message)"); failures += 1 }
+    }
+
+    static func main() {
+        let circuit = Circuit()
+        let dt = 1.0 / 120
+        var car = Vehicle()
+        car.reset(at: circuit.start)
+        let start = car.position
+        for _ in 0..<1200 { car.step(dt, input: DrivingInput(), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12) }
+        check(simd_distance(car.position, start) < 0.001, "Stationary car stays stationary")
+        for _ in 0..<1200 { car.step(dt, input: DrivingInput(throttle: 0, brake: 1), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12) }
+        check(car.speed < 0.001, "Braking at rest never drives backwards")
+
+        car.reset(at: circuit.start)
+        for _ in 0..<1200 { car.step(dt, input: DrivingInput(throttle: 1), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12) }
+        check(car.speedKPH > 100 && car.speedKPH < 240, "Full throttle accelerates plausibly: \(Int(car.speedKPH)) km/h in 10 seconds")
+        check(car.gear > 1, "Automatic gearbox shifts up")
+        check(abs(simd_dot(car.position - start, car.modelX)) < 0.01, "Straight acceleration does not drift sideways")
+        for _ in 0..<600 { car.step(dt, input: DrivingInput(brake: 1), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12) }
+        check(car.speedKPH < 1, "Full braking stops the car")
+
+        car.reset(at: circuit.start)
+        for _ in 0..<600 { car.step(dt, input: DrivingInput(throttle: 0.5, steering: 0.5), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12) }
+        check(car.position.x.isFinite && car.position.y.isFinite && car.speed < 100, "Turning integration stays finite and bounded")
+        check(car.yawRate < 0, "Driver-right input turns clockwise when viewed from above")
+
+        var road = Vehicle()
+        var grass = Vehicle()
+        for _ in 0..<600 {
+            road.step(dt, input: DrivingInput(throttle: 1), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12)
+            grass.step(dt, input: DrivingInput(throttle: 1), assists: DrivingAssists(), roadDistance: 10, roadWidth: 12)
+        }
+        check(grass.speed < road.speed * 0.80, "Grass has reduced grip and increased resistance")
+
+        var loaded = Vehicle()
+        for _ in 0..<240 {
+            loaded.step(dt, input: DrivingInput(), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12)
+        }
+        let stationaryLoad = loaded.wheels.reduce(0) { $0 + $1.normalLoad }
+        check(abs(stationaryLoad - loaded.mass * 9.81) < 1, "Four spring loads balance gravity at rest")
+        for _ in 0..<720 {
+            loaded.step(dt, input: DrivingInput(throttle: 1), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12)
+        }
+        let frontStaticFraction = (loaded.wheelbase - 1.485) / loaded.wheelbase
+        let acceleratingFraction = (loaded.wheels[0].normalLoad + loaded.wheels[1].normalLoad) / loaded.wheels.reduce(0) { $0 + $1.normalLoad }
+        check(acceleratingFraction < frontStaticFraction - 0.01, "Acceleration transfers normal load towards the rear wheels")
+        for _ in 0..<60 {
+            loaded.step(dt, input: DrivingInput(brake: 1), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12)
+        }
+        let brakingFraction = (loaded.wheels[0].normalLoad + loaded.wheels[1].normalLoad) / loaded.wheels.reduce(0) { $0 + $1.normalLoad }
+        check(brakingFraction > frontStaticFraction + 0.03, "Braking transfers normal load towards the front wheels")
+        check(loaded.wheels.allSatisfy { $0.temperature.isFinite && $0.normalLoad >= 0 }, "Wheel temperatures and unilateral contact loads remain physical")
+
+        var locked = road
+        var noABS = DrivingAssists()
+        noABS.abs = false
+        for _ in 0..<80 {
+            locked.step(dt, input: DrivingInput(brake: 1), assists: noABS, roadDistance: 0, roadWidth: 12)
+        }
+        check(locked.speed > 3 && locked.wheels.contains(where: { $0.slipRatio < -0.8 }), "Braking without ABS can lock a rotating wheel while the car is moving")
+
+        var splitGrip = Vehicle()
+        for _ in 0..<240 {
+            splitGrip.step(dt, input: DrivingInput(throttle: 0.8), assists: DrivingAssists(), roadDistance: 6.7, roadWidth: 12, roadLateral: 6.7)
+        }
+        check(abs(splitGrip.wheels[2].longitudinalForce - splitGrip.wheels[3].longitudinalForce) > 50,
+              "Contact patches respond independently when one side is on grass")
+
+        check(circuit.length > 1000 && circuit.length < 2500, "Closed circuit length: \(Int(circuit.length)) metres")
+        let onTrack = circuit.nearest(to: circuit.start.point)
+        check(onTrack.distance < 0.05, "Track projection finds the start")
+        let a = circuit.sample(at: 100)
+        let b = circuit.sample(at: circuit.length + 100)
+        check(simd_distance(a.point, b.point) < 0.001, "Track sampling wraps continuously")
+        check(lapTime(65.123) == "1:05.123", "Lap formatter preserves milliseconds")
+
+        var session = RaceSession()
+        car.reset(at: circuit.start)
+        session.resetLap(at: 8)
+        // Drive the whole centreline to test ordered gates and a valid finish.
+        for step in 0...16000 {
+            let distance = 8 + Double(step) * 0.1
+            let sample = circuit.sample(at: distance)
+            car.position = sample.point
+            car.velocity = sample.tangent * 12
+            car.heading = atan2(sample.tangent.x, sample.tangent.y)
+            _ = session.step(dt, vehicle: car, location: circuit.nearest(to: car.position), trackLength: circuit.length, trackWidth: 12)
+            if session.completedLaps > 0 { break }
+        }
+        check(session.completedLaps == 1 && session.best != nil, "Ordered checkpoint traversal records a valid lap")
+        check(!session.bestGhost.isEmpty, "A valid best lap retains a ghost recording")
+        var recovery = RaceSession()
+        recovery.resetLap(at: circuit.length * 0.7)
+        check(recovery.checkpoint == 0 && recovery.elapsed == 0, "Recovery resets checkpoint and timing state")
+
+        if failures > 0 { exit(1) }
+        print("\nAll physics and timing checks passed.")
+    }
+}

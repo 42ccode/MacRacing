@@ -1,0 +1,24 @@
+.build/
+dist/
+.DS_Store
+
+# Local practice settings, telemetry and screenshots
+APEX Lab Data/
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.idea/
+.vscode/
+*.xcuserstate
+xcuserdata/
+
+# Python and editor caches
+__pycache__/
+*.py[cod]
+.venv/
+*.swp
+*.swo

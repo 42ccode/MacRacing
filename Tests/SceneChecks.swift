@@ -1,0 +1,149 @@
+import AppKit
+import SceneKit
+import simd
+
+@main
+struct SceneChecks {
+    static var failures = 0
+    static func check(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if condition() { print("PASS  \(message)") }
+        else { print("FAIL  \(message)"); failures += 1 }
+    }
+    // SceneKit's picking API can return no hits before a GPU renderer prepares
+    // the scene. Intersect the actual imported triangles in a renderer-free test.
+    static func occluder(_ root:SCNNode, from:SCNVector3, to:SCNVector3) -> String? {
+        func visit(_ node:SCNNode) -> String? {
+            if node.isHidden { return nil }
+            if let g=node.geometry, let source=g.sources(for:.vertex).first, source.bytesPerComponent==4 {
+                let a=node.simdConvertPosition(SIMD3(Float(from.x),Float(from.y),Float(from.z)),from:root)
+                let b=node.simdConvertPosition(SIMD3(Float(to.x),Float(to.y),Float(to.z)),from:root)
+                let d=b-a
+                // SceneKit's parametric shapes expose a unit mesh on some OS
+                // versions. Use their actual metre-sized bounds before the mesh.
+                let bounds = g.boundingBox
+                let lo = SIMD3<Float>(Float(bounds.min.x),Float(bounds.min.y),Float(bounds.min.z))
+                let hi = SIMD3<Float>(Float(bounds.max.x),Float(bounds.max.y),Float(bounds.max.z))
+                var near = Float(0.06)/(Float(to.z)-Float(from.z)), far:Float=1
+                for k in 0..<3 {
+                    if abs(d[k])<1e-8 {if a[k]<lo[k] || a[k]>hi[k] {far = -1};continue}
+                    let x=(lo[k]-a[k])/d[k],y=(hi[k]-a[k])/d[k]
+                    near=max(near,min(x,y)); far=min(far,max(x,y))
+                }
+                let inBounds = near<=far
+                if inBounds && (g is SCNPlane || g is SCNBox) {return node.name ?? "fixture"}
+                for (elementIndex,el) in g.elements.enumerated() where inBounds && (el.primitiveType == .triangles || el.primitiveType == .triangleStrip) {
+                    let m = g.materials.isEmpty ? nil : g.materials[elementIndex % g.materials.count]
+                    var detail = ""
+                    let hit = source.data.withUnsafeBytes { (verts:UnsafeRawBufferPointer) in
+                        el.data.withUnsafeBytes { (indices:UnsafeRawBufferPointer) in
+                            func v(_ slot:Int) -> SIMD3<Float> {
+                                let offset=slot*el.bytesPerIndex
+                                let i:Int
+                                switch el.bytesPerIndex {
+                                case 1: i=Int(indices[offset])
+                                case 2: i=Int(indices.loadUnaligned(fromByteOffset:offset,as:UInt16.self))
+                                default: i=Int(indices.loadUnaligned(fromByteOffset:offset,as:UInt32.self))
+                                }
+                                let p=source.dataOffset+i*source.dataStride
+                                return SIMD3(verts.loadUnaligned(fromByteOffset:p,as:Float.self),verts.loadUnaligned(fromByteOffset:p+4,as:Float.self),verts.loadUnaligned(fromByteOffset:p+8,as:Float.self))
+                            }
+                            for f in 0..<el.primitiveCount {
+                                let i = el.primitiveType == .triangles ? 3*f : f
+                                let p=v(i), e1=v(i+1)-p, e2=v(i+2)-p
+                                let h=simd_cross(d,e2), det=simd_dot(e1,h)
+                                if abs(det)<1e-9 {continue}
+                                if m?.isDoubleSided == false && ((m?.cullMode == .back && det < 0) || (m?.cullMode == .front && det > 0)) {continue}
+                                let t=a-p, u=simd_dot(t,h)/det
+                                if u<0 || u>1 {continue}
+                                let q=simd_cross(t,e1), w=simd_dot(d,q)/det
+                                if w<0 || u+w>1 {continue}
+                                let distance=simd_dot(e2,q)/det
+                                if distance>0.06/(Float(to.z)-Float(from.z)) && distance<=1 { detail = String(format:" %.3fm",distance*simd_length(d)); return true }
+                            }
+                            return false
+                        }
+                    }
+                    if hit {return (node.name ?? node.parent?.name ?? "mesh")+detail}
+                }
+            }
+            for child in node.childNodes { if let hit=visit(child) {return hit} }
+            return nil
+        }
+        return visit(root)
+    }
+    static func main() throws {
+        let assets = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        let gltf = try GLTFAsset(url: assets.appendingPathComponent("CarConcept/CarConcept.glb"))
+        let model = try gltf.makeScene()
+        let front = model.childNode(withName: "WheelFrontL", recursively: true)!
+        let expected = SIMD3<Float>(0.9754932, 0.383759, 1.4856806)
+        check(simd_distance(front.simdWorldPosition, expected) < 0.001,
+              "GLB fractional matrices retain wheel translation and coordinate conversion")
+        let column = model.childNode(withName: "InteriorSteeringCylinder", recursively: true)!
+        check(simd_distance(column.simdWorldPosition, SIMD3(0.0009215, 0.5512652, 1.1625408)) < 0.001,
+              "Cockpit steering column retains its authored transform")
+        let circuit = Circuit()
+        let world = RacingWorld(circuit: circuit, assetsDirectory: assets)
+        var vehicle = Vehicle()
+        vehicle.reset(at: circuit.start)
+        for index in 0..<200 {
+            vehicle.heading = Double(index) * 0.08
+            vehicle.position += vehicle.forward * 0.2
+            world.update(vehicle: vehicle, input: DrivingInput(), dt: 1.0 / 60, cockpit: false, ghost: nil)
+        }
+        check(simd_dot(world.camera.simdWorldUp, SIMD3<Float>(0, 1, 0)) > 0.90,
+              "Chase camera keeps a level horizon after multiple full rotations")
+        world.update(vehicle: vehicle, input: DrivingInput(), dt: 1.0 / 60, cockpit: true, ghost: nil)
+        let cameraForward = world.camera.simdWorldFront
+        let desiredForward = SIMD3<Float>(Float(vehicle.forward.x), 0, Float(vehicle.forward.y))
+        check(simd_dot(cameraForward, desiredForward) > 0.99, "Cockpit camera faces the vehicle's forward direction")
+        check(world.frontWheels.count == 2 && world.rollingWheels.count == 4,
+              "All four imported wheels are attached to animation pivots")
+        let steering = world.car.childNode(withName: "InteriorSteeringCylinder", recursively: true)!
+        check(abs(steering.simdWorldRight.y) < 0.001,
+              "Authored steering-wheel pose is neutralized when steering input is zero")
+        vehicle.reset(at: circuit.start)
+        for height in [1.00,1.05,1.10] {
+            world.seatHeight = height
+            world.update(vehicle: vehicle,input: DrivingInput(),dt:1/60,cockpit:true,ghost:nil)
+            let eye = world.car.convertPosition(world.camera.position,from:nil)
+            let blockers = [-0.55,0,0.55].compactMap { x in
+                occluder(world.car, from:eye,to:SCNVector3(x,height-0.09,3))
+            }
+            check(blockers.isEmpty,"Windscreen sight lines clear at eye height \(height)m: \(blockers)")
+        }
+        let eye = world.car.convertPosition(world.camera.position,from:nil)
+        let testRay = occluder(world.car,from:eye,to:SCNVector3(0,0.78,1.159))
+        check(testRay != nil,"Cabin visibility check detects a ray aimed at the dashboard: \(testRay ?? "none")")
+        world.resetCamera()
+        world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:false,ghost:nil)
+        let chase = world.car.convertPosition(world.camera.position,from:nil)
+        check(chase.z < -6 && chase.y > 2 && chase.y < 4,"Switching from cabin immediately places camera behind and above the whole car")
+        let seat = world.car.childNode(withName:"InteriorSeatsColor1",recursively:true)!
+        check(!seat.isHidden,"Cockpit-only geometry masking is cleared in exterior view")
+        for cockpit in [true,false] {
+            for inputSign in [-1.0,1.0] {
+                vehicle.reset(at:circuit.start)
+                for _ in 0..<220 { vehicle.step(1.0/120,input:DrivingInput(throttle:1),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
+                world.resetCamera()
+                world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:cockpit,ghost:nil)
+                let screenRight = world.camera.simdWorldRight
+                let origin = vehicle.position
+                let input = DrivingInput(throttle:0.5,steering:inputSign*0.65)
+                for _ in 0..<100 { vehicle.step(1.0/120,input:input,assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
+                let delta = vehicle.position-origin
+                let lateral = Double(screenRight.x)*delta.x + Double(screenRight.z)*delta.y
+                check(inputSign*lateral > 0.15,"Camera-relative turn in \(cockpit ? "cockpit" : "chase"), input \(inputSign), displacement \(String(format:"%.2f",lateral)) m")
+                var neutral = vehicle; neutral.steeringAngle = 0
+                world.update(vehicle:neutral,input:input,dt:0,cockpit:cockpit,ghost:nil)
+                let top = steering.simdConvertVector(SIMD3<Float>(0,1,0),from:nil)
+                let neutralWheel = world.frontWheels[0].simdConvertVector(SIMD3<Float>(0,0,1),to:nil)
+                world.update(vehicle:vehicle,input:input,dt:0,cockpit:cockpit,ghost:nil)
+                let turnedWheel = world.frontWheels[0].simdConvertVector(SIMD3<Float>(0,0,1),to:nil)
+                check(Double(simd_dot(turnedWheel-neutralWheel,screenRight))*inputSign>0 && Double(simd_dot(steering.simdConvertVector(top,to:nil)-SIMD3<Float>(0,1,0),screenRight))*inputSign>0,"Road wheels and cockpit steering rim agree with driver input")
+            }
+        }
+        if failures > 0 { exit(1) }
+        print("\nAll asset and camera checks passed.")
+    }
+}

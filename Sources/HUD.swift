@@ -100,6 +100,7 @@ final class HUDView: NSView {
             if game.showHUD {
                 drawCompactTiming(game, width: w, height: h)
                 drawPedals(game, height: h)
+                drawCondition(game, width: w)
                 if !game.cockpit { drawDashboard(game, width: w, height: h) }
             }
             if game.noticeRemaining > 0 {
@@ -111,10 +112,43 @@ final class HUDView: NSView {
                 text("本圈无效 · 驶回赛道，下圈重新计时", x: (w - 440) / 2, y: h - 266, size: 13,
                      color: NSColor(rgb: 0xFFD19A), weight: .semibold, width: 440, align: .center)
             }
+            if game.serviceRemaining > 0 {
+                panel(NSRect(x: (w-400)/2, y: 76, width: 400, height: 62))
+                text(String(format: "维修与换胎 · 剩余 %.1f 秒", game.serviceRemaining),
+                     x: (w-380)/2, y: 85, size: 17, weight: .semibold, width: 380, align: .center)
+                text("已拖回发车区 · 暂停时维修也暂停", x: (w-380)/2, y: 113,
+                     size: 11, color: muted, width: 380, align: .center)
+            }
             if game.isPaused { drawPause(game, width: w, height: h) }
         } else {
             drawWelcome(game, width: w, height: h)
         }
+    }
+
+    private func drawCondition(_ game: RacingGame, width: CGFloat) {
+        let x = width - 266, y: CGFloat = 78
+        panel(NSRect(x:x,y:y,width:250,height:229),color:NSColor(white:0.04,alpha:0.80),radius:3)
+        let car = game.vehicle
+        let warning = NSColor(rgb: 0xF2B875)
+        text("轮胎 / 车损",x:x+12,y:y+9,size:11,weight:.semibold)
+        text(car.wheels[0].setup.compound.label,x:x+170,y:y+9,size:11,color:muted,width:67,align:.right)
+        for (row, entry) in [("左前",1),("右前",0),("左后",3),("右后",2)].enumerated() {
+            let wheel = car.wheels[entry.1]
+            let rowY = y+34+CGFloat(row)*28
+            let alert = wheel.punctured || wheel.wear > 0.65 || wheel.temperature > 120 || wheel.pressure < 1.2
+            text(entry.0,x:x+12,y:rowY,size:11,color:muted,width:32)
+            text(String(format:"%.0f°C  %.2f bar",wheel.temperature,wheel.pressure),
+                 x:x+49,y:rowY,size:11,color:alert ? warning : white,mono:true,width:112)
+            let status = wheel.punctured ? "爆胎" : String(format:"余量 %.0f%%",(1-wheel.wear)*100)
+            text(status,x:x+167,y:rowY,size:10,color:alert ? warning : muted,width:74,align:.right)
+        }
+        line(CGPoint(x:x+12,y:y+148),CGPoint(x:x+238,y:y+148),color:white.withAlphaComponent(0.15))
+        let suspension = car.damage.suspension.max() ?? 0
+        text(String(format:"车头 %.0f%%   车尾 %.0f%%",car.damage.front*100,car.damage.rear*100),
+             x:x+12,y:y+156,size:11,color:car.damage.worst > 0.3 ? warning : muted)
+        text(String(format:"悬架 %.0f%%   引擎 %.0f%%   水温 %.0f°C",suspension*100,car.damage.engine*100,car.coolantTemperature),
+             x:x+12,y:y+176,size:10,color:car.damage.worst > 0.3 ? warning : muted,width:230)
+        text("损伤 0% 为完好 · P / 十字键↓ 维修",x:x+12,y:y+205,size:9,color:muted,width:230)
     }
 
     private func drawCompactTiming(_ game: RacingGame, width: CGFloat, height: CGFloat) {
@@ -157,7 +191,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    SIMULATION STUDY  0.4", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.0", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -202,8 +236,8 @@ final class HUDView: NSView {
         // Clear obscured click targets: only this modal can receive clicks.
         actions = []
         let x = (width - 550) / 2
-        let y = max(90, (height - 504) / 2)
-        panel(NSRect(x: x, y: y, width: 550, height: 504), color: NSColor(rgb: 0x191B1D, alpha: 0.99), radius: 16)
+        let y = max(20, (height - 626) / 2)
+        panel(NSRect(x: x, y: y, width: 550, height: 626), color: NSColor(rgb: 0x191B1D, alpha: 0.99), radius: 16)
         text("SESSION PAUSED", x: x + 28, y: y + 24, size: 10, color: lime, weight: .bold)
         text(game.showHelp ? "驾驶操作" : "练习已暂停", x: x + 27, y: y + 52, size: 26, weight: .bold)
         button(game.cockpit ? "车内 → 车外" : "车外 → 车内", NSRect(x:x+380,y:y+51,width:142,height:32), action:"camera")
@@ -212,7 +246,7 @@ final class HUDView: NSView {
             ("油门 / 刹车", "RT / LT", "W / S 或 ↑ / ↓"),
             ("升挡 / 降挡", "B / X 或 RB / LB", "E / Q"),
             ("切换视角", "Y", "Tab"),
-            ("车辆复位", "长按 A", "R"),
+            ("复位（保留车损）", "长按 A", "R"),
             ("暂停 / 继续", "Menu", "Esc")
         ]
         text("操作", x: x + 29, y: y + 111, size: 10, color: muted)
@@ -232,7 +266,14 @@ final class HUDView: NSView {
         button("−", NSRect(x: x + 147, y: y + 386, width: 34, height: 28), action: "deadzoneDown")
         button("+", NSRect(x: x + 190, y: y + 386, width: 34, height: 28), action: "deadzoneUp")
         button(game.ghostEnabled ? "幽灵车 开" : "幽灵车 关", NSRect(x: x + 373, y: y + 386, width: 149, height: 28), action: "ghost", active: game.ghostEnabled)
-        button("重新开始", NSRect(x: x + 28, y: y + 437, width: 150, height: 42), action: "restart")
-        button("继续驾驶    →", NSRect(x: x + 190, y: y + 437, width: 332, height: 42), action: "resume", primary: true)
+        button("下次换胎：\(game.tyreSetup.compound.label)",NSRect(x:x+28,y:y+433,width:174,height:32),action:"compound")
+        text(String(format:"冷压 %.2f bar",game.tyreSetup.coldPressure),x:x+219,y:y+442,size:11,color:muted,width:118)
+        button("−",NSRect(x:x+373,y:y+435,width:65,height:28),action:"pressureDown")
+        button("+",NSRect(x:x+450,y:y+435,width:72,height:28),action:"pressureUp")
+        text("配方 / 冷压在维修换胎或重新开始时生效",x:x+29,y:y+475,size:10,color:muted,width:490)
+        button(game.serviceRemaining > 0 ? "正在维修 · 继续后完成" : "拖回维修区 · 修车换胎 12 秒  [ P / 十字键↓ ]",
+               NSRect(x:x+28,y:y+500,width:494,height:32),action:"service")
+        button("重新开始", NSRect(x: x + 28, y: y + 555, width: 150, height: 42), action: "restart")
+        button("继续驾驶    →", NSRect(x: x + 190, y: y + 555, width: 332, height: 42), action: "resume", primary: true)
     }
 }

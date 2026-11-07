@@ -14,6 +14,27 @@ struct DrivingAssists {
     var steeringDeadzone = 0.08
 }
 
+enum TyreCompound: Int, CaseIterable {
+    case soft, medium, hard
+    var label: String { ["软胎", "中性胎", "硬胎"][rawValue] }
+    var grip: Double { [1.05, 1.0, 0.96][rawValue] }
+    var wearRate: Double { [1.6, 1.0, 0.65][rawValue] }
+    var optimum: Double { [75, 85, 95][rawValue] }
+}
+
+struct TyreSetup {
+    var compound = TyreCompound.medium
+    var coldPressure = 1.65 // gauge bar at 26 C, prototype dry tyre
+}
+
+struct VehicleDamage {
+    var front = 0.0
+    var rear = 0.0
+    var engine = 0.0
+    var suspension = [Double](repeating: 0, count: 4)
+    var worst: Double { ([front, rear, engine] + suspension).max() ?? 0 }
+}
+
 struct WheelState {
     var angularVelocity = 0.0
     var rotation = 0.0
@@ -22,7 +43,41 @@ struct WheelState {
     var normalLoad = 0.0
     var longitudinalForce = 0.0
     var lateralForce = 0.0
-    var temperature = 38.0
+    var temperature = 38.0 // tread surface C
+    var coreTemperature = 38.0
+    var wear = 0.0 // 0 new, 1 worn through
+    var flatSpot = 0.0
+    var punctured = false
+    var airRetention = 1.0
+    var setup = TyreSetup()
+    var pressure: Double {
+        max(0, ((setup.coldPressure + 1.013) * (coreTemperature + 273.15) / 299.15 - 1.013) * airRetention)
+    }
+    var gripFactor: Double {
+        let thermal = clamp(1 - abs(temperature - setup.compound.optimum) * 0.003, 0.62, 1)
+        let pressureLoss = min(0.30, abs(pressure - 2.05) * 0.22)
+        return setup.compound.grip * thermal * (1 - pressureLoss) * (1 - 0.40 * wear * wear)
+            * (1 - flatSpot * 0.12) * (punctured ? 0.28 : 1)
+    }
+    var radiusScale: Double { punctured ? 0.84 : 1 - flatSpot * 0.006 }
+
+    mutating func evolve(_ dt: Double, slipPower: Double, speed: Double, load: Double, locked: Bool, grass: Bool) {
+        let heat = min(max(slipPower, 0), 150000)
+        let conduction = (temperature - coreTemperature) * 0.045
+        temperature += (heat / 4800 + load * abs(speed) * 0.000006 - conduction
+            - (temperature - 26) * (0.012 + abs(speed) * 0.0006)) * dt
+        coreTemperature += (conduction * 0.28 - (coreTemperature - 26) * 0.002) * dt
+        temperature = clamp(temperature, 26, 220)
+        coreTemperature = clamp(coreTemperature, 26, 150)
+        let abrasion = heat / 16000000 + abs(speed) / 3500000 * min(load / 3100, 2)
+        wear = clamp(wear + abrasion * setup.compound.wearRate * (grass ? 1.3 : 1)
+            * (temperature > 120 ? 1 + (temperature - 120) / 40 : 1) * dt, 0, 1)
+        if locked && speed > 5 && load > 100 {
+            flatSpot = min(1, flatSpot + heat / 1800000 * dt)
+        }
+        if wear >= 1 || flatSpot >= 1 { punctured = true }
+        if punctured { airRetention = max(0, airRetention - dt * 0.6) }
+    }
     var brakePressure = 1.0
     var surfaceHeight = 0.0
 }
@@ -43,6 +98,8 @@ struct Vehicle {
     var tcActive = false
     var absActive = false
     var distanceTravelled = 0.0
+    var damage = VehicleDamage()
+    var coolantTemperature = 85.0
     var wheels = [WheelState](repeating: WheelState(), count: 4)
     var heave = 0.0
     var roll = 0.0
@@ -69,8 +126,52 @@ struct Vehicle {
     }
     var forwardSpeed: Double { simd_dot(velocity, forward) }
 
-    mutating func reset(at sample: TrackSample) {
+    var powerFactor: Double { max(0.08, 1 - damage.engine * 0.85 - max(0, coolantTemperature - 115) * 0.012) }
+
+    func wheelSteer(_ index: Int) -> Double {
+        (index < 2 ? steeringAngle : 0) + damage.suspension[index] * (index % 2 == 0 ? -0.10 : 0.10)
+    }
+
+    mutating func impact(normalSpeed: Double, outwardNormal: SIMD2<Double>) {
+        guard normalSpeed.isFinite, normalSpeed > 1.5 else { return }
+        let severity = clamp(pow((normalSpeed - 1.5) / 18, 2), 0, 1)
+        let nose = simd_dot(outwardNormal, forward)
+        let side = simd_dot(outwardNormal, modelX)
+        if nose >= 0 { damage.front = min(1, damage.front + severity * (0.35 + 0.65 * abs(nose))) }
+        else { damage.rear = min(1, damage.rear + severity * (0.35 + 0.65 * abs(nose))) }
+        damage.engine = min(1, damage.engine + severity * max(0, nose) * 0.50)
+        let axle = nose >= 0 ? 0 : 2
+        let sideIndex = side >= 0 ? 1 : 0
+        for index in 0..<4 {
+            let axleWeight = index / 2 == axle / 2 ? 1.0 : 0.2
+            let sideWeight = abs(side) < 0.25 ? 0.65 : (index % 2 == sideIndex ? 1.0 : 0.10)
+            let hit = severity * axleWeight * sideWeight
+            damage.suspension[index] = min(1, damage.suspension[index] + hit)
+            if hit > 0.48 { wheels[index].punctured = true }
+        }
+    }
+
+    mutating func service(setup: TyreSetup) {
+        damage = VehicleDamage()
+        coolantTemperature = 85
+        wheels = (0..<4).map { _ in var w = WheelState(); w.setup = setup; return w }
+    }
+
+    mutating func reset(at sample: TrackSample, preservingCondition: Bool = false) {
+        let oldWheels = wheels, oldDamage = damage, oldCoolant = coolantTemperature
         self = Vehicle()
+        if preservingCondition {
+            damage = oldDamage; coolantTemperature = oldCoolant
+            for i in 0..<4 {
+                wheels[i].setup = oldWheels[i].setup
+                wheels[i].temperature = oldWheels[i].temperature
+                wheels[i].coreTemperature = oldWheels[i].coreTemperature
+                wheels[i].wear = oldWheels[i].wear
+                wheels[i].flatSpot = oldWheels[i].flatSpot
+                wheels[i].punctured = oldWheels[i].punctured
+                wheels[i].airRetention = oldWheels[i].airRetention
+            }
+        }
         position = sample.point
         heading = atan2(sample.tangent.x, sample.tangent.y)
     }
@@ -115,7 +216,13 @@ struct Vehicle {
             if rpm > 6500 && gear < 6 { shift(1) }
             else if rpm < 2450 && gear > 1 { shift(-1) }
         }
-        let engineTorque = (235 + 65 * sin(clamp((rpm - 1000) / 6500, 0, 1) * .pi)) * throttle
+        let engineTorque = powerFactor * (235 + 65 * sin(clamp((rpm - 1000) / 6500, 0, 1) * .pi)) * throttle
+        // Thermostat restricts cooling below operating temperature; nose damage
+        // reduces radiator capacity rather than cooling an idling engine to ambient.
+        coolantTemperature += ((0.35 + throttle * 1.8 + damage.front * 0.6) -
+            max(0, coolantTemperature - 80) * (0.085 + abs(vf) * 0.0025) * (1 - damage.front * 0.88)) * dt
+        coolantTemperature = clamp(coolantTemperature, 26, 160)
+        damage.engine = min(1, damage.engine + max(0, coolantTemperature - 125) * dt * 0.00015)
         let engineDrag = throttle < 0.05 && abs(vf) > 0.8 ? 26.0 : 0.0
         let axleTorque = (engineTorque * ignitionFraction - engineDrag) * gearRatios[gear - 1] * 3.9 * 0.91
         let diffTransfer = clamp((wheels[3].angularVelocity - wheels[2].angularVelocity) * 15, -350, 350)
@@ -143,12 +250,14 @@ struct Vehicle {
             let z = zs[i]
             let onGrass = abs(lateral + x) > roadWidth / 2 + (kerbsEnabled ? 0.85 : 0.35)
             let onKerb = kerbsEnabled && abs(lateral + x) > roadWidth / 2 && !onGrass
-            let surfaceHeight = onKerb ? 0.030 + 0.012 * sin((progress + z) * 7) : 0.0
+            let vibration = wheel.flatSpot * 0.003 * cos(wheel.rotation) * min(abs(vf) / 5, 1)
+            let surfaceHeight = (onKerb ? 0.030 + 0.012 * sin((progress + z) * 7) : 0.0)
+                - wheelRadius * (1 - wheel.radiusScale) + vibration
             let roadVerticalSpeed = clamp((surfaceHeight - wheel.surfaceHeight) / dt, -0.7, 0.7)
             wheel.surfaceHeight = surfaceHeight
             let staticLoad = weight * (i < 2 ? lr : lf) / wheelbase / 2
-            let springRate = i < 2 ? 46000.0 : 49000.0
-            let damper = i < 2 ? 2900.0 : 3100.0
+            let springRate = (i < 2 ? 46000.0 : 49000.0) * (1 - damage.suspension[i] * 0.45)
+            let damper = (i < 2 ? 2900.0 : 3100.0) * (1 - damage.suspension[i] * 0.60)
             let deflection = heave + pitch * z + roll * x - surfaceHeight
             let deflectionRate = heaveRate + pitchRate * z + rollRate * x - roadVerticalSpeed
             let load = clamp(staticLoad - springRate * deflection - damper * deflectionRate, 0, staticLoad * 4)
@@ -156,21 +265,21 @@ struct Vehicle {
             verticalForce += load
             rollTorque += x * load
             pitchTorque += z * load
-            let steer = i < 2 ? steeringAngle : 0.0
+            let steer = wheelSteer(i)
+            let radius = wheelRadius * wheel.radiusScale
             let c = cos(steer)
             let s = sin(steer)
             let cornerForward = vf - yawRate * x
             let cornerLateral = vl + yawRate * z
             let u = cornerForward * c + cornerLateral * s
             let v = cornerLateral * c - cornerForward * s
-            let temperatureFactor = 1 - 0.13 * min(abs(wheel.temperature - 75) / 50, 1)
             let loadSensitivity = pow(3100 / max(load, 100), 0.09)
-            let peakMu = (onGrass ? 0.48 : 1.24) * temperatureFactor * loadSensitivity
+            let peakMu = (onGrass ? 0.48 : 1.24) * wheel.gripFactor * loadSensitivity
             let capacity = max(1, load * peakMu)
             let slipAngle = atan2(v, max(abs(u), 1.5))
 
             func forces(_ omega: Double) -> (fx: Double, fy: Double, ratio: Double) {
-                let longitudinalSlip = omega * wheelRadius - u
+                let longitudinalSlip = omega * radius - u
                 let slipRatio = longitudinalSlip / max(abs(u), 2)
                 let stiffnessScale = pow(max(load, 1) / 3100, 0.82)
                 let linearX = 65000 * stiffnessScale * slipRatio
@@ -185,7 +294,7 @@ struct Vehicle {
 
             var driveTorque = driveTorques[i]
             if assists.tractionControl && driveTorque > 0 {
-                let gripTorque = capacity * wheelRadius * 0.93
+                let gripTorque = capacity * radius * 0.93
                 let slipCut = clamp(1 - max(0, wheel.slipRatio - 0.08) * 4, 0.12, 1)
                 let limited = min(driveTorque, gripTorque) * slipCut
                 if limited < driveTorque * 0.98 { tcActive = true }
@@ -199,7 +308,7 @@ struct Vehicle {
             let inertia = 1.7
             let previousOmega = wheel.angularVelocity
             func balance(_ omega: Double) -> Double {
-                inertia * (omega - previousOmega) / dt - driveTorque + forces(omega).fx * wheelRadius
+                inertia * (omega - previousOmega) / dt - driveTorque + forces(omega).fx * radius
             }
             let atRest = balance(0)
             let omega: Double
@@ -208,7 +317,7 @@ struct Vehicle {
             } else {
                 let sign = atRest < 0 ? 1.0 : -1.0
                 let centre = previousOmega + driveTorque * dt / inertia
-                let span = (capacity * wheelRadius + brakeTorque) * dt / inertia + 1
+                let span = (capacity * radius + brakeTorque) * dt / inertia + 1
                 var lo = centre - span
                 var hi = centre + span
                 // Implicit angular integration avoids low-speed numerical wheel chatter.
@@ -225,9 +334,9 @@ struct Vehicle {
             wheel.slipAngle = slipAngle
             wheel.longitudinalForce = contact.fx
             wheel.lateralForce = contact.fy
-            let heat = abs(contact.fx * (omega * wheelRadius - u)) + abs(contact.fy * v)
-            wheel.temperature += (heat / 8500 - (wheel.temperature - 26) * (0.004 + abs(u) * 0.00025)) * dt
-            wheel.temperature = clamp(wheel.temperature, 26, 180)
+            let heat = abs(contact.fx * (omega * radius - u)) + abs(contact.fy * v)
+            wheel.evolve(dt, slipPower: heat, speed: abs(u), load: load,
+                         locked: contact.ratio < -0.8, grass: onGrass)
             let fx = contact.fx * c - contact.fy * s
             let fy = contact.fx * s + contact.fy * c
             totalFx += fx
@@ -237,9 +346,10 @@ struct Vehicle {
             wheels[i] = wheel
         }
 
-        let drag = 0.43 * vf * abs(vf)
+        let drag = (0.43 + damage.front * 0.22 + damage.rear * 0.13) * vf * abs(vf)
         let offroadFraction = Double(wheels.enumerated().filter { abs(lateral + xs[$0.offset]) > roadWidth / 2 + 0.95 }.count) / 4
-        let rollingDemand = weight * (0.013 + offroadFraction * 0.055)
+        let flatCount = Double(wheels.filter { $0.punctured }.count)
+        let rollingDemand = weight * (0.013 + offroadFraction * 0.055 + flatCount * 0.018)
         let rolling = (vf >= 0 ? 1.0 : -1.0) * min(rollingDemand, abs(vf) * mass / dt)
         totalFx -= drag + rolling
         let ax = totalFx / mass
@@ -259,7 +369,7 @@ struct Vehicle {
         lateralG += (ay / 9.81 - lateralG) * min(1, dt * 12)
         longitudinalG += (ax / 9.81 - longitudinalG) * min(1, dt * 12)
         tyreSlip = maximumSlip
-        let downforce = speed * speed * 0.80
+        let downforce = speed * speed * 0.80 * (1 - damage.rear * 0.65)
         heaveRate += ((verticalForce - weight - downforce) / mass) * dt
         rollRate += (rollTorque + mass * ay * 0.44) / 520 * dt
         pitchRate += (pitchTorque + mass * ax * 0.44) / 1900 * dt

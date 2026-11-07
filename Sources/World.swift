@@ -41,6 +41,14 @@ final class RacingWorld {
     private let sunlight = SCNNode()
     var frontWheels: [SCNNode] = []
     var rollingWheels: [SCNNode] = []
+    private struct DamageMesh {
+        let node: SCNNode
+        let original: SCNGeometry
+        let vertices: [SIMD3<Float>]
+        let toBody: simd_float4x4
+    }
+    private var damageMeshes: [DamageMesh] = []
+    private var renderedDamage = SIMD2<Double>.zero
     private var brakeLights: [SCNMaterial] = []
     private var cameraPosition = SIMD3<Float>.zero
     private var cameraReady = false
@@ -208,6 +216,23 @@ final class RacingWorld {
         displayNode.eulerAngles.y = .pi
         body.addChildNode(displayNode)
         buildRearWing()
+        let deformable: Set<String> = ["BodyHood", "BodyHoodTopgrill", "BodyPanelsColor2",
+            "BodyRearPanelsColor1", "BodyHeadlights", "BodyTaillightsPanels", "BodyTaillights"]
+        model.enumerateChildNodes { node, _ in
+            guard deformable.contains(node.parent?.name ?? ""), let geometry = node.geometry,
+                  let source = geometry.sources(for: .vertex).first,
+                  source.usesFloatComponents, source.bytesPerComponent == 4 else { return }
+            let vertices = source.data.withUnsafeBytes { data in
+                (0..<source.vectorCount).map { i -> SIMD3<Float> in
+                    let offset = source.dataOffset + i * source.dataStride
+                    return SIMD3(data.loadUnaligned(fromByteOffset:offset,as:Float.self),
+                                 data.loadUnaligned(fromByteOffset:offset+4,as:Float.self),
+                                 data.loadUnaligned(fromByteOffset:offset+8,as:Float.self))
+                }
+            }
+            self.damageMeshes.append(DamageMesh(node:node, original:geometry, vertices:vertices,
+                toBody:self.body.simdWorldTransform.inverse * node.simdWorldTransform))
+        }
         let ghostPaint = material(NSColor(rgb: 0xB7D2D9))
         ghostPaint.transparency = 0.16
         ghostPaint.writesToDepthBuffer = false
@@ -221,6 +246,31 @@ final class RacingWorld {
         ghostCar.addChildNode(ghostMesh)
         ghostCar.isHidden = true
         scene.rootNode.addChildNode(ghostCar)
+    }
+
+    private func updateDamage(_ damage: VehicleDamage) {
+        let current = SIMD2(damage.front, damage.rear)
+        guard simd_distance(current, renderedDamage) > 0.005 || (current == .zero && renderedDamage != .zero) else { return }
+        renderedDamage = current
+        for mesh in damageMeshes {
+            if current == .zero { mesh.node.geometry = mesh.original; continue }
+            let inverse = mesh.toBody.inverse
+            let vertices = mesh.vertices.map { v -> SCNVector3 in
+                var p = mesh.toBody * SIMD4(v.x, v.y, v.z, 1)
+                let front = Float(damage.front) * min(1, max(0, (p.z - 0.9) / 1.3))
+                let rear = Float(damage.rear) * min(1, max(0, (-p.z - 0.8) / 1.2))
+                p.z += -front * 0.32 + rear * 0.27
+                p.y += (front + rear) * (0.045 + 0.025 * sin(p.x * 17))
+                let local = inverse * p
+                return SCNVector3(local.x, local.y, local.z)
+            }
+            // A bounded visual approximation; original topology, UVs and material
+            // remain intact. Physics damage is independent of this exterior mesh.
+            let geometry = SCNGeometry(sources: [SCNGeometrySource(vertices:vertices)] +
+                mesh.original.sources.filter { $0.semantic != .vertex }, elements:mesh.original.elements)
+            geometry.materials = mesh.original.materials
+            mesh.node.geometry = geometry
+        }
     }
 
     func resetCamera() { cameraReady = false }
@@ -272,6 +322,7 @@ final class RacingWorld {
     }
 
     func update(vehicle: Vehicle, input: DrivingInput, dt: Double, cockpit: Bool, ghost: GhostFrame?) {
+        updateDamage(vehicle.damage)
         car.position = vector(vehicle.position)
         sunlight.position = vector(vehicle.position, y: 60)
         // The renderer has no glTF transmission path. Clear the cabin glazing in
@@ -284,7 +335,16 @@ final class RacingWorld {
         body.position.y = CGFloat(vehicle.heave)
         body.eulerAngles.z = CGFloat(vehicle.roll)
         body.eulerAngles.x = CGFloat(-vehicle.pitch)
-        frontWheels.forEach { $0.eulerAngles.y = CGFloat(vehicle.steeringAngle) }
+        for (index, pivot) in wheelPivots.enumerated() {
+            pivot.eulerAngles.y = CGFloat(vehicle.wheelSteer(index))
+            pivot.eulerAngles.z = CGFloat(vehicle.damage.suspension[index] * (index % 2 == 0 ? 0.16 : -0.16))
+            pivot.scale.y = CGFloat(vehicle.wheels[index].radiusScale)
+        }
+        if let wing = body.childNode(withName: "ClubRearWing", recursively: false) {
+            wing.eulerAngles.z = CGFloat(vehicle.damage.rear * 0.18)
+            wing.eulerAngles.x = CGFloat(vehicle.damage.rear * 0.12)
+            wing.position.y = CGFloat(-vehicle.damage.rear * 0.12)
+        }
         for (index, wheel) in rollingWheels.enumerated() {
             wheel.eulerAngles.x = CGFloat(vehicle.wheels[index].rotation)
             wheelPivots[index].position.y = wheelBaseHeights[index] + CGFloat(vehicle.wheels[index].surfaceHeight)

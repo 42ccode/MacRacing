@@ -143,6 +143,22 @@ struct SceneChecks {
                 check(Double(simd_dot(turnedWheel-neutralWheel,screenRight))*inputSign>0 && Double(simd_dot(steering.simdConvertVector(top,to:nil)-SIMD3<Float>(0,1,0),screenRight))*inputSign>0,"Road wheels and cockpit steering rim agree with driver input")
             }
         }
+        vehicle.reset(at:circuit.start)
+        world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:false,ghost:nil)
+        let hoodMesh = world.body.childNode(withName:"BodyHood",recursively:true)!.childNodes.first { $0.geometry != nil }!
+        let originalHood = hoodMesh.geometry!.sources(for:.vertex)[0].data
+        vehicle.impact(normalSpeed:22,outwardNormal:vehicle.forward)
+        vehicle.damage.rear = 0.7
+        world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:false,ghost:nil)
+        check(hoodMesh.geometry!.sources(for:.vertex)[0].data != originalHood,
+              "Nose impact visibly deforms exterior body geometry")
+        let wing = world.body.childNode(withName:"ClubRearWing",recursively:false)!
+        check(abs(wing.eulerAngles.z) > 0.1 && world.frontWheels.contains { $0.scale.y < 0.9 },
+              "Rear damage bends the wing and punctured wheels lose radius")
+        vehicle.service(setup:TyreSetup())
+        world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:true,ghost:nil)
+        check(hoodMesh.geometry!.sources(for:.vertex)[0].data == originalHood && wing.eulerAngles.z == 0 && world.frontWheels.allSatisfy { $0.scale.y == 1 },
+              "Repair restores original body geometry, wheel shape and wing alignment")
         if failures > 0 { exit(1) }
         print("\nAll asset and camera checks passed.")
     }

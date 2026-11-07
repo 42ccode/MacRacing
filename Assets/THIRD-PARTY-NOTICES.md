@@ -8,7 +8,7 @@ Source: [Khronos glTF Sample Assets — Car Concept](https://github.com/KhronosG
 
 License: [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/).
 
-The original `CarConcept.glb`, metadata and README are included. The application converts its coordinates at runtime, neutralizes the authored front-wheel steering pose, animates wheels/steering/brake lights, changes body and cockpit materials, adds a prototype rear wing, and approximates glTF transmission in SceneKit. The demonstration vehicle's appearance does not establish real-world dynamics parameters.
+The original `CarConcept.glb`, metadata and README are included. The application converts its coordinates at runtime, neutralizes the authored front-wheel steering pose, animates wheels/steering/brake lights, changes body and cockpit materials, adds a prototype rear wing, applies bounded exterior panel deformation and wheel/wing damage poses in 1.0, and approximates glTF transmission in SceneKit. The demonstration vehicle's appearance does not establish real-world dynamics parameters.
 
 Khronos and 3D Commerce logos are retained within the model as provided. Those marks remain owned by The Khronos Group; the model license does not grant rights to use them outside this context. This application is not affiliated with or endorsed by Khronos or Darmstadt Graphics Group.
 

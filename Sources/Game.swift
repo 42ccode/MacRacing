@@ -14,6 +14,8 @@ struct SavedPractice: Codable {
     let cockpit: Bool?
     let verticalFOV: Double?
     let eyeHeight: Double?
+    let compound: Int?
+    let coldPressure: Double?
 }
 
 final class RacingGame {
@@ -34,6 +36,8 @@ final class RacingGame {
     var cockpit = true
     var ghostEnabled = true
     var showHUD = true
+    var tyreSetup = TyreSetup()
+    var serviceRemaining = 0.0
     var notice = ""
     var noticeRemaining = 0.0
     private var timer: Timer?
@@ -43,7 +47,7 @@ final class RacingGame {
     private var sceneDirty = true
     private var collisionCooldown = 0.0
     private var telemetryClock = 0.0
-    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap"]
+    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c"]
     private let fixedStep = 1.0 / 240
 
     private var dataDirectory: URL {
@@ -85,7 +89,16 @@ final class RacingGame {
         drivingInput = input.read(dt: dt, deadzone: assists.steeringDeadzone, acceptDriving: hasStarted && !isPaused)
         // Button handlers can change pause state during polling.
         if isPaused || wasPaused { drivingInput = DrivingInput() }
-        if !isPaused && hasStarted {
+        if !isPaused && hasStarted && serviceRemaining > 0 {
+            drivingInput = DrivingInput()
+            accumulator = 0
+            serviceRemaining = max(0, serviceRemaining - dt)
+            if serviceRemaining == 0 {
+                vehicle.service(setup: tyreSetup)
+                world.resetCamera()
+                announce("维修完成 · 新胎需要暖胎", duration: 5)
+            }
+        } else if !isPaused && hasStarted {
             accumulator += dt
             while accumulator >= fixedStep {
                 simulate(fixedStep)
@@ -96,7 +109,7 @@ final class RacingGame {
         let kerb = location.distance > 5.75 && location.distance < 7.15 && vehicle.speed > 3 && circuit.hasKerb(at: location.progress)
         let rumble = isPaused ? 0 : ((kerb ? 0.22 : 0) + vehicle.tyreSlip * min(vehicle.speed / 12, 1) * 0.3 + (collisionCooldown > 0.2 ? 0.4 : 0))
         input.rumble(rumble, dt: dt)
-        sound.update(rpm: vehicle.rpm, throttle: drivingInput.throttle, ignition: vehicle.ignitionFraction, cockpit: cockpit, paused: isPaused || !hasStarted)
+        sound.update(rpm: vehicle.rpm, throttle: drivingInput.throttle, ignition: vehicle.ignitionFraction, cockpit: cockpit, paused: isPaused || !hasStarted || serviceRemaining > 0)
         let ghost = ghostEnabled && hasStarted ? session.ghost(at: session.elapsed) : nil
         let running = hasStarted && !isPaused
         if sceneView.isPlaying != running {
@@ -128,11 +141,14 @@ final class RacingGame {
             vehicle.position = location.point + normal * 15.0
             let impact = simd_dot(vehicle.velocity, normal)
             if impact > 0 {
+                if collisionCooldown <= 0 {
+                    vehicle.impact(normalSpeed: impact, outwardNormal: normal)
+                }
                 vehicle.velocity -= normal * impact * 1.20
                 vehicle.velocity *= 0.62
                 vehicle.yawRate *= 0.5
                 collisionCooldown = 0.4
-                announce("碰到护栏 · 长按 A 或按 R 回到赛道", duration: 3)
+                announce("碰撞损伤 · R 复位保留车损 · P 返回维修", duration: 3)
             }
         }
         if session.step(dt, vehicle: vehicle, location: location, trackLength: circuit.length, trackWidth: circuit.width) {
@@ -148,7 +164,10 @@ final class RacingGame {
                 telemetry.append(String(format: "%.3f,%.3f,%.3f,%.2f,%d,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%d",
                     session.elapsed, vehicle.position.x, vehicle.position.y, vehicle.speedKPH, vehicle.gear,
                     vehicle.rpm, drivingInput.throttle, drivingInput.brake, drivingInput.steering,
-                    vehicle.lateralG, vehicle.longitudinalG, session.validLap ? 1 : 0))
+                    vehicle.lateralG, vehicle.longitudinalG, session.validLap ? 1 : 0)
+                    + (vehicle.wheels.map { $0.temperature } + vehicle.wheels.map { $0.pressure }
+                        + vehicle.wheels.map { $0.wear } + [vehicle.damage.front, vehicle.damage.rear,
+                            vehicle.damage.engine, vehicle.coolantTemperature]).map { String(format: ",%.4f", $0) }.joined())
             }
         }
     }
@@ -169,6 +188,27 @@ final class RacingGame {
     func action(_ action: String) {
         sceneDirty = true
         switch action {
+        case "service":
+            guard hasStarted && serviceRemaining == 0 else { return }
+            saveTelemetry()
+            vehicle.reset(at: circuit.start, preservingCondition: true)
+            location = circuit.nearest(to: vehicle.position)
+            session.resetLap(at: location.progress)
+            serviceRemaining = 12
+            collisionCooldown = 0
+            accumulator = 0
+            isPaused = false
+            showHelp = false
+            input.clear()
+            world.resetCamera()
+        case "compound":
+            guard isPaused && serviceRemaining == 0 else { return }
+            tyreSetup.compound = TyreCompound(rawValue: (tyreSetup.compound.rawValue + 1) % 3)!
+            savePractice()
+        case "pressureDown", "pressureUp":
+            guard isPaused && serviceRemaining == 0 else { return }
+            tyreSetup.coldPressure = clamp(tyreSetup.coldPressure + (action == "pressureUp" ? 0.05 : -0.05), 1.3, 2.1)
+            savePractice()
         case "hud": showHUD.toggle()
         case "statistics": sceneView.showsStatistics.toggle()
         case "fovDown": world.cockpitFOV = max(42,world.cockpitFOV-2)
@@ -210,19 +250,20 @@ final class RacingGame {
             showHelp = false
         case "reset":
             guard hasStarted else { self.action("start"); return }
+            guard serviceRemaining == 0 else { return }
             let sample = circuit.sample(at: location.progress)
-            vehicle.reset(at: sample)
+            vehicle.reset(at: sample, preservingCondition: true)
             location = circuit.nearest(to: vehicle.position)
             session.resetLap(at: location.progress)
             world.resetCamera()
-            announce(location.progress > 20 ? "车辆已复位 · 通过起点后重新计时" : "车辆已复位 · 本圈重新开始", duration: 4)
+            announce(location.progress > 20 ? "已复位，保留车损 · 通过起点后计时" : "已复位，保留车损 · 本圈重新开始", duration: 4)
         case "camera", "viewCabin", "viewChase":
             cockpit = action == "camera" ? !cockpit : action == "viewCabin"
             world.resetCamera()
             if hasStarted { announce(cockpit ? "车内 · 驾驶舱" : "车外 · 后方跟车", duration: 1.5) }
             savePractice()
-        case "upshift": if !assists.automatic && !isPaused { vehicle.shift(1) }
-        case "downshift": if !assists.automatic && !isPaused { vehicle.shift(-1) }
+        case "upshift": if !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(1) }
+        case "downshift": if !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(-1) }
         case "abs": assists.abs.toggle(); savePractice()
         case "tc": assists.tractionControl.toggle(); savePractice()
         case "automatic": assists.automatic.toggle(); savePractice()
@@ -252,7 +293,10 @@ final class RacingGame {
     }
 
     private func resetAtStart() {
+        collisionCooldown = 0
+        serviceRemaining = 0
         vehicle.reset(at: circuit.start)
+        vehicle.service(setup: tyreSetup)
         location = circuit.nearest(to: vehicle.position)
         session.resetLap(at: location.progress)
         accumulator = 0
@@ -268,8 +312,8 @@ final class RacingGame {
 
     private func loadPractice() {
         let url = dataDirectory.appendingPathComponent("practice.json")
-        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3].contains(saved.version) else { return }
-        if saved.version == 3, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
+        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4].contains(saved.version) else { return }
+        if saved.version == 4, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
            saved.ghost.allSatisfy({ $0.time.isFinite && $0.x.isFinite && $0.z.isFinite && $0.heading.isFinite }) {
             session.best = best
             session.bestGhost = saved.ghost
@@ -278,6 +322,8 @@ final class RacingGame {
         assists.tractionControl = saved.tractionControl
         assists.automatic = saved.automatic
         assists.steeringDeadzone = saved.deadzone.isFinite ? clamp(saved.deadzone, 0.02, 0.3) : 0.08
+        if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
+        if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
         sound.muted = saved.muted
         cockpit = saved.cockpit ?? true
         if let v = saved.verticalFOV, v.isFinite { world.cockpitFOV = CGFloat(clamp(v,42,84)) }
@@ -285,10 +331,11 @@ final class RacingGame {
     }
 
     private func savePractice() {
-        let saved = SavedPractice(version: 3, best: session.best, ghost: session.bestGhost,
+        let saved = SavedPractice(version: 4, best: session.best, ghost: session.bestGhost,
             abs: assists.abs, tractionControl: assists.tractionControl, automatic: assists.automatic,
             deadzone: assists.steeringDeadzone, muted: sound.muted, cockpit: cockpit,
-            verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight)
+            verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
+            compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(saved)

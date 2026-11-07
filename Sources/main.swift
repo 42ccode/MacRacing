@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let rect = NSRect(origin: .zero, size: size)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "APEX Lab — Circuit Test"
-        window.subtitle = "Mac 原生驾驶模拟原型 · v0.4"
+        window.subtitle = "Mac 原生驾驶模拟原型 · v1.0"
         window.minSize = NSSize(width: 1100, height: 740)
         window.backgroundColor = NSColor(rgb: 0x10191D)
         window.titlebarAppearsTransparent = true

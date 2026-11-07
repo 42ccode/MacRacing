@@ -88,6 +88,7 @@ final class InputManager {
         switch event.keyCode {
         case 36: action = "confirm"       // Return
         case 48: action = "camera"       // Tab
+        case 35: action = "service"      // P
         case 15: action = "reset"        // R
         case 53: action = "pause"        // Escape
         case 14: action = "upshift"      // E
@@ -130,6 +131,7 @@ final class InputManager {
             press("y", pad.buttonY.isPressed, "camera")
             press("lb", pad.leftShoulder.isPressed, "downshift")
             press("rb", pad.rightShoulder.isPressed, "upshift")
+            press("service", pad.dpad.down.isPressed, "service")
             if pad.buttonA.isPressed {
                 resetHold += dt
                 if resetHold > 0.8 && !resetFired { resetFired = true; onAction?("reset") }

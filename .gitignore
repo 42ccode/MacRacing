@@ -22,3 +22,37 @@ __pycache__/
 .venv/
 *.swp
 *.swo
+
+# Credentials, signing material and local agent state
+.ssh/
+.aws/
+.azure/
+.config/
+.codex/
+.agents/
+.git-credentials
+.netrc
+.npmrc
+id_rsa*
+id_ed25519*
+*.p12
+*.pfx
+*.mobileprovision
+*.keychain*
+credentials.json
+secrets.json
+secrets.yaml
+secrets.yml
+
+# Archives, local backups, diagnostic output and runtime data
+*.bundle
+*.zip
+*.app/
+*.dSYM/
+*.log
+*.crash
+*.ips
+*.bak
+practice.json
+latest-session.csv
+driving-view.png

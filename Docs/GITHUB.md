@@ -15,14 +15,21 @@
 
 ## 连接 GitHub
 
-在 GitHub 创建空仓库，不自动添加 README、许可证或 `.gitignore`。将下面的 `OWNER` 和 `REPOSITORY` 替换为实际名称：
+仓库地址为 `git@github.com:42ccode/MacRacing.git`，主分支为 `main`。
+
+首次克隆后启用本项目的本地推送检查：
 
 ```sh
-git remote add origin https://github.com/OWNER/REPOSITORY.git
-git push -u origin main
+git config core.hooksPath .githooks
+python3 Tools/check_publication.py HEAD v1.0.0
+git push origin main v1.0.0
 ```
 
-若已配置 `origin`，先用 `git remote -v` 确认地址。提交身份沿用本机 Git 配置；首次公开推送前可用 `git log -1 --format=fuller` 确认署名。
+当前工作副本已启用检查钩子，并使用 GitHub noreply 邮箱作为提交和标签署名。新工作副本请自行配置合适的公开署名；检查器要求使用 `@users.noreply.github.com` 邮箱。
+
+`.gitignore` 排除构建产物、签名私钥、云凭据、本地代理配置、练习记录、日志和历史备份。忽略规则不会移除已经提交的历史内容，所以发布检查会同时扫描暂存区、所选分支的全部历史和标签元数据。它会阻止常见令牌、私钥、含凭据的 URL、本地个人路径、不适合公开的 Git 邮箱，以及被排除文件进入推送。
+
+检查器是启发式防线，不能替代人工检查截图、素材元数据和新引入文件，也不能证明绝对不存在敏感信息。推送钩子只在已配置的本地副本生效。
 
 ## 打包版本
 

@@ -5,27 +5,27 @@ import Metal
     static func main() throws {
         _ = NSApplication.shared
         let base = URL(fileURLWithPath:FileManager.default.currentDirectoryPath)
-        let out = base.appendingPathComponent("Docs/Review-0.3")
+        let out = base.appendingPathComponent(".build/vehicle-review")
         try FileManager.default.createDirectory(at:out,withIntermediateDirectories:true)
         let circuit = Circuit()
         let world = RacingWorld(circuit:circuit,assetsDirectory:base.appendingPathComponent("Assets"))
         let renderer = SCNRenderer(device:MTLCreateSystemDefaultDevice(),options:nil)
         renderer.scene = world.scene; renderer.pointOfView = world.camera
         var car = Vehicle()
-        for (label, distance, cockpit) in [("01-cockpit-start",8.0,true),("02-cockpit-corner",235.0,true),("03-cockpit-backstraight",840.0,true),("04-exterior",70.0,false)] {
-            car.reset(at:circuit.sample(at:distance)); world.resetCamera()
-            world.update(vehicle:car,input:DrivingInput(),dt:0.1,cockpit:cockpit,ghost:nil)
-            if cockpit {
-                let from = world.camera.position
-                let to = vector(car.position+car.forward*4,y:world.seatHeight-0.15)
-                let hits = world.scene.rootNode.hitTestWithSegment(from:from,to:to,options:[SCNHitTestOption.searchMode.rawValue:SCNHitTestSearchMode.all.rawValue,SCNHitTestOption.ignoreHiddenNodes.rawValue:true])
-                print("center ray",hits.map{ "\($0.node.parent?.name ?? "?") / \($0.node.name ?? "mesh") d=\($0.worldCoordinates)" })
-            }
+        for kind in VehicleKind.allCases {
+          world.selectVehicle(kind); car.kind = kind
+          for mode in DrivingView.allCases {
+            let label = "\(kind.rawValue)-\(mode.rawValue)"
+            car.reset(at:circuit.sample(at:70)); world.resetCamera()
+            world.update(vehicle:car,input:DrivingInput(),dt:0.1,cockpit:mode.isInterior,ghost:nil,view:mode)
             let start = ProcessInfo.processInfo.systemUptime
             let image = renderer.snapshot(atTime:0,with:NSSize(width:1600,height:900),antialiasingMode:.multisampling4X)
             let data = NSBitmapImageRep(data:image.tiffRepresentation!)!.representation(using:.png,properties:[:])!
             try data.write(to:out.appendingPathComponent(label+".png"))
+            let jpeg = NSBitmapImageRep(data:image.tiffRepresentation!)!.representation(using:.jpeg,properties:[.compressionFactor:0.90])!
+            try jpeg.write(to:out.appendingPathComponent(label+".jpg"))
             print(label, "render seconds",ProcessInfo.processInfo.systemUptime-start)
+          }
         }
     }
 }

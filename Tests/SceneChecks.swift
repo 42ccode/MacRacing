@@ -159,6 +159,38 @@ struct SceneChecks {
         world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:true,ghost:nil)
         check(hoodMesh.geometry!.sources(for:.vertex)[0].data == originalHood && wing.eulerAngles.z == 0 && world.frontWheels.allSatisfy { $0.scale.y == 1 },
               "Repair restores original body geometry, wheel shape and wing alignment")
+        for kind in [VehicleKind.ferrari,.porsche,.concept] {
+            world.selectVehicle(kind); vehicle.kind = kind; vehicle.reset(at:circuit.start)
+            check(world.rollingWheels.count == 4 && world.frontWheels.count == 2,
+                  "Vehicle switch rebuilds exactly four wheels: \(kind.label)")
+            var locations: [SIMD3<Float>] = []
+            for mode in DrivingView.allCases {
+                world.resetCamera()
+                world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:mode.isInterior,ghost:nil,view:mode)
+                let p = world.car.convertPosition(world.camera.position,from:nil)
+                locations.append(SIMD3(Float(p.x),Float(p.y),Float(p.z)))
+                let right = world.camera.simdWorldRight
+                check(p.x.isFinite && p.y > 0.3 && simd_dot(right,SIMD3<Float>(Float(-vehicle.modelX.x),0,Float(-vehicle.modelX.y))) > 0.95,
+                      "Camera remains level and driver-right aligned: \(kind.label) / \(mode.label)")
+                if mode.isInterior || mode == .bonnet || mode == .bumper {
+                    let blocked = occluder(world.car,from:p,to:SCNVector3(p.x,p.y-0.05,4))
+                    check(blocked == nil,"Driving sight line clear: \(kind.label) / \(mode.label): \(blocked ?? "clear")")
+                }
+            }
+            check(locations.enumerated().allSatisfy { i,p in locations.enumerated().allSatisfy { j,q in i == j || simd_distance(p,q)>0.2 } },
+                  "All six viewpoints are distinct: \(kind.label)")
+            if kind != .concept {
+                check(world.ghostCar.childNodes.allSatisfy { simd_length($0.simdPosition) < 0.001 && simd_dot($0.simdOrientation.vector,SIMD4<Float>(0,0,0,1)) > 0.999 },
+                      "Switched vehicle ghost has no stale player transform: \(kind.label)")
+                let wheel = world.car.childNode(withName:"Steering",recursively:true)!
+                world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:true,ghost:nil)
+                let neutral = wheel.simdConvertVector(SIMD3<Float>(0,1,0),to:nil)
+                vehicle.steeringAngle = -0.15
+                world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:true,ghost:nil)
+                let turned = wheel.simdConvertVector(SIMD3<Float>(0,1,0),to:nil)
+                check(simd_dot(turned-neutral,world.camera.simdWorldRight)>0,"New steering wheel turns right with driver-right input: \(kind.label)")
+            }
+        }
         if failures > 0 { exit(1) }
         print("\nAll asset and camera checks passed.")
     }

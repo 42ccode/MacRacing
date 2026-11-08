@@ -31,6 +31,14 @@ struct SeededRandom {
     }
 }
 
+enum DrivingView: Int, CaseIterable, Codable {
+    case cockpit, dashboard, bonnet, bumper, chase, chaseFar
+    var label: String { ["驾驶舱", "仪表台", "引擎盖", "保险杠", "近距跟车", "远距跟车"][rawValue] }
+    var isInterior: Bool { self == .cockpit || self == .dashboard }
+    var isChase: Bool { self == .chase || self == .chaseFar }
+    func next(_ delta: Int = 1) -> DrivingView { DrivingView(rawValue:(rawValue + delta + Self.allCases.count) % Self.allCases.count)! }
+}
+
 final class RacingWorld {
     let scene = SCNScene()
     let camera = SCNNode()
@@ -65,6 +73,8 @@ final class RacingWorld {
     var cockpitFOV: CGFloat = 62
     var seatHeight: Double = 1.00
     var exteriorLook = 0.0
+    private(set) var vehicleKind = VehicleKind.concept
+    private var steeringAxis = SIMD3<Float>(0,1,0)
 
     private func assetURL(_ path: String) -> URL? {
         let url = assetsDirectory.appendingPathComponent(path)
@@ -82,7 +92,7 @@ final class RacingWorld {
         scene.fogColor = NSColor(rgb: 0xB6C3CE)
         scene.fogStartDistance = 380
         scene.fogEndDistance = 1700
-        scene.lightingEnvironment.intensity = 0.65
+        scene.lightingEnvironment.intensity = 0.85
 
         let ambient = SCNNode()
         ambient.light = SCNLight()
@@ -94,7 +104,7 @@ final class RacingWorld {
         sun.light = SCNLight()
         sun.light!.type = .directional
         sun.light!.color = NSColor(rgb: 0xFFF9F0)
-        sun.light!.intensity = 1050
+        sun.light!.intensity = 900
         sun.light!.castsShadow = true
         sun.light!.shadowMode = .deferred
         sun.light!.shadowColor = NSColor.black.withAlphaComponent(0.62)
@@ -118,7 +128,7 @@ final class RacingWorld {
         camera.camera!.wantsExposureAdaptation = false
         camera.camera!.exposureOffset = -0.25
         camera.camera!.whitePoint = 1.0
-        camera.camera!.saturation = 0.88
+        camera.camera!.saturation = 0.96
         camera.camera!.screenSpaceAmbientOcclusionIntensity = 1.0
         camera.camera!.screenSpaceAmbientOcclusionRadius = 0.28
         camera.camera!.screenSpaceAmbientOcclusionBias = 0.025
@@ -138,7 +148,21 @@ final class RacingWorld {
         return node
     }
 
+    func selectVehicle(_ kind: VehicleKind) {
+        guard kind != vehicleKind else { return }
+        car.childNodes.forEach { $0.removeFromParentNode() }
+        body.childNodes.forEach { $0.removeFromParentNode() }
+        ghostCar.childNodes.forEach { $0.removeFromParentNode() }
+        body.transform = SCNMatrix4Identity
+        frontWheels = []; rollingWheels = []; wheelPivots = []; wheelBaseHeights = []
+        damageMeshes = []; glassNodes = []; seatNodes = []; brakeLights = []
+        importedSteering = nil; renderedDamage = .zero; steeringAxis = SIMD3(0,1,0)
+        instrumentClock = 1; vehicleKind = kind
+        buildCar(); resetCamera()
+    }
+
     private func buildCar() {
+        if vehicleKind != .concept { buildProductionCar(); return }
         car.addChildNode(body)
         scene.rootNode.addChildNode(car)
         guard let url = assetURL("CarConcept/CarConcept.glb"),
@@ -160,7 +184,8 @@ final class RacingWorld {
                     m.normal.intensity = 0.22
                 case "Paint 1 Carmine":
                     m.diffuse.contents = NSColor(rgb: 0x566875)
-                    m.metalness.contents = 0.52; m.roughness.contents = 0.30
+                    m.metalness.contents = 0.30; m.roughness.contents = 0.28
+                    m.normal.intensity = 0.12; m.clearCoat.contents = 0.85; m.clearCoatRoughness.contents = 0.14
                 case "Paint 2 Carmine":
                     m.diffuse.contents = NSColor(rgb: 0x32383B)
                     m.roughness.contents = 0.5
@@ -248,6 +273,106 @@ final class RacingWorld {
         scene.rootNode.addChildNode(ghostCar)
     }
 
+    private func buildProductionCar() {
+        car.addChildNode(body); scene.rootNode.addChildNode(car)
+        let file = vehicleKind == .ferrari ? "Ferrari458" : "Porsche911"
+        guard let url = assetURL("Vehicles/\(file).glb"), let asset = try? GLTFAsset(url:url),
+              let model = try? asset.makeScene() else { fatalError("Missing bundled vehicle: \(file)") }
+        body.addChildNode(model)
+        let paint = vehicleKind == .ferrari ? NSColor(rgb:0x951B16) : NSColor(rgb:0x66777E)
+        model.enumerateChildNodes { node, _ in
+            for m in node.geometry?.materials ?? [] {
+                switch m.name ?? "" {
+                case "Body_Color", "paint":
+                    m.diffuse.contents = paint; m.multiply.contents = NSColor.white
+                    m.metalness.contents = 0.12; m.roughness.contents = 0.32
+                    m.clearCoat.contents = 0.55; m.clearCoatRoughness.contents = 0.18
+                case "Tires", "rubber":
+                    m.diffuse.contents = NSColor(rgb:0x1A1B1C); m.metalness.contents = 0
+                    m.roughness.contents = 0.9
+                case "Glass_Gray", "window":
+                    m.diffuse.contents = NSColor(rgb:0x243137); m.metalness.contents = 0.0
+                    m.roughness.contents = 0.16; m.transparency = 0.45
+                    m.clearCoat.contents = 0.12; m.clearCoatRoughness.contents = 0.15
+                    m.transparencyMode = .aOne; m.writesToDepthBuffer = false
+                    self.glassNodes.append(node)
+                case "Leather_red", "Leather", "Interior_dark", "Interior_light", "Carpet", "Carbon_Fiber", "plastic_gray":
+                    m.diffuse.contents = NSColor(rgb:0x202225); m.metalness.contents = 0
+                    m.roughness.contents = 0.85
+                case "silver", "metal_chrome", "metal_gray":
+                    m.diffuse.contents = NSColor(rgb:0x9B9C9D); m.metalness.contents = 0.85
+                    m.roughness.contents = 0.28
+                case "Taillight_Glass":
+                    m.diffuse.contents = NSColor(rgb:0x750D08); m.metalness.contents = 0
+                    m.roughness.contents = 0.25; self.brakeLights.append(m)
+                case "full_black":
+                    m.metalness.contents = 0; m.roughness.contents = 0.95
+                    // The exterior-only Porsche includes opaque cabin filler.
+                    if self.vehicleKind == .porsche { self.seatNodes.append(node) }
+                default: break
+                }
+            }
+        }
+        for (index,name) in ["WheelFR","WheelFL","WheelRR","WheelRL"].enumerated() {
+            guard let mesh = model.childNode(withName:name,recursively:true) else { continue }
+            let position = mesh.simdPosition
+            mesh.removeFromParentNode(); mesh.simdPosition = .zero
+            let pivot = SCNNode(); pivot.simdPosition = position
+            let roll = SCNNode(); roll.addChildNode(mesh); pivot.addChildNode(roll); car.addChildNode(pivot)
+            wheelPivots.append(pivot); rollingWheels.append(roll); wheelBaseHeights.append(CGFloat(position.y))
+            if index < 2 { frontWheels.append(pivot) }
+        }
+        importedSteering = model.childNode(withName:"Steering",recursively:true)
+        steeringAxis = SIMD3(0,0,-1)
+        if vehicleKind == .porsche { buildSimpleCabin() }
+        steeringBase = importedSteering?.simdTransform ?? matrix_identity_float4x4
+        // Functional display sits on the dashboard; the exterior model stays intact.
+        let display = SCNPlane(width:0.19,height:0.07)
+        instrumentMaterial.lightingModel = .constant; display.materials = [instrumentMaterial]
+        let instrument = SCNNode(geometry:display); instrument.name = "LiveInstrumentDisplay"
+        instrument.position = SCNVector3(0.345,0.84,vehicleKind == .ferrari ? 0.69 : 0.70)
+        instrument.eulerAngles.y = .pi; body.addChildNode(instrument)
+        model.enumerateChildNodes { node, _ in
+            guard let geometry = node.geometry,
+                  geometry.materials.contains(where:{ ["Body_Color","paint"].contains($0.name ?? "") }),
+                  let source = geometry.sources(for:.vertex).first, source.bytesPerComponent == 4 else { return }
+            let vertices = source.data.withUnsafeBytes { data in
+                (0..<source.vectorCount).map { i -> SIMD3<Float> in
+                    let o = source.dataOffset+i*source.dataStride
+                    return SIMD3(data.loadUnaligned(fromByteOffset:o,as:Float.self),data.loadUnaligned(fromByteOffset:o+4,as:Float.self),data.loadUnaligned(fromByteOffset:o+8,as:Float.self))
+                }
+            }
+            self.damageMeshes.append(DamageMesh(node:node,original:geometry,vertices:vertices,toBody:self.body.simdWorldTransform.inverse*node.simdWorldTransform))
+        }
+        let silhouette = car.clone(), ghostPaint = material(NSColor(rgb:0xB7D2D9))
+        ghostPaint.transparency = 0.16; ghostPaint.writesToDepthBuffer = false
+        silhouette.enumerateChildNodes { node,_ in
+            if let g = node.geometry?.copy() as? SCNGeometry { g.materials = [ghostPaint]; node.geometry = g }
+        }
+        silhouette.transform = SCNMatrix4Identity
+        ghostCar.addChildNode(silhouette); ghostCar.isHidden = true; scene.rootNode.addChildNode(ghostCar)
+    }
+
+    private func buildSimpleCabin() {
+        let trim = material(NSColor(rgb:0x141719),roughness:0.94)
+        _ = box(1.35,0.14,0.31,at:SCNVector3(0,0.73,0.83),material:trim,parent:body,chamfer:0.04)
+        _ = box(1.48,0.08,1.8,at:SCNVector3(0,0.28,-0.05),material:trim,parent:body)
+        _ = box(1.48,0.44,0.18,at:SCNVector3(0,0.49,0.84),material:trim,parent:body,chamfer:0.02)
+        for x: CGFloat in [-0.72,0.72] {
+            _ = box(0.12,0.46,1.7,at:SCNVector3(x,0.51,-0.05),material:trim,parent:body,chamfer:0.025)
+        }
+        let rim = SCNTorus(ringRadius:0.16,pipeRadius:0.016)
+        rim.ringSegmentCount = 64; rim.pipeSegmentCount = 12; rim.materials = [trim]
+        let wheel = SCNNode(); wheel.name = "Steering"
+        wheel.position = SCNVector3(0.345,0.77,0.48)
+        let ring = SCNNode(geometry:rim); ring.eulerAngles.x = .pi/2; wheel.addChildNode(ring)
+        let spoke = material(NSColor(rgb:0x4B5052),metal:0.65,roughness:0.38)
+        _ = box(0.29,0.025,0.02,at:SCNVector3(0,0,0),material:spoke,parent:wheel,chamfer:0.008)
+        _ = box(0.035,0.14,0.02,at:SCNVector3(0,-0.06,0),material:spoke,parent:wheel,chamfer:0.008)
+        _ = box(0.08,0.065,0.035,at:SCNVector3(0,0,-0.008),material:trim,parent:wheel,chamfer:0.016)
+        body.addChildNode(wheel); importedSteering = wheel
+    }
+
     private func updateDamage(_ damage: VehicleDamage) {
         let current = SIMD2(damage.front, damage.rear)
         guard simd_distance(current, renderedDamage) > 0.005 || (current == .zero && renderedDamage != .zero) else { return }
@@ -321,14 +446,16 @@ final class RacingWorld {
         instrumentMaterial.diffuse.contents = image
     }
 
-    func update(vehicle: Vehicle, input: DrivingInput, dt: Double, cockpit: Bool, ghost: GhostFrame?) {
+    func update(vehicle: Vehicle, input: DrivingInput, dt: Double, cockpit: Bool, ghost: GhostFrame?, view: DrivingView? = nil) {
+        let mode = view ?? (cockpit ? .cockpit : .chase)
         updateDamage(vehicle.damage)
         car.position = vector(vehicle.position)
         sunlight.position = vector(vehicle.position, y: 60)
         // The renderer has no glTF transmission path. Clear the cabin glazing in
         // the interior view instead of applying an opaque reflection over the road.
-        glassNodes.forEach { $0.isHidden = cockpit }
-        seatNodes.forEach { $0.isHidden = cockpit }
+        glassNodes.forEach { $0.isHidden = mode.isInterior }
+        seatNodes.forEach { $0.isHidden = mode.isInterior }
+        importedSteering?.isHidden = mode == .dashboard
         instrumentClock += dt
         if instrumentClock > 0.08 { instrumentClock = 0; updateInstrument(vehicle) }
         car.eulerAngles.y = CGFloat(vehicle.heading)
@@ -349,29 +476,34 @@ final class RacingWorld {
             wheel.eulerAngles.x = CGFloat(vehicle.wheels[index].rotation)
             wheelPivots[index].position.y = wheelBaseHeights[index] + CGFloat(vehicle.wheels[index].surfaceHeight)
         }
-        importedSteering?.simdTransform = steeringBase * simd_float4x4(simd_quatf(angle: Float(vehicle.steeringAngle * 9), axis: SIMD3(0, 1, 0)))
+        importedSteering?.simdTransform = steeringBase * simd_float4x4(simd_quatf(angle: Float(vehicle.steeringAngle * 9), axis: steeringAxis))
         brakeLights.forEach { $0.emission.contents = NSColor(rgb: input.brake > 0.05 ? 0xFF3328 : 0x2A0504) }
         let f = vehicle.forward
         let desired: SIMD3<Float>
         let target: SCNVector3
-        if cockpit {
-            let p = vehicle.position + f * 0.38
-            desired = SIMD3(Float(p.x), Float(seatHeight + vehicle.heave), Float(p.y))
-            target = vector(vehicle.position + f * 80, y: seatHeight + vehicle.heave - 3.0)
-            camera.camera!.fieldOfView = cockpitFOV
+        if mode.isInterior || mode == .bonnet || mode == .bumper {
+            let side = vehicleKind == .concept ? 0.0 : 0.345
+            var longitudinal = 0.38, lateral = side, height = seatHeight
+            if vehicleKind != .concept { longitudinal = -0.12 }
+            if mode == .dashboard { longitudinal += 0.42; height = vehicleKind == .ferrari ? 0.96 : 1.04 }
+            if mode == .bonnet { longitudinal = 1.25; lateral = 0; height = 1.10 }
+            if mode == .bumper { longitudinal = 2.6; lateral = 0; height = 0.42 }
+            let p = vehicle.position + f * longitudinal + vehicle.modelX * lateral
+            desired = SIMD3(Float(p.x), Float(height + vehicle.heave), Float(p.y))
+            target = vector(p + f * 80, y: height + vehicle.heave - (mode == .bumper ? 0.5 : 2.0))
+            camera.camera!.fieldOfView = mode.isInterior ? cockpitFOV : 65
         } else {
-            // Smooth heading only: translational lag used to make the vehicle
-            // shrink away from the camera at speed or jump towards it on braking.
             let targetYaw = vehicle.heading + exteriorLook * 1.65
             let yawError = atan2(sin(targetYaw-chaseYaw),cos(targetYaw-chaseYaw))
             chaseYaw = cameraReady ? chaseYaw + yawError*(1-exp(-dt*8)) : targetYaw
             let behind = SIMD2(sin(chaseYaw),cos(chaseYaw))
-            var p = vehicle.position - behind * 7.6
+            let distance = mode == .chaseFar ? 10.5 : 6.4
+            var p = vehicle.position - behind * distance
             let loc = circuit.nearest(to:p)
             if loc.distance > 15 { p = loc.point + simd_normalize(p-loc.point)*15 }
-            let height = 2.55 + max(0,7.6-simd_distance(p,vehicle.position))*0.48
+            let height = (mode == .chaseFar ? 3.5 : 2.15) + max(0,distance-simd_distance(p,vehicle.position))*0.48
             desired = SIMD3(Float(p.x),Float(height),Float(p.y))
-            target = vector(vehicle.position + f * (3.4-abs(exteriorLook)*2.5), y: 0.85)
+            target = vector(vehicle.position + f * (3.4-abs(exteriorLook)*2.5), y: 0.75)
             camera.camera!.fieldOfView = 58
         }
         cameraPosition = desired

@@ -87,6 +87,7 @@ final class InputManager {
         let action: String?
         switch event.keyCode {
         case 36: action = "confirm"       // Return
+        case 8: action = "vehicleNext" // C, only while paused
         case 48: action = "camera"       // Tab
         case 35: action = "service"      // P
         case 15: action = "reset"        // R
@@ -132,6 +133,8 @@ final class InputManager {
             press("lb", pad.leftShoulder.isPressed, "downshift")
             press("rb", pad.rightShoulder.isPressed, "upshift")
             press("service", pad.dpad.down.isPressed, "service")
+            press("vehiclePrevious", pad.dpad.left.isPressed, "vehiclePrevious")
+            press("vehicleNext", pad.dpad.right.isPressed, "vehicleNext")
             if pad.buttonA.isPressed {
                 resetHold += dt
                 if resetHold > 0.8 && !resetFired { resetFired = true; onAction?("reset") }

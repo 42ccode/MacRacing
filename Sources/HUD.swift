@@ -101,7 +101,7 @@ final class HUDView: NSView {
                 drawCompactTiming(game, width: w, height: h)
                 drawPedals(game, height: h)
                 drawCondition(game, width: w)
-                if !game.cockpit { drawDashboard(game, width: w, height: h) }
+                if game.drivingView != .cockpit { drawDashboard(game, width: w, height: h) }
             }
             if game.noticeRemaining > 0 {
                 let rect = NSRect(x: (w - 460) / 2, y: 30, width: 460, height: 30)
@@ -244,7 +244,7 @@ final class HUDView: NSView {
             text(item.0,x:x+10,y:row,size:11,color:muted)
             text(item.1,x:x+90,y:row,size:13,color:i==0 && !game.session.validLap ? NSColor(rgb:0xE69B69) : white,mono:true,width:120,align:.right)
         }
-        text("Y / Tab 切换视角  ·  V 隐藏仪表",x:x+10,y:y+109,size:9,color:muted)
+        text("Y / Tab 六种视角  ·  V 隐藏仪表",x:x+10,y:y+109,size:9,color:muted)
     }
 
     private func drawPedals(_ game: RacingGame, height: CGFloat) {
@@ -273,7 +273,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.1", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.2", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -299,17 +299,22 @@ final class HUDView: NSView {
         text("赛道练习", x: x + 27, y: y + 65, size: 34, weight: .bold)
         text("North Loop · 日间干地 · 单车测试", x: x + 29, y: y + 123, size: 14, color: muted)
         text("驾驶视角", x:x+29,y:y+180,size:13,color:muted)
-        button("车内",NSRect(x:x+149,y:y+172,width:115,height:32),action:"viewCabin",active:game.cockpit)
-        button("车外",NSRect(x:x+276,y:y+172,width:115,height:32),action:"viewChase",active:!game.cockpit)
-        text(String(format: "%.2f 公里  /  干地练习  /  自动挡", game.circuit.length / 1000), x: x + 29, y: y + 209, size: 12, color: muted)
+        button("‹",NSRect(x:x+149,y:y+172,width:34,height:32),action:"cameraPrevious")
+        text(game.drivingView.label,x:x+188,y:y+180,size:12,width:160,align:.center)
+        button("›",NSRect(x:x+357,y:y+172,width:34,height:32),action:"camera")
+        text("选择车辆",x:x+29,y:y+219,size:13,color:muted)
+        button("‹",NSRect(x:x+149,y:y+210,width:34,height:30),action:"vehiclePrevious")
+        text(game.vehicle.kind.label,x:x+185,y:y+219,size:12,width:169,align:.center)
+        button("›",NSRect(x:x+357,y:y+210,width:34,height:30),action:"vehicleNext")
         line(CGPoint(x: x + 29, y: y + 247), CGPoint(x: x + 400, y: y + 247), color: white.withAlphaComponent(0.12))
         text(game.input.controller != nil ? "手柄已就绪 · RT 油门 / LT 刹车 / 左摇杆转向" : "Xbox 手柄或 W A S D 驾驶 · 回车进入赛道", x: x + 29, y: y + 266, size: 12, color: white)
         button("进入赛道    →", NSRect(x: x + 28, y: y + 310, width: 374, height: 49), action: "start", primary: true)
-        text("Y / Tab 切换 · 车外右摇杆或 J / L 环视", x: x + 29, y: y + 378, size: 10, color: muted)
+        text("Y / Tab 循环六种视角 · 跟车视角可环视", x: x + 29, y: y + 378, size: 10, color: muted)
         panel(NSRect(x: width - 260, y: height - 179, width: 232, height: 125))
         text("BUILT FOR MAC", x: width - 243, y: height - 160, size: 10, color: lime, weight: .bold)
-        text("CLUB PROTOTYPE", x: width - 244, y: height - 138, size: 24, weight: .bold)
-        text("RWD   /   1,260 KG   /   6 SPEED", x: width - 243, y: height - 99, size: 10, color: muted, mono: true)
+        text(game.vehicle.kind.label, x: width - 244, y: height - 138, size: 20, weight: .bold, width:215)
+        text(game.vehicle.kind == .porsche ? "实验驾驶预设 · 简化座舱" : "实验驾驶预设 · 非实车标定", x: width - 243, y: height - 108, size: 10, color: muted)
+        text(game.vehicle.kind.credit,x:width-243,y:height-88,size:8,color:muted,width:215)
     }
 
     private func drawPause(_ game: RacingGame, width: CGFloat, height: CGFloat) {
@@ -322,7 +327,8 @@ final class HUDView: NSView {
         panel(NSRect(x: x, y: y, width: 550, height: 626), color: NSColor(rgb: 0x191B1D, alpha: 0.99), radius: 16)
         text("SESSION PAUSED", x: x + 28, y: y + 24, size: 10, color: lime, weight: .bold)
         text(game.showHelp ? "驾驶操作" : "练习已暂停", x: x + 27, y: y + 52, size: 26, weight: .bold)
-        button(game.cockpit ? "车内 → 车外" : "车外 → 车内", NSRect(x:x+380,y:y+51,width:142,height:32), action:"camera")
+        button(game.drivingView.label + " ›", NSRect(x:x+380,y:y+51,width:142,height:32), action:"camera")
+        button("车辆：" + game.vehicle.kind.label + " ›  换车重开 [C / ←→]",NSRect(x:x+28,y:y+86,width:494,height:22),action:"vehicleNext")
         let rows = [
             ("转向", "左摇杆", "A / D 或 ← / →"),
             ("油门 / 刹车", "RT / LT", "W / S 或 ↑ / ↓"),

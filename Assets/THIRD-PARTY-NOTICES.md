@@ -42,3 +42,10 @@ The following Poly Haven assets are CC0. Trees are rendered from the original 3D
 ## Engine recording (0.4)
 
 “Car Engine Loop 96kHz, 4s” by qubodup, used under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). [Original recording and author credits](https://opengameart.org/content/car-engine-loop-96khz-4s). The bundled `Audio/engine-recording.wav` is the original normalized 44.1 kHz stereo loop. Playback mixes it to mono, crossfades the loop seam, adjusts pitch with RPM, changes the cabin/exterior filtering and adds procedural combustion and intake layers. These adaptations also appear in the driving audio preview.
+
+## Additional vehicles (1.2)
+
+- **Ferrari 458** — vicent091036, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). [Author model](https://sketchfab.com/models/57bf6cc56931426e87494f554df1dab6), distributed through the [official three.js example](https://github.com/mrdoob/three.js/blob/dev/examples/webgl_materials_car.html).
+- **Porsche 911 Carrera 4S** — Lionsharp Studios / Karol Miklas, [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). [Author model](https://sketchfab.com/3d-models/free-porsche-911-carrera-4s-d01b254483794de3819786d93e0e1ebf), distributed through [PlayCanvas](https://github.com/playcanvas/web-components/tree/main/examples/assets/models). The adapted Porsche model and model appearance remain under CC BY-SA 4.0.
+
+Both models are decoded and adapted for the native renderer, with normalized transforms and separate animated wheels. Runtime paint, instruments and deformation differ from the sources; Porsche uses a generic simplified cabin. See `Vehicles/README.md` for modifications, licensing, source hashes and reproduction instructions. Vehicle names/designs/marks remain their owners' property; no endorsement is claimed. The simulation presets and shared engine sound are not manufacturer-calibrated.

@@ -44,7 +44,7 @@
   "Scenery/concrete_road_barrier_arm_1k.jpg": "b940847648012f2db8c24b16e07ad1e39b3bd33ea493203364deca209606e4b4",
   "Scenery/concrete_road_barrier_diff_1k.jpg": "88b2d79829ffec7b11ac4d9c8554328f30b665d2c17f634197fde4f1ca8696fe",
   "Scenery/concrete_road_barrier_nor_gl_1k.jpg": "c1072f51ff5c3d7158f0fbb0aa26e82b816b745b9f03639c4816832af2b37c52",
-  "THIRD-PARTY-NOTICES.md": "53e2fc30f20e08a314199a0aa1d1108596c80accd5e21a6d99c99eb4bb240da2",
+  "THIRD-PARTY-NOTICES.md": "8deb79a24bc8a5f349c4e8a54e53576eaad64f6948b64a3070f1bf99812eccae",
   "Vegetation/impostors.json": "2ad6fbcd021b4130c8b78e49ede3321558131988260237dadba36bafd91801a5",
   "Vegetation/shrub_01-0.png": "8762e98a2ce3c4686496b05b842aa2789372a4cc76e94940b6014bfdaf611a84",
   "Vegetation/shrub_01-1.png": "0c03b4362df8d38b75c1bb750f0eb67ee889ba094cecf4ee0035b4919d661b5b",
@@ -57,5 +57,10 @@
   "Vegetation/tree_small_02-2.png": "a1ea83e4b143c473225f2d8973cc64d3f0d735c199716425d886da8efae9c3d3",
   "Vegetation/tree_small_02-3.png": "f30455530661707d6b3dc97c87a8083fda73a767452608a1c683a2dcdddc8f3d",
   "Vegetation/tree_small_02-files.json": "20c846944513cb96fb90bce6040ac785da74d8dbbb592c75a2297e540015fbb4",
-  "Vegetation/tree_small_02-info.json": "eb22dab8ff5ff4a46378724a645ed787450bf103f09dcee7f837150a16e798d1"
+  "Vegetation/tree_small_02-info.json": "eb22dab8ff5ff4a46378724a645ed787450bf103f09dcee7f837150a16e798d1",
+  "Vehicles/Ferrari458.glb": "77d273787464292206577c650ff7b4b1281b63475173ef3d22b875881fb39530",
+  "Vehicles/Porsche911-SOURCE-LICENSE.txt": "08425640ff5961f6496c7e24ab84e75eb0c70713a9b0623196fcb33ec600ad97",
+  "Vehicles/Porsche911.glb": "f120bbded1f838d21e1087ecbb8746749cb1bc367166c05cdc97c1576e9ded7a",
+  "Vehicles/README.md": "391813baac6190f19c99488b7472eab80fd12849ab5fcf86902ac9f0d7bdf57f",
+  "Vehicles/sources.json": "d3f60b26de39bb42ce16f67e07156a46cf21b2e2098e2752009f56dfcd8dbb83"
 }

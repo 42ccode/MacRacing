@@ -1,0 +1,18 @@
+[
+  {
+    "file": "Ferrari458.glb",
+    "source": "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/ferrari.glb",
+    "source_sha256": "cafe3f48da6797aa9bde75ca768bc5b57db366575fd233e90df186ae988a876e",
+    "sha256": "77d273787464292206577c650ff7b4b1281b63475173ef3d22b875881fb39530",
+    "author": "vicent091036",
+    "license": "CC-BY-4.0"
+  },
+  {
+    "file": "Porsche911.glb",
+    "source": "https://raw.githubusercontent.com/playcanvas/web-components/main/examples/assets/models/porsche-911-carrera-4s.glb",
+    "source_sha256": "421fdabf0da312edb3c22dc0fc915bcc75551ff0db7374a7ebac8af80efc5ea2",
+    "sha256": "f120bbded1f838d21e1087ecbb8746749cb1bc367166c05cdc97c1576e9ded7a",
+    "author": "Lionsharp Studios / Karol Miklas",
+    "license": "CC-BY-SA-4.0"
+  }
+]

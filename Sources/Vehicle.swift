@@ -97,6 +97,19 @@ struct WheelState {
 
 /// Four contact patches, rotating wheels and sprung heave/roll/pitch states.
 /// Brush-style combined-slip tyres use explicit prototype parameters, not iRacing data.
+enum VehicleKind: Int, CaseIterable, Codable {
+    case concept, ferrari, porsche
+    var label: String { ["Concept GT", "Ferrari 458", "Porsche 911 4S"][rawValue] }
+    // Experimental driving presets, not manufacturer-calibrated specifications.
+    var mass: Double { [1260, 1485, 1420][rawValue] }
+    var wheelbase: Double { [2.80, 2.65, 2.44][rawValue] }
+    var frontAxle: Double { [1.485, 1.325, 1.22][rawValue] }
+    var track: Double { [1.96, 1.66, 1.50][rawValue] }
+    var radius: Double { [0.384, 0.359, 0.328][rawValue] }
+    var torqueScale: Double { [1, 1.55, 1.28][rawValue] }
+    var credit: String { ["Eric Chadwick / DGG · CC BY 4.0", "vicent091036 · CC BY 4.0", "Lionsharp Studios · CC BY-SA 4.0"][rawValue] }
+}
+
 struct Vehicle {
     var position = SIMD2<Double>.zero
     var velocity = SIMD2<Double>.zero
@@ -122,10 +135,11 @@ struct Vehicle {
     private var pitchRate = 0.0
     private var shiftCooldown = 0.0
 
-    let mass = 1260.0
-    let wheelbase = 2.80
-    let wheelRadius = 0.384
-    let trackWidth = 1.96
+    var kind = VehicleKind.concept
+    var mass: Double { kind.mass }
+    var wheelbase: Double { kind.wheelbase }
+    var wheelRadius: Double { kind.radius }
+    var trackWidth: Double { kind.track }
     let gearRatios = [3.20, 2.10, 1.52, 1.18, 0.95, 0.79]
     var forward: SIMD2<Double> { SIMD2(sin(heading), cos(heading)) }
     var modelX: SIMD2<Double> { SIMD2(cos(heading), -sin(heading)) }
@@ -141,7 +155,8 @@ struct Vehicle {
     var kerbFeedback: Double { wheels.map(\.kerbFeedback).max() ?? 0 }
     var contactPoints: [SIMD2<Double>] {
         let xs = [-trackWidth/2, trackWidth/2, -trackWidth/2, trackWidth/2]
-        let zs = [1.485, 1.485, -(wheelbase-1.485), -(wheelbase-1.485)]
+        let lf = kind.frontAxle
+        let zs = [lf, lf, -(wheelbase-lf), -(wheelbase-lf)]
         return (0..<4).map { position + modelX * xs[$0] + forward * zs[$0] }
     }
     var forwardSpeed: Double { simd_dot(velocity, forward) }
@@ -179,7 +194,9 @@ struct Vehicle {
 
     mutating func reset(at sample: TrackSample, preservingCondition: Bool = false) {
         let oldWheels = wheels, oldDamage = damage, oldCoolant = coolantTemperature
+        let oldKind = kind
         self = Vehicle()
+        kind = oldKind
         if preservingCondition {
             damage = oldDamage; coolantTemperature = oldCoolant
             for i in 0..<4 {
@@ -220,7 +237,7 @@ struct Vehicle {
         let brake = clamp(input.brake, 0, 1)
         let vf = simd_dot(velocity, forward)
         let vl = simd_dot(velocity, modelX)
-        let lf = 1.485
+        let lf = kind.frontAxle
         let lr = wheelbase - lf
         let halfTrack = trackWidth / 2
         let xs = [-halfTrack, halfTrack, -halfTrack, halfTrack]
@@ -236,7 +253,7 @@ struct Vehicle {
             if rpm > 6500 && gear < 6 { shift(1) }
             else if rpm < 2450 && gear > 1 { shift(-1) }
         }
-        let engineTorque = powerFactor * (235 + 65 * sin(clamp((rpm - 1000) / 6500, 0, 1) * .pi)) * throttle
+        let engineTorque = kind.torqueScale * powerFactor * (235 + 65 * sin(clamp((rpm - 1000) / 6500, 0, 1) * .pi)) * throttle
         // Thermostat restricts cooling below operating temperature; nose damage
         // reduces radiator capacity rather than cooling an idling engine to ambient.
         coolantTemperature += ((0.35 + throttle * 1.8 + damage.front * 0.6) -

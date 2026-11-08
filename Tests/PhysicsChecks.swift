@@ -208,6 +208,15 @@ struct PhysicsChecks {
         recovery.resetLap(at: circuit.length * 0.7)
         check(recovery.checkpoint == 0 && recovery.elapsed == 0, "Recovery resets checkpoint and timing state")
 
+        for kind in [VehicleKind.ferrari,.porsche] {
+            var preset = Vehicle(); preset.kind = kind
+            preset.reset(at:circuit.start)
+            for _ in 0..<1200 { preset.step(dt,input:DrivingInput(throttle:0.7,steering:0.02),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
+            check(preset.kind == kind && preset.speedKPH > 20 && preset.wheels.allSatisfy { $0.normalLoad.isFinite && $0.temperature.isFinite },
+                  "Vehicle preset drives stably and survives reset: \(kind.label)")
+            preset.reset(at:circuit.start,preservingCondition:true); preset.service(setup:TyreSetup())
+            check(preset.kind == kind && preset.mass == kind.mass && preset.contactPoints.count == 4,"Recovery and repair preserve vehicle selection: \(kind.label)")
+        }
         if failures > 0 { exit(1) }
         print("\nAll physics and timing checks passed.")
     }

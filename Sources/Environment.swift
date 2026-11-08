@@ -75,7 +75,7 @@ final class TrackEnvironment {
     }
     private func ground() {
         let grass = scanMaterial("grass_ground",tint:0xACB09C)
-        grass.normal.intensity = 0.35
+        grass.normal.intensity = 0.12
         grass.shaderModifiers = [.surface: """
         #pragma body
         float2 p = _surface.diffuseTexcoord;

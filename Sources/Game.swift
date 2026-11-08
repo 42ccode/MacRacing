@@ -16,6 +16,8 @@ struct SavedPractice: Codable {
     let eyeHeight: Double?
     let compound: Int?
     let coldPressure: Double?
+    var drivingView: Int? = nil
+    var vehicleKind: Int? = nil
 }
 
 final class RacingGame {
@@ -33,7 +35,8 @@ final class RacingGame {
     var hasStarted = false
     var isPaused = true
     var showHelp = false
-    var cockpit = true
+    var drivingView = DrivingView.chase
+    var cockpit: Bool { drivingView.isInterior }
     var ghostEnabled = true
     var showHUD = true
     var tyreSetup = TyreSetup()
@@ -74,10 +77,12 @@ final class RacingGame {
         hud.autoresizingMask = [.width, .height]
         hud.game = self
         input.onAction = { [weak self] action in self?.action(action) }
+        vehicle.kind = .ferrari
         loadPractice()
+        world.selectVehicle(vehicle.kind)
         vehicle.reset(at: circuit.start)
         session.resetLap(at: location.progress)
-        world.update(vehicle: vehicle, input: drivingInput, dt: 0, cockpit: cockpit, ghost: nil)
+        world.update(vehicle: vehicle, input: drivingInput, dt: 0, cockpit: cockpit, ghost: nil, view: drivingView)
         timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
     }
@@ -119,7 +124,7 @@ final class RacingGame {
         }
         if running || sceneDirty {
             world.exteriorLook = input.exteriorLook
-            world.update(vehicle:vehicle,input:drivingInput,dt:dt,cockpit:cockpit,ghost:ghost)
+            world.update(vehicle:vehicle,input:drivingInput,dt:dt,cockpit:cockpit,ghost:ghost,view:drivingView)
             if !running { sceneView.needsDisplay = true }
             sceneDirty = false
         }
@@ -213,6 +218,15 @@ final class RacingGame {
             showHelp = false
             input.clear()
             world.resetCamera()
+        case "vehicleNext", "vehiclePrevious":
+            guard isPaused && serviceRemaining == 0 else { return }
+            saveTelemetry()
+            let delta = action == "vehicleNext" ? 1 : -1
+            vehicle.kind = VehicleKind(rawValue:(vehicle.kind.rawValue+delta+VehicleKind.allCases.count)%VehicleKind.allCases.count)!
+            world.selectVehicle(vehicle.kind)
+            session = RaceSession()
+            resetAtStart(); savePractice()
+            announce("已切换 \(vehicle.kind.label) · 新练习",duration:2)
         case "compound":
             guard isPaused && serviceRemaining == 0 else { return }
             tyreSetup.compound = TyreCompound(rawValue: (tyreSetup.compound.rawValue + 1) % 3)!
@@ -270,10 +284,10 @@ final class RacingGame {
             session.resetLap(at: location.progress)
             world.resetCamera()
             announce(location.progress > 20 ? "已复位，保留车损 · 通过起点后计时" : "已复位，保留车损 · 本圈重新开始", duration: 4)
-        case "camera", "viewCabin", "viewChase":
-            cockpit = action == "camera" ? !cockpit : action == "viewCabin"
+        case "camera", "cameraPrevious", "viewCabin", "viewChase":
+            drivingView = action == "viewCabin" ? .cockpit : (action == "viewChase" ? .chase : drivingView.next(action == "cameraPrevious" ? -1 : 1))
             world.resetCamera()
-            if hasStarted { announce(cockpit ? "车内 · 驾驶舱" : "车外 · 后方跟车", duration: 1.5) }
+            if hasStarted { announce(drivingView.label, duration: 1.5) }
             savePractice()
         case "upshift": if !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(1) }
         case "downshift": if !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(-1) }
@@ -326,8 +340,9 @@ final class RacingGame {
 
     private func loadPractice() {
         let url = dataDirectory.appendingPathComponent("practice.json")
-        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4].contains(saved.version) else { return }
-        if saved.version == 4, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
+        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4, 5].contains(saved.version) else { return }
+        if let raw = saved.vehicleKind, let kind = VehicleKind(rawValue:raw) { vehicle.kind = kind }
+        if saved.version == 5, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
            saved.ghost.allSatisfy({ $0.time.isFinite && $0.x.isFinite && $0.z.isFinite && $0.heading.isFinite }) {
             session.best = best
             session.bestGhost = saved.ghost
@@ -339,17 +354,18 @@ final class RacingGame {
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
         if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
         sound.muted = saved.muted
-        cockpit = saved.cockpit ?? true
+        drivingView = saved.drivingView.flatMap(DrivingView.init(rawValue:)) ?? ((saved.cockpit ?? false) ? .cockpit : .chase)
         if let v = saved.verticalFOV, v.isFinite { world.cockpitFOV = CGFloat(clamp(v,42,84)) }
         if let v = saved.eyeHeight, v.isFinite { world.seatHeight = clamp(v,1.00,1.10) }
     }
 
     private func savePractice() {
-        let saved = SavedPractice(version: 4, best: session.best, ghost: session.bestGhost,
+        let saved = SavedPractice(version: 5, best: session.best, ghost: session.bestGhost,
             abs: assists.abs, tractionControl: assists.tractionControl, automatic: assists.automatic,
             deadzone: assists.steeringDeadzone, muted: sound.muted, cockpit: cockpit,
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
-            compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure)
+            compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
+            drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(saved)

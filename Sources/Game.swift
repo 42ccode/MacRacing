@@ -18,13 +18,16 @@ struct SavedPractice: Codable {
     let coldPressure: Double?
     var drivingView: Int? = nil
     var vehicleKind: Int? = nil
+    var circuitKind: Int? = nil
+    var absLevel: Int? = nil
+    var tcLevel: Int? = nil
 }
 
 final class RacingGame {
-    let circuit: Circuit
+    private(set) var circuit: Circuit
     let input = InputManager()
     let sound = EngineSound()
-    let world: RacingWorld
+    private(set) var world: RacingWorld
     let hud = HUDView()
     let sceneView: SCNView
     var vehicle = Vehicle()
@@ -51,7 +54,7 @@ final class RacingGame {
     private var sceneDirty = true
     private var collisionCooldown = 0.0
     private var telemetryClock = 0.0
-    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c,fr_travel_mm,fl_travel_mm,rr_travel_mm,rl_travel_mm,fr_load_n,fl_load_n,rr_load_n,rl_load_n,fr_kerb,fl_kerb,rr_kerb,rl_kerb"]
+    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c,fr_travel_mm,fl_travel_mm,rr_travel_mm,rl_travel_mm,fr_load_n,fl_load_n,rr_load_n,rl_load_n,fr_kerb,fl_kerb,rr_kerb,rl_kerb,car_id,track_id,abs_level,tc_level,abs_release,tc_reduction"]
     private let fixedStep = 1.0 / 240
 
     private var dataDirectory: URL {
@@ -80,7 +83,8 @@ final class RacingGame {
         vehicle.kind = .ferrari
         loadPractice()
         world.selectVehicle(vehicle.kind)
-        vehicle.reset(at: circuit.start)
+        vehicle.reset(at: self.circuit.start)
+        location = self.circuit.nearest(to: vehicle.position)
         session.resetLap(at: location.progress)
         world.update(vehicle: vehicle, input: drivingInput, dt: 0, cockpit: cockpit, ghost: nil, view: drivingView)
         timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
@@ -183,7 +187,8 @@ final class RacingGame {
                         + vehicle.wheels.map { $0.wear } + [vehicle.damage.front, vehicle.damage.rear,
                             vehicle.damage.engine, vehicle.coolantTemperature]
                         + vehicle.wheels.map { $0.suspensionTravel * 1000 }
-                        + vehicle.wheels.map { $0.normalLoad } + vehicle.wheels.map { $0.kerbFeedback }).map { String(format: ",%.4f", $0) }.joined())
+                        + vehicle.wheels.map { $0.normalLoad } + vehicle.wheels.map { $0.kerbFeedback }
+                        + [Double(vehicle.kind.rawValue),Double(circuit.kind.rawValue),Double(assists.absLevel),Double(assists.tcLevel),vehicle.absRelease,vehicle.tcReduction]).map { String(format: ",%.4f", $0) }.joined())
             }
         }
     }
@@ -227,6 +232,12 @@ final class RacingGame {
             session = RaceSession()
             resetAtStart(); savePractice()
             announce("已切换 \(vehicle.kind.label) · 新练习",duration:2)
+        case "trackNext":
+            guard isPaused && serviceRemaining == 0 else { return }
+            saveTelemetry()
+            changeCircuit(CircuitKind(rawValue:(circuit.kind.rawValue+1)%CircuitKind.allCases.count)!)
+            session = RaceSession(); resetAtStart(); savePractice()
+            announce("已切换 \(circuit.kind.label) · 新练习",duration:2)
         case "compound":
             guard isPaused && serviceRemaining == 0 else { return }
             tyreSetup.compound = TyreCompound(rawValue: (tyreSetup.compound.rawValue + 1) % 3)!
@@ -291,8 +302,8 @@ final class RacingGame {
             savePractice()
         case "upshift": if !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(1) }
         case "downshift": if !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(-1) }
-        case "abs": assists.abs.toggle(); savePractice()
-        case "tc": assists.tractionControl.toggle(); savePractice()
+        case "abs": assists.absLevel = (assists.absLevel+1)%6; savePractice(); announce("ABS \(assists.absLevel)/5 · 0 关闭，5 强介入",duration:2)
+        case "tc": assists.tcLevel = (assists.tcLevel+1)%6; savePractice(); announce("TCS \(assists.tcLevel)/5 · 0 关闭，5 强介入",duration:2)
         case "automatic": assists.automatic.toggle(); savePractice()
         case "mute": sound.muted.toggle(); savePractice()
         case "ghost": ghostEnabled.toggle()
@@ -338,17 +349,31 @@ final class RacingGame {
         noticeRemaining = duration
     }
 
+    private func changeCircuit(_ kind: CircuitKind) {
+        let fov = world.cockpitFOV, eye = world.seatHeight
+        circuit = Circuit(kind:kind)
+        world = RacingWorld(circuit:circuit)
+        world.cockpitFOV = fov; world.seatHeight = eye
+        world.selectVehicle(vehicle.kind)
+        sceneView.scene = world.scene; sceneView.pointOfView = world.camera
+        location = circuit.nearest(to:circuit.start.point)
+        sceneDirty = true
+    }
+
     private func loadPractice() {
         let url = dataDirectory.appendingPathComponent("practice.json")
-        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4, 5].contains(saved.version) else { return }
+        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4, 5, 6].contains(saved.version) else { return }
         if let raw = saved.vehicleKind, let kind = VehicleKind(rawValue:raw) { vehicle.kind = kind }
-        if saved.version == 5, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
+        if let raw = saved.circuitKind, let kind = CircuitKind(rawValue:raw), kind != circuit.kind { changeCircuit(kind) }
+        if saved.version == 6, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
            saved.ghost.allSatisfy({ $0.time.isFinite && $0.x.isFinite && $0.z.isFinite && $0.heading.isFinite }) {
             session.best = best
             session.bestGhost = saved.ghost
         }
         assists.abs = saved.abs
         assists.tractionControl = saved.tractionControl
+        if let level = saved.absLevel { assists.absLevel = clamp(level,0,5) }
+        if let level = saved.tcLevel { assists.tcLevel = clamp(level,0,5) }
         assists.automatic = saved.automatic
         assists.steeringDeadzone = saved.deadzone.isFinite ? clamp(saved.deadzone, 0.02, 0.3) : 0.08
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
@@ -360,12 +385,13 @@ final class RacingGame {
     }
 
     private func savePractice() {
-        let saved = SavedPractice(version: 5, best: session.best, ghost: session.bestGhost,
+        let saved = SavedPractice(version: 6, best: session.best, ghost: session.bestGhost,
             abs: assists.abs, tractionControl: assists.tractionControl, automatic: assists.automatic,
             deadzone: assists.steeringDeadzone, muted: sound.muted, cockpit: cockpit,
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
-            drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue)
+            drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(saved)

@@ -8,10 +8,20 @@ struct DrivingInput {
 }
 
 struct DrivingAssists {
-    var abs = true
-    var tractionControl = true
+    var absLevel = 3
+    var tcLevel = 3
+    var abs: Bool { get { absLevel > 0 } set { absLevel = newValue ? max(1,absLevel) : 0 } }
+    var tractionControl: Bool { get { tcLevel > 0 } set { tcLevel = newValue ? max(1,tcLevel) : 0 } }
     var automatic = true
     var steeringDeadzone = 0.08
+    init(abs: Bool = true, tractionControl: Bool = true, automatic: Bool = true,
+         steeringDeadzone: Double = 0.08, absLevel: Int = 3, tcLevel: Int = 3) {
+        self.absLevel = abs ? clamp(absLevel,0,5) : 0
+        self.tcLevel = tractionControl ? clamp(tcLevel,0,5) : 0
+        self.automatic = automatic; self.steeringDeadzone = steeringDeadzone
+    }
+    var absSlipThreshold: Double { 0.22 - Double(clamp(absLevel,1,5))*0.03 }
+    var tcSlipThreshold: Double { 0.17 - Double(clamp(tcLevel,1,5))*0.03 }
 }
 
 enum TyreCompound: Int, CaseIterable {
@@ -123,6 +133,8 @@ struct Vehicle {
     var tyreSlip = 0.0
     var tcActive = false
     var absActive = false
+    var tcReduction = 0.0
+    var absRelease = 0.0
     var distanceTravelled = 0.0
     var damage = VehicleDamage()
     var coolantTemperature = 85.0
@@ -225,6 +237,7 @@ struct Vehicle {
         let steps = max(1, Int(ceil(dt * 720)))
         tcActive = false
         absActive = false
+        tcReduction = 0; absRelease = 0
         for _ in 0..<steps {
             integrate(dt / Double(steps), input: input, assists: assists,
                       lateral: roadLateral ?? roadDistance, roadWidth: roadWidth, progress: roadProgress, kerbsEnabled: kerbsEnabled, roadContacts: roadContacts)
@@ -340,16 +353,21 @@ struct Vehicle {
 
             var driveTorque = driveTorques[i]
             if assists.tractionControl && driveTorque > 0 {
-                let gripTorque = capacity * radius * 0.93
-                let slipCut = clamp(1 - max(0, wheel.slipRatio - 0.08) * 4, 0.12, 1)
+                let level = Double(clamp(assists.tcLevel,1,5))
+                let gripTorque = capacity * radius * (1.08-level*0.05)
+                let slipCut = clamp(1 - max(0, wheel.slipRatio - assists.tcSlipThreshold) * (1 + level), 0.12, 1)
                 let limited = min(driveTorque, gripTorque) * slipCut
                 if limited < driveTorque * 0.98 { tcActive = true }
+                tcReduction = max(tcReduction,1-limited/max(driveTorque,0.001))
                 driveTorque = limited
             }
-            let locking = wheel.slipRatio < -0.13 && abs(u) > 3
-            let pressureTarget = assists.abs && locking ? 0.18 : 1.0
+            let locking = wheel.slipRatio < -assists.absSlipThreshold && abs(u) > 3
+            let pressureTarget = assists.abs && locking ? (0.30-Double(clamp(assists.absLevel,1,5))*0.04) : 1.0
             wheel.brakePressure += (pressureTarget - wheel.brakePressure) * min(1, dt * 55)
-            if assists.abs && locking && brake > 0.1 { absActive = true }
+            if assists.abs && brake > 0.1 {
+                absRelease = max(absRelease,1-wheel.brakePressure)
+                if locking { absActive = true }
+            }
             let brakeTorque = brake * (i < 2 ? 2500 : 1550) * (assists.abs ? wheel.brakePressure : 1)
             let inertia = 1.7
             let previousOmega = wheel.angularVelocity

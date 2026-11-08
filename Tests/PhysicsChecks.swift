@@ -217,6 +217,51 @@ struct PhysicsChecks {
             preset.reset(at:circuit.start,preservingCondition:true); preset.service(setup:TyreSetup())
             check(preset.kind == kind && preset.mass == kind.mass && preset.contactPoints.count == 4,"Recovery and repair preserve vehicle selection: \(kind.label)")
         }
+        var slipByLevel: [Double] = [], lockByLevel: [Double] = [], cutByLevel: [Double] = []
+        for level in [0,1,3,5] {
+            let assists = DrivingAssists(absLevel:level,tcLevel:level)
+            var car = Vehicle(); car.kind = .ferrari
+            var slip = 0.0, cut = 0.0
+            for _ in 0..<360 {
+                car.step(1.0/120,input:DrivingInput(throttle:1),assists:assists,roadDistance:9,roadWidth:12)
+                slip += max(0,car.wheels[2].slipRatio); cut += car.tcReduction
+            }
+            slipByLevel.append(slip); cutByLevel.append(cut)
+            car = Vehicle(); car.velocity = car.forward*30
+            for i in 0..<4 { car.wheels[i].angularVelocity = 30/car.wheelRadius }
+            var lock = 0.0, release = 0.0
+            for _ in 0..<240 {
+                car.step(1.0/120,input:DrivingInput(brake:1),assists:assists,roadDistance:9,roadWidth:12)
+                lock += max(0,-car.wheels[0].slipRatio); release += car.absRelease
+            }
+            lockByLevel.append(lock)
+            check(level == 0 ? (cut == 0 && release == 0) : (cut > 0 && release > 0),
+                  "Assist level \(level) produces the corresponding torque and brake intervention")
+        }
+        check(slipByLevel[3] < slipByLevel[2] && slipByLevel[2] < slipByLevel[1] && slipByLevel[1] < slipByLevel[0],
+              "Higher TCS levels progressively reduce driven-wheel slip on grass")
+        check(cutByLevel[3] > cutByLevel[1],"Strong TCS measurably cuts more drive torque than weak TCS")
+        check(lockByLevel[3] < lockByLevel[2] && lockByLevel[2] < lockByLevel[1] && lockByLevel[1] < lockByLevel[0],
+              "Higher ABS levels progressively reduce front-wheel locking on grass")
+        for kind in CircuitKind.allCases {
+            let map = Circuit(kind:kind)
+            var minGap = Double.infinity
+            for a in map.samples { for b in map.samples {
+                let d = abs(a.distance-b.distance)
+                if min(d,map.length-d)>60 { minGap = min(minGap,simd_distance(a.point,b.point)) }
+            }}
+            check(minGap > 32,"Track road and barrier corridors do not overlap: \(kind.label)")
+            check(simd_distance(map.sample(at:-0.01).point,map.sample(at:0.01).point)<0.03 && map.samples.allSatisfy { map.nearest(to:$0.point).distance<0.001 },
+                  "Track projection and finish seam remain continuous: \(kind.label)")
+            var session = RaceSession(), car = Vehicle(); session.resetLap(at:map.start.distance)
+            for step in 0...Int(map.length+30) {
+                let sample = map.sample(at:8+Double(step))
+                car.position = sample.point; car.velocity = sample.tangent*10; car.heading = atan2(sample.tangent.x,sample.tangent.y)
+                _ = session.step(0.1,vehicle:car,location:map.nearest(to:car.position),trackLength:map.length,trackWidth:map.width)
+                if session.completedLaps>0 { break }
+            }
+            check(session.completedLaps == 1 && session.best != nil,"A complete ordered lap can be recorded on \(kind.label)")
+        }
         if failures > 0 { exit(1) }
         print("\nAll physics and timing checks passed.")
     }

@@ -21,20 +21,45 @@ struct TrackLocation {
     let segment: Int
 }
 
+enum CircuitKind: Int, CaseIterable, Codable {
+    case north, sprint, technical, grand
+    var name: String { ["NORTH LOOP", "CLUB SPRINT", "TECHNICAL PARK", "GRAND CIRCUIT"][rawValue] }
+    var label: String { ["北环赛道", "俱乐部短环", "技术公园", "大奖赛长环"][rawValue] }
+    var detail: String { ["均衡弯道 · 基础练习", "短直道 · 连续中速弯", "发卡与变向 · 制动练习", "长直道 · 高速弯与减速弯"][rawValue] }
+    var controls: [SIMD2<Double>] {
+        switch self {
+        case .north: return [
+            [-100,-165],[35,-165],[150,-165],[210,-105],
+            [180,-30],[100,0],[65,55],[135,110],
+            [145,175],[55,210],[-5,165],[-35,105],
+            [-115,95],[-200,40],[-200,-55],[-175,-165]]
+        case .sprint: return [
+            [-100,-165],[35,-165],[150,-135],[180,-35],
+            [105,50],[110,150],[-15,195],[-150,135],
+            [-205,20],[-170,-110]]
+        case .technical: return [
+            [-100,-165],[40,-165],[185,-130],[220,-30],
+            [100,25],[175,125],[100,220],[-40,220],
+            [-155,140],[-65,55],[-175,-5],[-220,-110]]
+        case .grand: return [
+            [-100,-165],[100,-165],[360,-140],[470,0],
+            [420,160],[250,235],[90,235],[20,165],
+            [-70,165],[-145,240],[-325,180],[-420,20],[-330,-150]]
+        }
+    }
+}
+
 /// A closed, original circuit. World coordinates are metres in the X/Z plane.
 final class Circuit {
     let width: Double = 12
     let samples: [TrackSample]
     let length: Double
-    let name = "NORTH LOOP"
+    let kind: CircuitKind
+    var name: String { kind.name }
 
-    init() {
-        let controls: [SIMD2<Double>] = [
-            [-100, -165], [35, -165], [150, -165], [210, -105],
-            [180, -30], [100, 0], [65, 55], [135, 110],
-            [145, 175], [55, 210], [-5, 165], [-35, 105],
-            [-115, 95], [-200, 40], [-200, -55], [-175, -165]
-        ]
+    init(kind: CircuitKind = .north) {
+        self.kind = kind
+        let controls = kind.controls
         var positions: [SIMD2<Double>] = []
         for index in controls.indices {
             let count = controls.count

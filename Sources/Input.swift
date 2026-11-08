@@ -87,6 +87,7 @@ final class InputManager {
         let action: String?
         switch event.keyCode {
         case 36: action = "confirm"       // Return
+        case 45: action = "trackNext" // N, only while paused
         case 8: action = "vehicleNext" // C, only while paused
         case 48: action = "camera"       // Tab
         case 35: action = "service"      // P
@@ -133,6 +134,7 @@ final class InputManager {
             press("lb", pad.leftShoulder.isPressed, "downshift")
             press("rb", pad.rightShoulder.isPressed, "upshift")
             press("service", pad.dpad.down.isPressed, "service")
+            press("trackNext",pad.dpad.up.isPressed,"trackNext")
             press("vehiclePrevious", pad.dpad.left.isPressed, "vehiclePrevious")
             press("vehicleNext", pad.dpad.right.isPressed, "vehicleNext")
             if pad.buttonA.isPressed {

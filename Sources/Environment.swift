@@ -170,7 +170,7 @@ final class TrackEnvironment {
         box(18.4,0.65,0.8,SCNVector3(0,6,0),galvanized,parent:n)
         box(5.5,0.7,0.04,SCNVector3(0,6,-0.43),dark,parent:n)
         let front = SCNNode(); front.eulerAngles.y = .pi; n.addChildNode(front)
-        label("NORTH LOOP",size:0.38,at:SCNVector3(0,5.82,0.46),parent:front,color:paint)
+        label(circuit.name,size:0.38,at:SCNVector3(0,5.82,0.46),parent:front,color:paint)
         for i in 0..<5 { box(0.26,0.48,0.18,SCNVector3(CGFloat(i-2)*0.34,5.35,0),dark,parent:n,bevel:0.05) }
     }
     private func barriers() {
@@ -257,6 +257,7 @@ final class TrackEnvironment {
     }
     private func vegetation() {
         var random = SeededRandom()
+        random.state &+= UInt64(circuit.kind.rawValue)*7919
         let variants = (0..<4).map { i -> SCNMaterial in
             let m = SCNMaterial(); m.lightingModel = .constant; m.diffuse.contents = assets.appendingPathComponent("Vegetation/tree_small_02-\(i).png")
             m.isDoubleSided = true; m.diffuse.mipFilter = .linear
@@ -265,7 +266,8 @@ final class TrackEnvironment {
         }
         var used = [SIMD2<Double>]()
         for index in 0..<2400 {
-            let p = SIMD2((random.next()-0.5)*850,(random.next()-0.5)*850)
+            let extent = circuit.kind == .grand ? 1200.0 : 850.0
+            let p = SIMD2((random.next()-0.5)*extent,(random.next()-0.5)*extent)
             let location = circuit.nearest(to:p)
             guard location.distance>25 && location.distance<220 else { continue }
             // Leave the pit buildings clear; irregular clumps and varied silhouettes.

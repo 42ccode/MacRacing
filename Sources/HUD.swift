@@ -101,6 +101,7 @@ final class HUDView: NSView {
                 drawCompactTiming(game, width: w, height: h)
                 drawPedals(game, height: h)
                 drawCondition(game, width: w)
+                drawVehicleInfo(game)
                 if game.drivingView != .cockpit { drawDashboard(game, width: w, height: h) }
             }
             if game.noticeRemaining > 0 {
@@ -123,6 +124,48 @@ final class HUDView: NSView {
         } else {
             drawWelcome(game, width: w, height: h)
         }
+    }
+
+    private func drawVehicleInfo(_ game: RacingGame) {
+        let x: CGFloat = 18, y: CGFloat = 18, car = game.vehicle
+        panel(NSRect(x:x,y:y,width:238,height:242),color:NSColor(white:0.035,alpha:0.86),radius:5)
+        text(car.kind.label,x:x+12,y:y+10,size:14,weight:.semibold,width:214)
+        text(String(format:"实验预设 · %.0f kg · 后驱 / 6 挡",car.mass),x:x+12,y:y+34,size:10,color:muted,width:214)
+        button("ABS \(game.assists.absLevel)/5",NSRect(x:x+12,y:y+57,width:100,height:28),action:"abs",active:car.absActive)
+        button("TCS \(game.assists.tcLevel)/5",NSRect(x:x+124,y:y+57,width:100,height:28),action:"tc",active:car.tcActive)
+        text("点击循环调节 · 0 关闭 / 5 强介入",x:x+12,y:y+91,size:9,color:muted,width:214)
+        let active = NSColor(rgb:0xF2B875)
+        text(String(format:"ABS 卸压 %2.0f%%   TCS 限扭 %2.0f%%",car.absRelease*100,car.tcReduction*100),
+             x:x+12,y:y+109,size:10,color:car.absActive || car.tcActive ? active : muted,mono:true,width:214)
+        line(CGPoint(x:x+12,y:y+131),CGPoint(x:x+225,y:y+131),color:white.withAlphaComponent(0.12))
+        text(String(format:"水温 %.0f°C   可用动力 %.0f%%",car.coolantTemperature,car.powerFactor*100),x:x+12,y:y+142,size:11,width:214)
+        text(String(format:"车头损伤 %.0f%%   车尾 %.0f%%",car.damage.front*100,car.damage.rear*100),x:x+12,y:y+164,size:10,color:muted,width:214)
+        text(String(format:"引擎损伤 %.0f%%   悬架 %.0f%%",car.damage.engine*100,(car.damage.suspension.max() ?? 0)*100),x:x+12,y:y+184,size:10,color:muted,width:214)
+        text(String(format:"滑移 %.0f%%   复位后 %.2f km",car.tyreSlip*100,car.distanceTravelled/1000),x:x+12,y:y+205,size:10,color:muted,width:214)
+        text("损伤 0% 完好 · 1 / 2 调节辅助",x:x+12,y:y+224,size:8,color:muted,width:214)
+        drawTrackMap(game,x:x,y:y+252)
+    }
+
+    private func drawTrackMap(_ game: RacingGame, x: CGFloat, y: CGFloat) {
+        panel(NSRect(x:x,y:y,width:238,height:192),color:NSColor(white:0.035,alpha:0.86),radius:5)
+        text(game.circuit.kind.label,x:x+12,y:y+10,size:12,weight:.semibold,width:140)
+        text(String(format:"%.2f km",game.circuit.length/1000),x:x+154,y:y+12,size:10,color:muted,mono:true,width:72,align:.right)
+        let points = game.circuit.samples.map(\.point)
+        let minX = points.map(\.x).min()!, maxX = points.map(\.x).max()!
+        let minZ = points.map(\.y).min()!, maxZ = points.map(\.y).max()!
+        let scale = min(206/(maxX-minX),120/(maxZ-minZ))
+        func project(_ p: SIMD2<Double>) -> CGPoint {
+            CGPoint(x:x+119+CGFloat((p.x-(minX+maxX)/2)*scale),y:y+98+CGFloat((p.y-(minZ+maxZ)/2)*scale))
+        }
+        let path = NSBezierPath(); path.move(to:project(points[0]))
+        for p in points.dropFirst() { path.line(to:project(p)) }
+        path.close(); path.lineWidth = 4; NSColor(white:0.5,alpha:0.8).setStroke(); path.stroke()
+        let start = project(game.circuit.start.point)
+        white.setFill(); NSRect(x:start.x-3,y:start.y-3,width:6,height:6).fill()
+        let p = project(game.vehicle.position)
+        lime.setFill(); NSBezierPath(ovalIn:NSRect(x:p.x-4,y:p.y-4,width:8,height:8)).fill()
+        line(p,CGPoint(x:p.x+CGFloat(sin(game.vehicle.heading))*10,y:p.y+CGFloat(cos(game.vehicle.heading))*10),color:lime,width:2)
+        text(game.circuit.kind.detail,x:x+12,y:y+171,size:9,color:muted,width:214)
     }
 
     private func drawCondition(_ game: RacingGame, width: CGFloat) {
@@ -273,7 +316,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.2", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.3", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -297,7 +340,8 @@ final class HUDView: NSView {
         panel(rect, color: NSColor(rgb: 0x191B1D, alpha: 0.95), radius: 16)
         text("01   /   CIRCUIT TEST", x: x + 28, y: y + 27, size: 11, color: lime, weight: .bold)
         text("赛道练习", x: x + 27, y: y + 65, size: 34, weight: .bold)
-        text("North Loop · 日间干地 · 单车测试", x: x + 29, y: y + 123, size: 14, color: muted)
+        button(game.circuit.kind.label + String(format:" · %.2f km  ›",game.circuit.length/1000),NSRect(x:x+28,y:y+116,width:374,height:35),action:"trackNext")
+        drawTrackMap(game,x:width-266,y:140)
         text("驾驶视角", x:x+29,y:y+180,size:13,color:muted)
         button("‹",NSRect(x:x+149,y:y+172,width:34,height:32),action:"cameraPrevious")
         text(game.drivingView.label,x:x+188,y:y+180,size:12,width:160,align:.center)
@@ -309,7 +353,7 @@ final class HUDView: NSView {
         line(CGPoint(x: x + 29, y: y + 247), CGPoint(x: x + 400, y: y + 247), color: white.withAlphaComponent(0.12))
         text(game.input.controller != nil ? "手柄已就绪 · RT 油门 / LT 刹车 / 左摇杆转向" : "Xbox 手柄或 W A S D 驾驶 · 回车进入赛道", x: x + 29, y: y + 266, size: 12, color: white)
         button("进入赛道    →", NSRect(x: x + 28, y: y + 310, width: 374, height: 49), action: "start", primary: true)
-        text("Y / Tab 循环六种视角 · 跟车视角可环视", x: x + 29, y: y + 378, size: 10, color: muted)
+        text("Y / Tab 切视角 · N / 十字键↑ 换赛道", x: x + 29, y: y + 378, size: 10, color: muted)
         panel(NSRect(x: width - 260, y: height - 179, width: 232, height: 125))
         text("BUILT FOR MAC", x: width - 243, y: height - 160, size: 10, color: lime, weight: .bold)
         text(game.vehicle.kind.label, x: width - 244, y: height - 138, size: 20, weight: .bold, width:215)
@@ -329,6 +373,7 @@ final class HUDView: NSView {
         text(game.showHelp ? "驾驶操作" : "练习已暂停", x: x + 27, y: y + 52, size: 26, weight: .bold)
         button(game.drivingView.label + " ›", NSRect(x:x+380,y:y+51,width:142,height:32), action:"camera")
         button("车辆：" + game.vehicle.kind.label + " ›  换车重开 [C / ←→]",NSRect(x:x+28,y:y+86,width:494,height:22),action:"vehicleNext")
+        button("赛道：" + game.circuit.kind.label + " ›  换图重开 [N / ↑]",NSRect(x:x+28,y:y+115,width:494,height:24),action:"trackNext")
         let rows = [
             ("转向", "左摇杆", "A / D 或 ← / →"),
             ("油门 / 刹车", "RT / LT", "W / S 或 ↑ / ↓"),
@@ -337,17 +382,18 @@ final class HUDView: NSView {
             ("复位（保留车损）", "长按 A", "R"),
             ("暂停 / 继续", "Menu", "Esc")
         ]
-        text("操作", x: x + 29, y: y + 111, size: 10, color: muted)
-        text("XBOX", x: x + 169, y: y + 111, size: 10, color: lime, weight: .bold)
-        text("键盘", x: x + 352, y: y + 111, size: 10, color: muted)
+        text("操作", x: x + 29, y: y + 148, size: 10, color: muted)
+        text("XBOX", x: x + 169, y: y + 148, size: 10, color: lime, weight: .bold)
+        text("键盘", x: x + 352, y: y + 148, size: 10, color: muted)
         for (index, row) in rows.enumerated() {
-            let rowY = y + 141 + CGFloat(index) * 31
+            let rowY = y + 174 + CGFloat(index) * 24
             text(row.0, x: x + 29, y: rowY, size: 12)
             text(row.1, x: x + 169, y: rowY, size: 12, color: white)
             text(row.2, x: x + 352, y: rowY, size: 11, color: muted, width: 180)
         }
-        button(game.assists.abs ? "ABS 开" : "ABS 关", NSRect(x: x + 28, y: y + 344, width: 106, height: 32), action: "abs", active: game.assists.abs)
-        button(game.assists.tractionControl ? "TCS 开" : "TCS 关", NSRect(x: x + 143, y: y + 344, width: 106, height: 32), action: "tc", active: game.assists.tractionControl)
+        text("辅助等级 0 关闭 / 5 最强 · 点击按钮循环，或按 1 / 2",x:x+29,y:y+321,size:10,color:muted,width:494)
+        button("ABS \(game.assists.absLevel)/5", NSRect(x: x + 28, y: y + 344, width: 106, height: 32), action: "abs", active: game.assists.abs)
+        button("TCS \(game.assists.tcLevel)/5", NSRect(x: x + 143, y: y + 344, width: 106, height: 32), action: "tc", active: game.assists.tractionControl)
         button(game.assists.automatic ? "自动挡" : "手动挡", NSRect(x: x + 258, y: y + 344, width: 106, height: 32), action: "automatic", active: game.assists.automatic)
         button(game.sound.muted ? "声音 关" : "声音 开", NSRect(x: x + 373, y: y + 344, width: 149, height: 32), action: "mute", active: !game.sound.muted)
         text(String(format: "摇杆死区  %.0f%%", game.assists.steeringDeadzone * 100), x: x + 29, y: y + 393, size: 12, color: muted)

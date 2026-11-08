@@ -21,8 +21,8 @@
 
 ```sh
 git config core.hooksPath .githooks
-python3 Tools/check_publication.py HEAD v1.2.0
-git push origin main v1.2.0
+python3 Tools/check_publication.py HEAD v1.3.0
+git push origin main v1.3.0
 ```
 
 当前工作副本已启用检查钩子，并使用 GitHub noreply 邮箱作为提交和标签署名。新工作副本请自行配置合适的公开署名；检查器要求使用 `@users.noreply.github.com` 邮箱。
@@ -39,6 +39,6 @@ git push origin main v1.2.0
 python3 Tools/package_release.py
 ```
 
-当前输出为 `dist/APEX-Lab-1.2-arm64.zip`。将 ZIP 作为 GitHub Release 附件上传，不提交到源码仓库。构建脚本使用本地临时签名；公开分发所需的 Developer ID 签名与公证尚未配置。
+当前输出为 `dist/APEX-Lab-1.3-arm64.zip`。将 ZIP 作为 GitHub Release 附件上传，不提交到源码仓库。构建脚本使用本地临时签名；公开分发所需的 Developer ID 签名与公证尚未配置。
 
 发布时保留 `Assets/THIRD-PARTY-NOTICES.md`、素材元数据和署名。项目原创代码的开源许可证尚未选定；素材分别采用其注明的许可证，不由未来的代码许可证覆盖。

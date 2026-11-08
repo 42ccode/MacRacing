@@ -38,6 +38,7 @@ final class RacingGame {
     var showHUD = true
     var tyreSetup = TyreSetup()
     var serviceRemaining = 0.0
+    var gTrace: [SIMD2<Double>] = []
     var notice = ""
     var noticeRemaining = 0.0
     private var timer: Timer?
@@ -47,7 +48,7 @@ final class RacingGame {
     private var sceneDirty = true
     private var collisionCooldown = 0.0
     private var telemetryClock = 0.0
-    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c"]
+    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c,fr_travel_mm,fl_travel_mm,rr_travel_mm,rl_travel_mm,fr_load_n,fl_load_n,rr_load_n,rl_load_n,fr_kerb,fl_kerb,rr_kerb,rl_kerb"]
     private let fixedStep = 1.0 / 240
 
     private var dataDirectory: URL {
@@ -106,10 +107,9 @@ final class RacingGame {
             }
         } else { accumulator = 0 }
         if noticeRemaining > 0 { noticeRemaining -= dt }
-        let kerb = location.distance > 5.75 && location.distance < 7.15 && vehicle.speed > 3 && circuit.hasKerb(at: location.progress)
-        let rumble = isPaused ? 0 : ((kerb ? 0.22 : 0) + vehicle.tyreSlip * min(vehicle.speed / 12, 1) * 0.3 + (collisionCooldown > 0.2 ? 0.4 : 0))
+        let rumble = isPaused || serviceRemaining > 0 ? 0 : (vehicle.kerbFeedback * 0.52 + vehicle.tyreSlip * min(vehicle.speed / 12, 1) * 0.3 + (collisionCooldown > 0.2 ? 0.4 : 0))
         input.rumble(rumble, dt: dt)
-        sound.update(rpm: vehicle.rpm, throttle: drivingInput.throttle, ignition: vehicle.ignitionFraction, cockpit: cockpit, paused: isPaused || !hasStarted || serviceRemaining > 0)
+        sound.update(rpm: vehicle.rpm, throttle: drivingInput.throttle, ignition: vehicle.ignitionFraction, cockpit: cockpit, kerb: vehicle.kerbFeedback, roadSpeed: vehicle.speed, paused: isPaused || !hasStarted || serviceRemaining > 0)
         let ghost = ghostEnabled && hasStarted ? session.ghost(at: session.elapsed) : nil
         let running = hasStarted && !isPaused
         if sceneView.isPlaying != running {
@@ -126,13 +126,22 @@ final class RacingGame {
         renderClock += dt
         if renderClock >= 1.0 / 30 {
             renderClock = 0
+            if hasStarted && !isPaused && serviceRemaining == 0 {
+                gTrace.append(vehicle.driverG)
+                if gTrace.count > 45 { gTrace.removeFirst(gTrace.count - 45) }
+            }
             hud.needsDisplay = true
         }
     }
 
     private func simulate(_ dt: Double) {
         location = circuit.nearest(to: vehicle.position)
-        vehicle.step(dt, input: drivingInput, assists: assists, roadDistance: location.distance, roadWidth: circuit.width, roadLateral: location.lateral, roadProgress: location.progress, kerbsEnabled: circuit.hasKerb(at: location.progress))
+        let contacts = vehicle.contactPoints.map { point -> WheelRoadContact in
+            let contact = circuit.nearest(to: point)
+            return WheelRoadContact(distance:contact.distance, progress:contact.progress,
+                                    kerbsEnabled:circuit.hasKerb(at:contact.progress))
+        }
+        vehicle.step(dt, input: drivingInput, assists: assists, roadDistance: location.distance, roadWidth: circuit.width, roadLateral: location.lateral, roadProgress: location.progress, kerbsEnabled: circuit.hasKerb(at: location.progress), roadContacts: contacts)
         location = circuit.nearest(to: vehicle.position)
         collisionCooldown = max(0, collisionCooldown - dt)
         if location.distance > 15.05 {
@@ -167,7 +176,9 @@ final class RacingGame {
                     vehicle.lateralG, vehicle.longitudinalG, session.validLap ? 1 : 0)
                     + (vehicle.wheels.map { $0.temperature } + vehicle.wheels.map { $0.pressure }
                         + vehicle.wheels.map { $0.wear } + [vehicle.damage.front, vehicle.damage.rear,
-                            vehicle.damage.engine, vehicle.coolantTemperature]).map { String(format: ",%.4f", $0) }.joined())
+                            vehicle.damage.engine, vehicle.coolantTemperature]
+                        + vehicle.wheels.map { $0.suspensionTravel * 1000 }
+                        + vehicle.wheels.map { $0.normalLoad } + vehicle.wheels.map { $0.kerbFeedback }).map { String(format: ",%.4f", $0) }.joined())
             }
         }
     }
@@ -194,6 +205,7 @@ final class RacingGame {
             vehicle.reset(at: circuit.start, preservingCondition: true)
             location = circuit.nearest(to: vehicle.position)
             session.resetLap(at: location.progress)
+            gTrace.removeAll(keepingCapacity: true)
             serviceRemaining = 12
             collisionCooldown = 0
             accumulator = 0
@@ -253,6 +265,7 @@ final class RacingGame {
             guard serviceRemaining == 0 else { return }
             let sample = circuit.sample(at: location.progress)
             vehicle.reset(at: sample, preservingCondition: true)
+            gTrace.removeAll(keepingCapacity: true)
             location = circuit.nearest(to: vehicle.position)
             session.resetLap(at: location.progress)
             world.resetCamera()
@@ -293,6 +306,7 @@ final class RacingGame {
     }
 
     private func resetAtStart() {
+        gTrace.removeAll(keepingCapacity: true)
         collisionCooldown = 0
         serviceRemaining = 0
         vehicle.reset(at: circuit.start)

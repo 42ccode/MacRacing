@@ -159,7 +159,7 @@ final class InputManager {
 
     func rumble(_ intensity: Double, dt: Double) {
         hapticClock += dt
-        guard hapticClock >= 0.08 else { return }
+        guard hapticClock >= 1.0 / 30 else { return }
         hapticClock = 0
         try? hapticPlayer?.sendParameters([
             CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: Float(clamp(intensity, 0, 0.7)), relativeTime: 0)

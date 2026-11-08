@@ -147,6 +147,40 @@ struct PhysicsChecks {
         for _ in 0..<7200 { idleEngine.step(1.0/60,input:DrivingInput(),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
         check((80...95).contains(idleEngine.coolantTemperature), "Thermostat keeps an idling engine near operating temperature")
 
+        var kerbCar = Vehicle()
+        kerbCar.velocity = kerbCar.forward * 15
+        for w in 0..<4 { kerbCar.wheels[w].angularVelocity = 15 / kerbCar.wheelRadius }
+        let leftContacts = [WheelRoadContact(distance:4.5,progress:30,kerbsEnabled:true),
+            WheelRoadContact(distance:6.4,progress:30,kerbsEnabled:true),
+            WheelRoadContact(distance:4.5,progress:27.2,kerbsEnabled:true),
+            WheelRoadContact(distance:6.4,progress:27.2,kerbsEnabled:true)]
+        kerbCar.step(dt,input:DrivingInput(),assists:DrivingAssists(),roadDistance:5.5,roadWidth:12,roadContacts:leftContacts)
+        check(kerbCar.wheels[1].surface == .kerb && kerbCar.wheels[3].surface == .kerb && kerbCar.wheels[0].surface == .asphalt && kerbCar.wheels[2].surface == .asphalt,
+              "Per-wheel contact identifies driver-left kerb while car centre remains on asphalt")
+        check(kerbCar.wheels[1].suspensionTravel > kerbCar.wheels[0].suspensionTravel && kerbCar.wheels[1].kerbFeedback > 0 && kerbCar.wheels[0].kerbFeedback == 0,
+              "Raised kerb compresses the contacting suspension and excites only that side")
+        var parkedKerb = Vehicle()
+        parkedKerb.step(dt,input:DrivingInput(),assists:DrivingAssists(),roadDistance:5.5,roadWidth:12,roadContacts:leftContacts)
+        check(parkedKerb.kerbFeedback == 0, "A parked wheel on a kerb produces no continuous rumble")
+        let noKerb = leftContacts.map { WheelRoadContact(distance:$0.distance,progress:$0.progress,kerbsEnabled:false) }
+        kerbCar.step(dt,input:DrivingInput(),assists:DrivingAssists(),roadDistance:5.5,roadWidth:12,roadContacts:noKerb)
+        check(kerbCar.wheels.allSatisfy { $0.surface != .kerb }, "Wheel sampling respects the end of a kerb segment")
+        for _ in 0..<120 { kerbCar.step(dt,input:DrivingInput(),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
+        check(kerbCar.kerbFeedback < 0.0001, "Kerb feedback decays after rejoining asphalt")
+        var accelerating = Vehicle()
+        for _ in 0..<360 { accelerating.step(dt,input:DrivingInput(throttle:1),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
+        check(accelerating.driverG.y > 0 && accelerating.wheels[2].suspensionTravel > accelerating.wheels[0].suspensionTravel,
+              "Acceleration G and rear suspension compression agree with weight transfer")
+        for _ in 0..<30 { accelerating.step(dt,input:DrivingInput(brake:1),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
+        check(accelerating.driverG.y < 0 && accelerating.wheels[0].suspensionTravel > accelerating.wheels[2].suspensionTravel,
+              "Braking G and front suspension compression agree with weight transfer")
+        var rightTurn = Vehicle()
+        for _ in 0..<360 { rightTurn.step(dt,input:DrivingInput(throttle:0.6,steering:0.3),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
+        check(rightTurn.driverG.x > 0, "G-meter driver-right acceleration is positive")
+        let points = rightTurn.contactPoints
+        check(simd_dot(points[1]-points[0],rightTurn.modelX) > 1.9 && simd_dot(points[0]-points[2],rightTurn.forward) > 2.7,
+              "Contact sample locations follow both wheel track and vehicle heading")
+
         check(circuit.length > 1000 && circuit.length < 2500, "Closed circuit length: \(Int(circuit.length)) metres")
         let onTrack = circuit.nearest(to: circuit.start.point)
         check(onTrack.distance < 0.05, "Track projection finds the start")

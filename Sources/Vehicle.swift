@@ -35,6 +35,14 @@ struct VehicleDamage {
     var worst: Double { ([front, rear, engine] + suspension).max() ?? 0 }
 }
 
+enum WheelSurface { case asphalt, kerb, grass }
+
+struct WheelRoadContact {
+    var distance: Double
+    var progress: Double
+    var kerbsEnabled: Bool
+}
+
 struct WheelState {
     var angularVelocity = 0.0
     var rotation = 0.0
@@ -80,6 +88,11 @@ struct WheelState {
     }
     var brakePressure = 1.0
     var surfaceHeight = 0.0
+    var suspensionTravel = 0.0 // metres from static ride height; positive = compression
+    var suspensionVelocity = 0.0 // m/s, positive = compressing
+    var surface = WheelSurface.asphalt
+    var kerbFeedback = 0.0 // bounded, smoothed road excitation, zero when parked
+
 }
 
 /// Four contact patches, rotating wheels and sprung heave/roll/pitch states.
@@ -123,6 +136,13 @@ struct Vehicle {
     var ignitionFraction: Double {
         let shiftCut = shiftCooldown > 0.12 ? 0.35 : 1.0
         return rpm > 7100 ? shiftCut * 0.10 : shiftCut
+    }
+    var driverG: SIMD2<Double> { SIMD2(-lateralG, longitudinalG) }
+    var kerbFeedback: Double { wheels.map(\.kerbFeedback).max() ?? 0 }
+    var contactPoints: [SIMD2<Double>] {
+        let xs = [-trackWidth/2, trackWidth/2, -trackWidth/2, trackWidth/2]
+        let zs = [1.485, 1.485, -(wheelbase-1.485), -(wheelbase-1.485)]
+        return (0..<4).map { position + modelX * xs[$0] + forward * zs[$0] }
     }
     var forwardSpeed: Double { simd_dot(velocity, forward) }
 
@@ -183,19 +203,19 @@ struct Vehicle {
     }
 
     mutating func step(_ dt: Double, input: DrivingInput, assists: DrivingAssists,
-                       roadDistance: Double, roadWidth: Double, roadLateral: Double? = nil, roadProgress: Double = 0, kerbsEnabled: Bool = true) {
+                       roadDistance: Double, roadWidth: Double, roadLateral: Double? = nil, roadProgress: Double = 0, kerbsEnabled: Bool = true, roadContacts: [WheelRoadContact]? = nil) {
         guard dt > 0 && dt <= 0.1 else { return }
         let steps = max(1, Int(ceil(dt * 720)))
         tcActive = false
         absActive = false
         for _ in 0..<steps {
             integrate(dt / Double(steps), input: input, assists: assists,
-                      lateral: roadLateral ?? roadDistance, roadWidth: roadWidth, progress: roadProgress, kerbsEnabled: kerbsEnabled)
+                      lateral: roadLateral ?? roadDistance, roadWidth: roadWidth, progress: roadProgress, kerbsEnabled: kerbsEnabled, roadContacts: roadContacts)
         }
     }
 
     private mutating func integrate(_ dt: Double, input: DrivingInput, assists: DrivingAssists,
-                                    lateral: Double, roadWidth: Double, progress: Double, kerbsEnabled: Bool) {
+                                    lateral: Double, roadWidth: Double, progress: Double, kerbsEnabled: Bool, roadContacts: [WheelRoadContact]?) {
         let throttle = clamp(input.throttle, 0, 1)
         let brake = clamp(input.brake, 0, 1)
         let vf = simd_dot(velocity, forward)
@@ -248,10 +268,13 @@ struct Vehicle {
             var wheel = wheels[i]
             let x = xs[i]
             let z = zs[i]
-            let onGrass = abs(lateral + x) > roadWidth / 2 + (kerbsEnabled ? 0.85 : 0.35)
-            let onKerb = kerbsEnabled && abs(lateral + x) > roadWidth / 2 && !onGrass
+            let road = roadContacts?.count == 4 ? roadContacts![i] : WheelRoadContact(
+                distance: abs(lateral + x), progress: progress + z, kerbsEnabled: kerbsEnabled)
+            let onGrass = road.distance > roadWidth / 2 + (road.kerbsEnabled ? 0.85 : 0.35)
+            let onKerb = road.kerbsEnabled && road.distance > roadWidth / 2 && !onGrass
+            wheel.surface = onGrass ? .grass : (onKerb ? .kerb : .asphalt)
             let vibration = wheel.flatSpot * 0.003 * cos(wheel.rotation) * min(abs(vf) / 5, 1)
-            let surfaceHeight = (onKerb ? 0.030 + 0.012 * sin((progress + z) * 7) : 0.0)
+            let surfaceHeight = (onKerb ? 0.030 + 0.012 * sin(road.progress * 7) : 0.0)
                 - wheelRadius * (1 - wheel.radiusScale) + vibration
             let roadVerticalSpeed = clamp((surfaceHeight - wheel.surfaceHeight) / dt, -0.7, 0.7)
             wheel.surfaceHeight = surfaceHeight
@@ -262,6 +285,12 @@ struct Vehicle {
             let deflectionRate = heaveRate + pitchRate * z + rollRate * x - roadVerticalSpeed
             let load = clamp(staticLoad - springRate * deflection - damper * deflectionRate, 0, staticLoad * 4)
             wheel.normalLoad = load
+            wheel.suspensionTravel = -deflection
+            wheel.suspensionVelocity = -deflectionRate
+            let excitation = onKerb && speed > 1 && load > 100
+                ? clamp(abs(roadVerticalSpeed) / 0.7 * 0.7 + 0.3 * abs(sin(road.progress * 7)), 0, 1)
+                    * min(speed / 8, 1) * min(load / staticLoad, 1.2) : 0
+            wheel.kerbFeedback += (clamp(excitation, 0, 1) - wheel.kerbFeedback) * (1 - exp(-dt * 28))
             verticalForce += load
             rollTorque += x * load
             pitchTorque += z * load
@@ -347,7 +376,7 @@ struct Vehicle {
         }
 
         let drag = (0.43 + damage.front * 0.22 + damage.rear * 0.13) * vf * abs(vf)
-        let offroadFraction = Double(wheels.enumerated().filter { abs(lateral + xs[$0.offset]) > roadWidth / 2 + 0.95 }.count) / 4
+        let offroadFraction = Double(wheels.filter { $0.surface == .grass }.count) / 4
         let flatCount = Double(wheels.filter { $0.punctured }.count)
         let rollingDemand = weight * (0.013 + offroadFraction * 0.055 + flatCount * 0.018)
         let rolling = (vf >= 0 ? 1.0 : -1.0) * min(rollingDemand, abs(vf) * mass / dt)

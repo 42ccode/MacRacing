@@ -7,6 +7,8 @@ struct MotorControls {
     var ignition = 1.0
     var cockpit = true
     var audible = false
+    var kerb = 0.0
+    var roadSpeed = 0.0
 }
 
 /// One continuous render stream. Only the render thread advances the recording,
@@ -26,6 +28,9 @@ private final class MotorVoice {
     private var gain = 0.0
     private var filtered = 0.0
     private var air = 0.0
+    private var roadLevel = 0.0
+    private var roadPhase = 0.0
+    private var roadNoise = 0.0
     private var exhaust = Pipe(frequency: 122, decay: 0.013)
     private var intake = Pipe(frequency: 344, decay: 0.006)
 
@@ -117,7 +122,12 @@ private final class MotorVoice {
             air += ((random * 2 - 1) - air) * 0.18
             let motor = recorded * (0.39 + 0.35 * load) * (0.32 + 0.68 * ignition)
             let combustion = (0.60 * exhaustNote + 0.27 * intakeNote) * (0.07 + 0.34 * load)
-            let sample = motor + combustion + air * load * 0.085
+            roadLevel += (targets.kerb - roadLevel) * 0.001
+            roadPhase += (12 + targets.roadSpeed * 1.3) / rate
+            roadPhase -= floor(roadPhase)
+            roadNoise += ((random * 2 - 1) - roadNoise) * 0.035
+            let road = roadLevel * (roadNoise * 1.3 + sin(roadPhase * 2 * .pi) * 0.18)
+            let sample = motor + combustion + air * load * 0.085 + road
             filtered += (sample - filtered) * filterAmount
             output[frame] = Float(0.75 * gain * tanh(filtered * 1.4))
         }
@@ -145,12 +155,13 @@ final class EngineSound {
         engine.connect(source, to: engine.mainMixerNode, format: format)
     }
 
-    func update(rpm: Double, throttle: Double, ignition: Double = 1, cockpit: Bool = true, paused: Bool) {
+    func update(rpm: Double, throttle: Double, ignition: Double = 1, cockpit: Bool = true, kerb: Double = 0, roadSpeed: Double = 0, paused: Bool) {
         guard let voice else { return }
         let audible = !paused && !muted
         voice.controls.withLock {
             $0 = MotorControls(rpm: clamp(rpm, 750, 7500), throttle: clamp(throttle, 0, 1),
-                               ignition: clamp(ignition, 0, 1), cockpit: cockpit, audible: audible)
+                               ignition: clamp(ignition, 0, 1), cockpit: cockpit, audible: audible,
+                               kerb: clamp(kerb, 0, 1), roadSpeed: clamp(roadSpeed, 0, 100))
         }
         let now = ProcessInfo.processInfo.systemUptime
         if audible && !engine.isRunning && now >= nextStartAttempt {

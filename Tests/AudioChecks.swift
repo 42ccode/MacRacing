@@ -25,7 +25,7 @@ import AVFoundation
             gears.insert(car.gear)
             if car.ignitionFraction < 1 { cuts += 1 }
             sound.muted = tick >= 690 && tick < 705
-            sound.update(rpm:car.rpm,throttle:gas,ignition:car.ignitionFraction,cockpit:tick < 340,paused:tick >= 705)
+            sound.update(rpm:car.rpm,throttle:gas,ignition:car.ignitionFraction,cockpit:tick < 340,kerb:tick >= 600 ? 0.8 : 0,roadSpeed:20,paused:tick >= 705)
             guard sound.errorMessage == nil, sound.engine.isRunning else { fatalError("Audio graph did not start: \(sound.errorMessage ?? "unknown")") }
             let status = try sound.engine.renderOffline(frames,to:buffer)
             guard status == .success, buffer.frameLength == frames else { fatalError("Offline audio failed: \(status.rawValue)") }
@@ -41,6 +41,22 @@ import AVFoundation
         let idleRMS = sqrt(idleEnergy/rate), driveRMS = sqrt(driveEnergy/rate)
         precondition(idleRMS > 0.025 && driveRMS > idleRMS*1.25 && peak < 1 && quietPeak < 0.00002)
         precondition(gears.count >= 2 && cuts > 0)
+        func kerbSamples(_ intensity: Double) throws -> [Float] {
+            let comparison = EngineSound(recordingURL:recording)
+            try comparison.engine.enableManualRenderingMode(.offline,format:format,maximumFrameCount:frames)
+            defer { comparison.engine.stop() }
+            var values: [Float] = []
+            for _ in 0..<60 {
+                comparison.update(rpm:3000,throttle:0.4,kerb:intensity,roadSpeed:20,paused:false)
+                guard try comparison.engine.renderOffline(frames,to:buffer) == .success else { fatalError("Road audio render failed") }
+                values.append(contentsOf:UnsafeBufferPointer(start:buffer.floatChannelData![0],count:Int(frames)))
+            }
+            return values
+        }
+        let smooth = try kerbSamples(0), rough = try kerbSamples(1)
+        let difference = zip(smooth,rough).reduce(0.0) { $0 + pow(Double($1.0-$1.1),2) }
+        precondition(sqrt(difference/Double(smooth.count)) > 0.01 && rough.allSatisfy { $0.isFinite && abs($0) < 0.75 })
+        print("PASS  Kerb audio changes the rendered output without clipping")
         print(String(format:"PASS  Engine graph: idle RMS %.3f, loaded RMS %.3f, peak %.3f, muted/paused peak %.6f; %d gears, %d ignition-cut updates",idleRMS,driveRMS,peak,quietPeak,gears.count,cuts))
     }
 }

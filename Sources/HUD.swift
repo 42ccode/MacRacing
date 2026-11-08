@@ -126,29 +126,111 @@ final class HUDView: NSView {
     }
 
     private func drawCondition(_ game: RacingGame, width: CGFloat) {
-        let x = width - 266, y: CGFloat = 78
-        panel(NSRect(x:x,y:y,width:250,height:229),color:NSColor(white:0.04,alpha:0.80),radius:3)
+        let x = width - 286, y: CGFloat = 18
         let car = game.vehicle
-        let warning = NSColor(rgb: 0xF2B875)
-        text("轮胎 / 车损",x:x+12,y:y+9,size:11,weight:.semibold)
-        text(car.wheels[0].setup.compound.label,x:x+170,y:y+9,size:11,color:muted,width:67,align:.right)
-        for (row, entry) in [("左前",1),("右前",0),("左后",3),("右后",2)].enumerated() {
+        let amber = NSColor(rgb:0xF2B875)
+        let green = NSColor(rgb:0x7EBB9C)
+        let blue = NSColor(rgb:0x80AFD4)
+        panel(NSRect(x:x,y:y,width:270,height:240),color:NSColor(white:0.035,alpha:0.86),radius:5)
+        text("轮胎状态",x:x+12,y:y+10,size:12,weight:.semibold,width:90)
+        text("↑ 车头",x:x+111,y:y+12,size:9,color:muted,width:50,align:.center)
+        text(car.wheels[0].setup.compound.label,x:x+193,y:y+10,size:11,color:muted,width:64,align:.right)
+        for (slot, entry) in [("左前",1),("右前",0),("左后",3),("右后",2)].enumerated() {
             let wheel = car.wheels[entry.1]
-            let rowY = y+34+CGFloat(row)*28
-            let alert = wheel.punctured || wheel.wear > 0.65 || wheel.temperature > 120 || wheel.pressure < 1.2
-            text(entry.0,x:x+12,y:rowY,size:11,color:muted,width:32)
-            text(String(format:"%.0f°C  %.2f bar",wheel.temperature,wheel.pressure),
-                 x:x+49,y:rowY,size:11,color:alert ? warning : white,mono:true,width:112)
-            let status = wheel.punctured ? "爆胎" : String(format:"余量 %.0f%%",(1-wheel.wear)*100)
-            text(status,x:x+167,y:rowY,size:10,color:alert ? warning : muted,width:74,align:.right)
+            let tx = x+12+CGFloat(slot%2)*130, ty = y+36+CGFloat(slot/2)*81
+            let warning = wheel.punctured || wheel.wear > 0.65 || wheel.pressure < 1.2
+            let tone = warning ? NSColor(rgb:0xE77B6D) :
+                (wheel.temperature > 115 ? amber : (wheel.temperature < 60 ? blue : green))
+            panel(NSRect(x:tx,y:ty,width:116,height:74),color:NSColor(white:0.09,alpha:0.9),radius:4)
+            let tyre = NSRect(x:tx+8,y:ty+21,width:21,height:39)
+            tone.withAlphaComponent(0.22).setFill()
+            NSBezierPath(roundedRect:tyre,xRadius:5,yRadius:5).fill()
+            tone.setStroke()
+            let outline = NSBezierPath(roundedRect:tyre,xRadius:5,yRadius:5)
+            outline.lineWidth = 1.4; outline.stroke()
+            for stripe in 0..<5 {
+                let sy = tyre.minY+6+CGFloat(stripe)*6
+                line(CGPoint(x:tyre.minX+4,y:sy),CGPoint(x:tyre.maxX-4,y:sy),color:tone.withAlphaComponent(0.65))
+            }
+            if wheel.punctured {
+                line(CGPoint(x:tyre.minX,y:tyre.minY),CGPoint(x:tyre.maxX,y:tyre.maxY),color:tone,width:2)
+            }
+            text(entry.0,x:tx+8,y:ty+4,size:9,color:muted,width:30)
+            let surface = wheel.surface == .kerb ? "路肩" : (wheel.surface == .grass ? "草地" : "沥青")
+            text(surface,x:tx+57,y:ty+4,size:9,color:wheel.surface == .kerb ? amber : muted,width:51,align:.right)
+            text(String(format:"%.0f°C",wheel.temperature),x:tx+37,y:ty+21,size:14,color:tone,weight:.medium,mono:true,width:72)
+            text(String(format:"%.2f bar",wheel.pressure),x:tx+37,y:ty+40,size:10,color:white,mono:true,width:72)
+            text(wheel.punctured ? "爆胎" : String(format:"余量 %.0f%%",(1-wheel.wear)*100),x:tx+37,y:ty+56,size:9,color:warning ? tone : muted,width:72)
+            // Amber outline remains on actual kerb contact; its strength follows excitation.
+            if wheel.surface == .kerb || wheel.kerbFeedback > 0.02 {
+                amber.withAlphaComponent(CGFloat(0.3+wheel.kerbFeedback*0.7)).setStroke()
+                let edge = NSBezierPath(roundedRect:NSRect(x:tx,y:ty,width:116,height:74).insetBy(dx:1,dy:1),xRadius:4,yRadius:4)
+                edge.lineWidth = 1.5; edge.stroke()
+            }
         }
-        line(CGPoint(x:x+12,y:y+148),CGPoint(x:x+238,y:y+148),color:white.withAlphaComponent(0.15))
-        let suspension = car.damage.suspension.max() ?? 0
-        text(String(format:"车头 %.0f%%   车尾 %.0f%%",car.damage.front*100,car.damage.rear*100),
-             x:x+12,y:y+156,size:11,color:car.damage.worst > 0.3 ? warning : muted)
-        text(String(format:"悬架 %.0f%%   引擎 %.0f%%   水温 %.0f°C",suspension*100,car.damage.engine*100,car.coolantTemperature),
-             x:x+12,y:y+176,size:10,color:car.damage.worst > 0.3 ? warning : muted,width:230)
-        text("损伤 0% 为完好 · P / 十字键↓ 维修",x:x+12,y:y+205,size:9,color:muted,width:230)
+        text("蓝 冷胎   绿 工作区   橙 过热 / 路肩",x:x+12,y:y+197,size:9,color:muted,width:247)
+        text(String(format:"车损 %.0f%%   水温 %.0f°C   P / ↓ 维修",car.damage.worst*100,car.coolantTemperature),
+             x:x+12,y:y+217,size:10,color:car.damage.worst>0.3 ? amber : muted,width:247)
+        drawSuspension(game,x:x,y:y+248)
+        drawGForce(game,x:x,y:y+376)
+    }
+
+    private func drawSuspension(_ game: RacingGame, x: CGFloat, y: CGFloat) {
+        panel(NSRect(x:x,y:y,width:270,height:120),color:NSColor(white:0.035,alpha:0.86),radius:5)
+        text("悬挂动态",x:x+12,y:y+9,size:12,weight:.semibold,width:86)
+        text("+ 压缩 / − 伸张 · mm",x:x+106,y:y+11,size:9,color:muted,width:152,align:.right)
+        for (slot,entry) in [("左前",1),("右前",0),("左后",3),("右后",2)].enumerated() {
+            let wheel = game.vehicle.wheels[entry.1]
+            let cx = x+36+CGFloat(slot)*66
+            let tone = wheel.surface == .kerb ? NSColor(rgb:0xF2B875) : NSColor(rgb:0x7EBB9C)
+            let travel = CGFloat(clamp(wheel.suspensionTravel / 0.06,-1,1))
+            let top = y+43, bottom = y+76-travel*16
+            text(entry.0,x:cx-25,y:y+28,size:9,color:muted,width:50,align:.center)
+            line(CGPoint(x:cx-20,y:y+76),CGPoint(x:cx+20,y:y+76),color:muted.withAlphaComponent(0.3))
+            line(CGPoint(x:cx-11,y:top),CGPoint(x:cx+11,y:top),color:muted,width:2)
+            let spring = NSBezierPath(); spring.move(to:CGPoint(x:cx,y:top))
+            for step in 1...8 { spring.line(to:CGPoint(x:cx+(step==8 ? 0 : (step%2==0 ? -7 : 7)),y:top+(bottom-top)*CGFloat(step)/8)) }
+            tone.setStroke(); spring.lineWidth = 1.5; spring.stroke()
+            tone.setFill(); NSBezierPath(ovalIn:NSRect(x:cx-4,y:bottom-3,width:8,height:6)).fill()
+            text(String(format:"%+.0f",wheel.suspensionTravel*1000),x:cx-29,y:y+92,size:11,color:tone,mono:true,width:58,align:.center)
+            text(String(format:"%.1f kN",wheel.normalLoad/1000),x:cx-29,y:y+107,size:8,color:muted,mono:true,width:58,align:.center)
+        }
+    }
+
+    private func drawGForce(_ game: RacingGame, x: CGFloat, y: CGFloat) {
+        panel(NSRect(x:x,y:y,width:270,height:150),color:NSColor(white:0.035,alpha:0.86),radius:5)
+        text("车辆加速度",x:x+12,y:y+9,size:12,weight:.semibold,width:112)
+        text("外圈 2 G",x:x+171,y:y+11,size:9,color:muted,width:86,align:.right)
+        let cx = x+73, cy = y+83, radius: CGFloat = 44
+        for scale: CGFloat in [0.5,1] {
+            muted.withAlphaComponent(0.28).setStroke()
+            NSBezierPath(ovalIn:NSRect(x:cx-radius*scale,y:cy-radius*scale,width:radius*scale*2,height:radius*scale*2)).stroke()
+        }
+        line(CGPoint(x:cx-radius,y:cy),CGPoint(x:cx+radius,y:cy),color:muted.withAlphaComponent(0.25))
+        line(CGPoint(x:cx,y:cy-radius),CGPoint(x:cx,y:cy+radius),color:muted.withAlphaComponent(0.25))
+        text("加速",x:cx-18,y:y+26,size:8,color:muted,width:36,align:.center)
+        text("制动",x:cx-18,y:y+132,size:8,color:muted,width:36,align:.center)
+        text("左",x:x+10,y:cy-6,size:8,color:muted,width:16)
+        text("右",x:x+121,y:cy-6,size:8,color:muted,width:16)
+        func point(_ g: SIMD2<Double>) -> CGPoint {
+            let scale = max(2,simd_length(g))
+            return CGPoint(x:cx+CGFloat(g.x/scale)*radius,y:cy-CGFloat(g.y/scale)*radius)
+        }
+        for (i,g) in game.gTrace.enumerated() {
+            let p = point(g)
+            NSColor(rgb:0x83BBD0,alpha:CGFloat(i+1)/CGFloat(max(1,game.gTrace.count))*0.65).setFill()
+            NSBezierPath(ovalIn:NSRect(x:p.x-1.3,y:p.y-1.3,width:2.6,height:2.6)).fill()
+        }
+        let g = game.vehicle.driverG, p = point(g)
+        NSColor(rgb:0xDCEBE6).setFill()
+        NSBezierPath(ovalIn:NSRect(x:p.x-3.5,y:p.y-3.5,width:7,height:7)).fill()
+        text(String(format:"横向 %+.2f G",g.x),x:x+143,y:y+41,size:11,mono:true,width:118)
+        text(String(format:"纵向 %+.2f G",g.y),x:x+143,y:y+62,size:11,mono:true,width:118)
+        text("横向正值 = 向右",x:x+143,y:y+84,size:8,color:muted,width:118)
+        let pulse = game.isPaused || game.serviceRemaining>0 ? 0 : game.vehicle.kerbFeedback
+        text("路肩反馈",x:x+143,y:y+105,size:9,color:muted,width:114)
+        NSColor(white:0.2,alpha:1).setFill(); NSRect(x:x+143,y:y+123,width:110,height:5).fill()
+        NSColor(rgb:0xF2B875).setFill(); NSRect(x:x+143,y:y+123,width:110*CGFloat(pulse),height:5).fill()
     }
 
     private func drawCompactTiming(_ game: RacingGame, width: CGFloat, height: CGFloat) {
@@ -191,7 +273,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.0", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.1", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"

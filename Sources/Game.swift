@@ -362,10 +362,10 @@ final class RacingGame {
 
     private func loadPractice() {
         let url = dataDirectory.appendingPathComponent("practice.json")
-        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4, 5, 6].contains(saved.version) else { return }
+        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4, 5, 6, 7].contains(saved.version) else { return }
         if let raw = saved.vehicleKind, let kind = VehicleKind(rawValue:raw) { vehicle.kind = kind }
         if let raw = saved.circuitKind, let kind = CircuitKind(rawValue:raw), kind != circuit.kind { changeCircuit(kind) }
-        if saved.version == 6, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
+        if saved.version == 7, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
            saved.ghost.allSatisfy({ $0.time.isFinite && $0.x.isFinite && $0.z.isFinite && $0.heading.isFinite }) {
             session.best = best
             session.bestGhost = saved.ghost
@@ -385,7 +385,7 @@ final class RacingGame {
     }
 
     private func savePractice() {
-        let saved = SavedPractice(version: 6, best: session.best, ghost: session.bestGhost,
+        let saved = SavedPractice(version: 7, best: session.best, ghost: session.bestGhost,
             abs: assists.abs, tractionControl: assists.tractionControl, automatic: assists.automatic,
             deadzone: assists.steeringDeadzone, muted: sound.muted, cockpit: cockpit,
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,

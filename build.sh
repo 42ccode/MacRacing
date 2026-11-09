@@ -24,8 +24,8 @@ cat > "$app_path/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>APEX Lab</string>
   <key>CFBundleDisplayName</key><string>APEX Lab</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.3.0</string>
-  <key>CFBundleVersion</key><string>13</string>
+  <key>CFBundleShortVersionString</key><string>1.4.0</string>
+  <key>CFBundleVersion</key><string>14</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>

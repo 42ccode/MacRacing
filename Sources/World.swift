@@ -319,6 +319,19 @@ final class RacingWorld {
             mesh.removeFromParentNode(); mesh.simdPosition = .zero
             let pivot = SCNNode(); pivot.simdPosition = position
             let roll = SCNNode(); roll.addChildNode(mesh); pivot.addChildNode(roll); car.addChildNode(pivot)
+            if vehicleKind == .porsche {
+                // Yellow calipers belong to the upright: steer with the wheel,
+                // but never spin with the tyre/rim and brake disc.
+                var calipers: [SCNNode] = []
+                mesh.enumerateChildNodes { node, _ in
+                    if node.geometry?.materials.contains(where: { $0.name == "Material.001" }) == true { calipers.append(node) }
+                }
+                for node in calipers {
+                    let local = simd_inverse(pivot.simdWorldTransform) * node.simdWorldTransform
+                    node.removeFromParentNode(); pivot.addChildNode(node); node.simdTransform = local
+                    node.name = "BrakeCaliper\(index)"
+                }
+            }
             wheelPivots.append(pivot); rollingWheels.append(roll); wheelBaseHeights.append(CGFloat(position.y))
             if index < 2 { frontWheels.append(pivot) }
         }
@@ -463,8 +476,9 @@ final class RacingWorld {
         body.eulerAngles.z = CGFloat(vehicle.roll)
         body.eulerAngles.x = CGFloat(-vehicle.pitch)
         for (index, pivot) in wheelPivots.enumerated() {
-            pivot.eulerAngles.y = CGFloat(vehicle.wheelSteer(index))
-            pivot.eulerAngles.z = CGFloat(vehicle.damage.suspension[index] * (index % 2 == 0 ? 0.16 : -0.16))
+            let steer = simd_quatf(angle:Float(vehicle.wheelSteer(index)),axis:SIMD3(0,1,0))
+            let camber = simd_quatf(angle:Float(vehicle.damage.suspension[index] * (index % 2 == 0 ? 0.16 : -0.16)),axis:SIMD3(0,0,1))
+            pivot.simdOrientation = steer * camber
             pivot.scale.y = CGFloat(vehicle.wheels[index].radiusScale)
         }
         if let wing = body.childNode(withName: "ClubRearWing", recursively: false) {
@@ -473,7 +487,7 @@ final class RacingWorld {
             wing.position.y = CGFloat(-vehicle.damage.rear * 0.12)
         }
         for (index, wheel) in rollingWheels.enumerated() {
-            wheel.eulerAngles.x = CGFloat(vehicle.wheels[index].rotation)
+            wheel.simdOrientation = simd_quatf(angle:Float(vehicle.wheels[index].rotation),axis:SIMD3(1,0,0))
             wheelPivots[index].position.y = wheelBaseHeights[index] + CGFloat(vehicle.wheels[index].surfaceHeight)
         }
         importedSteering?.simdTransform = steeringBase * simd_float4x4(simd_quatf(angle: Float(vehicle.steeringAngle * 9), axis: steeringAxis))

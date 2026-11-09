@@ -262,6 +262,48 @@ struct PhysicsChecks {
             }
             check(session.completedLaps == 1 && session.best != nil,"A complete ordered lap can be recorded on \(kind.label)")
         }
+        for kind in VehicleKind.allCases {
+            var turning = Vehicle(); turning.kind = kind; turning.steeringAngle = 0.3
+            let leftRadius = turning.wheelbase/tan(turning.wheelSteer(1)) + turning.trackWidth/2
+            let rightRadius = turning.wheelbase/tan(turning.wheelSteer(0)) - turning.trackWidth/2
+            check(turning.wheelSteer(1)>turning.wheelSteer(0) && abs(leftRadius-rightRadius)<1e-8,
+                  "Inner and outer front wheels share a turning centre: \(kind.label)")
+            turning.steeringAngle = -0.3
+            check(abs(turning.wheelSteer(0))>abs(turning.wheelSteer(1)) && turning.wheelSteer(2)==0,
+                  "Ackermann geometry mirrors correctly for driver-right: \(kind.label)")
+            func laneChange(_ step:Double, _ sign:Double) -> Vehicle {
+                var car=Vehicle(); car.kind=kind; car.velocity=car.forward*30
+                for i in 0..<4 { car.wheels[i].angularVelocity=30/car.wheelRadius }
+                for frame in 0..<Int(6/step) {
+                    let t=Double(frame)*step
+                    let steer=t<2 ? sign*0.35*sin(t * .pi) : 0
+                    car.step(step,input:DrivingInput(throttle:0.12,steering:steer),assists:DrivingAssists(),roadDistance:0,roadWidth:12,kerbsEnabled:false)
+                }
+                return car
+            }
+            let a=laneChange(1/120,1), b=laneChange(1/120,-1), fine=laneChange(1/240,1)
+            check(a.speed.isFinite && abs(a.yawRate)<0.015 && abs(a.roll)<0.005 && abs(a.steeringAngle)<0.0001,
+                  "108 km/h double lane change settles after steering release: \(kind.label)")
+            check(abs(a.position.x+b.position.x)<0.02 && abs(a.position.y-b.position.y)<0.02,
+                  "Mirrored double lane changes have symmetric responses: \(kind.label)")
+            check(simd_distance(a.position,fine.position)<0.25 && abs(a.yawRate-fine.yawRate)<0.01,
+                  "Lane-change path converges across 120/240 Hz outer timesteps: \(kind.label)")
+            check(a.wheels.allSatisfy { abs($0.rotation)<2 * .pi && $0.normalLoad>=0 && $0.relaxedSlipAngle.isFinite },
+                  "Wheel phase and tyre state remain bounded after repeated rotation: \(kind.label)")
+        }
+        var coasting=Vehicle(); coasting.wheels[3].angularVelocity=0.000001
+        coasting.step(1/720,input:DrivingInput(),assists:DrivingAssists(),roadDistance:0,roadWidth:12)
+        check(coasting.tcReduction==0 && !coasting.tcActive,
+              "Tiny differential torques with closed throttle cannot report TCS intervention")
+        var transient=Vehicle(); transient.velocity=transient.forward*20; transient.steeringAngle=0.12
+        for i in 0..<4 { transient.wheels[i].angularVelocity=20/transient.wheelRadius }
+        transient.step(1/720,input:DrivingInput(steering:-0.6),assists:DrivingAssists(),roadDistance:0,roadWidth:12)
+        let firstForce=abs(transient.wheels[0].lateralForce)
+        check(abs(transient.wheels[0].relaxedSlipAngle)<abs(transient.wheels[0].slipAngle)*0.2,
+              "A sudden steer builds contact-patch deflection progressively")
+        for _ in 0..<12 { transient.step(1/720,input:DrivingInput(steering:-0.6),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
+        check(abs(transient.wheels[0].lateralForce)>firstForce*2,
+              "Lateral tyre force builds over travelled distance after steering input")
         if failures > 0 { exit(1) }
         print("\nAll physics and timing checks passed.")
     }

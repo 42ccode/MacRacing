@@ -58,6 +58,7 @@ struct WheelState {
     var rotation = 0.0
     var slipRatio = 0.0
     var slipAngle = 0.0
+    var relaxedSlipAngle = 0.0 // contact-patch lateral response, radians
     var normalLoad = 0.0
     var longitudinalForce = 0.0
     var lateralForce = 0.0
@@ -172,11 +173,18 @@ struct Vehicle {
         return (0..<4).map { position + modelX * xs[$0] + forward * zs[$0] }
     }
     var forwardSpeed: Double { simd_dot(velocity, forward) }
+    // Geometry-scaled prototype yaw inertia; not a manufacturer measurement.
+    var yawInertia: Double { mass * (wheelbase * wheelbase + trackWidth * trackWidth) * 0.18 }
 
     var powerFactor: Double { max(0.08, 1 - damage.engine * 0.85 - max(0, coolantTemperature - 115) * 0.012) }
 
     func wheelSteer(_ index: Int) -> Double {
-        (index < 2 ? steeringAngle : 0) + damage.suspension[index] * (index % 2 == 0 ? -0.10 : 0.10)
+        let x = (index % 2 == 0 ? -1.0 : 1.0) * trackWidth / 2
+        // +X is driver-left. Inner and outer wheels share a turn centre at the
+        // rear axle, instead of being parallel and scrubbing at low speed.
+        let tangent = tan(steeringAngle)
+        let angle = index < 2 ? atan(wheelbase * tangent / (wheelbase - x * tangent)) : 0
+        return angle + damage.suspension[index] * (index % 2 == 0 ? -0.10 : 0.10)
     }
 
     mutating func impact(normalSpeed: Double, outwardNormal: SIMD2<Double>) {
@@ -336,13 +344,20 @@ struct Vehicle {
             let peakMu = (onGrass ? 0.48 : 1.24) * wheel.gripFactor * loadSensitivity
             let capacity = max(1, load * peakMu)
             let slipAngle = atan2(v, max(abs(u), 1.5))
+            // Lateral relaxation length: tyre force builds over travelled
+            // distance. Blend out the lag near rest to avoid parking chatter.
+            let relaxationLength = 0.35
+            wheel.relaxedSlipAngle += (slipAngle - wheel.relaxedSlipAngle)
+                * (1 - exp(-dt * max(abs(u), 3) / relaxationLength))
+            let transientBlend = clamp(abs(u) / 3, 0, 1)
+            let forceSlipAngle = slipAngle * (1 - transientBlend) + wheel.relaxedSlipAngle * transientBlend
 
             func forces(_ omega: Double) -> (fx: Double, fy: Double, ratio: Double) {
                 let longitudinalSlip = omega * radius - u
                 let slipRatio = longitudinalSlip / max(abs(u), 2)
                 let stiffnessScale = pow(max(load, 1) / 3100, 0.82)
                 let linearX = 65000 * stiffnessScale * slipRatio
-                let linearY = -48000 * stiffnessScale * tan(clamp(slipAngle, -1.2, 1.2))
+                let linearY = -48000 * stiffnessScale * tan(clamp(forceSlipAngle, -1.2, 1.2))
                 let demand = hypot(linearX, linearY)
                 let sliding = hypot(longitudinalSlip, v)
                 let available = capacity * (0.82 + 0.18 * exp(-sliding / 5))
@@ -352,13 +367,15 @@ struct Vehicle {
             }
 
             var driveTorque = driveTorques[i]
-            if assists.tractionControl && driveTorque > 0 {
+            // Do not treat tiny coasting differential torques as accelerator
+            // intervention (or amplify them into a false percentage at rest).
+            if assists.tractionControl && throttle > 0.01 && driveTorque > 1 {
                 let level = Double(clamp(assists.tcLevel,1,5))
                 let gripTorque = capacity * radius * (1.08-level*0.05)
                 let slipCut = clamp(1 - max(0, wheel.slipRatio - assists.tcSlipThreshold) * (1 + level), 0.12, 1)
                 let limited = min(driveTorque, gripTorque) * slipCut
                 if limited < driveTorque * 0.98 { tcActive = true }
-                tcReduction = max(tcReduction,1-limited/max(driveTorque,0.001))
+                tcReduction = max(tcReduction,1-limited/driveTorque)
                 driveTorque = limited
             }
             let locking = wheel.slipRatio < -assists.absSlipThreshold && abs(u) > 3
@@ -393,7 +410,7 @@ struct Vehicle {
             }
             let contact = forces(omega)
             wheel.angularVelocity = omega
-            wheel.rotation += omega * dt
+            wheel.rotation = (wheel.rotation + omega * dt).truncatingRemainder(dividingBy: 2 * .pi)
             wheel.slipRatio = contact.ratio
             wheel.slipAngle = slipAngle
             wheel.longitudinalForce = contact.fx
@@ -420,7 +437,7 @@ struct Vehicle {
         let ay = totalFy / mass
         let acceleration = forward * ax + modelX * ay
         velocity += acceleration * dt
-        yawRate += yawTorque / 2150 * dt
+        yawRate += yawTorque / yawInertia * dt
         if speed < 0.08 && throttle < 0.01 {
             velocity *= exp(-12 * dt)
             yawRate *= exp(-12 * dt)

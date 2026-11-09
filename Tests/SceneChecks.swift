@@ -71,6 +71,37 @@ struct SceneChecks {
         }
         return visit(root)
     }
+    // Inspect referenced vertices, not accessor bounds: the Porsche source shares
+    // an axle buffer between left/right meshes. Unreferenced points are not drawn.
+    static func wheelVertices(_ root: SCNNode) -> [SIMD3<Float>] {
+        var result: [SIMD3<Float>] = []
+        root.enumerateChildNodes { node, _ in
+            guard let geometry = node.geometry, let source = geometry.sources(for:.vertex).first,
+                  source.bytesPerComponent == 4 else { return }
+            var used = Set<Int>()
+            for element in geometry.elements {
+                element.data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                    for offset in stride(from:0,to:bytes.count,by:element.bytesPerIndex) {
+                        switch element.bytesPerIndex {
+                        case 1: used.insert(Int(bytes[offset]))
+                        case 2: used.insert(Int(bytes.loadUnaligned(fromByteOffset:offset,as:UInt16.self)))
+                        case 4: used.insert(Int(bytes.loadUnaligned(fromByteOffset:offset,as:UInt32.self)))
+                        default: break
+                        }
+                    }
+                }
+            }
+            source.data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                for index in used.sorted() {
+                    let p = source.dataOffset + index * source.dataStride
+                    let v = SIMD3<Float>(bytes.loadUnaligned(fromByteOffset:p,as:Float.self),
+                        bytes.loadUnaligned(fromByteOffset:p+4,as:Float.self),bytes.loadUnaligned(fromByteOffset:p+8,as:Float.self))
+                    result.append(node.simdConvertPosition(v,to:root))
+                }
+            }
+        }
+        return result
+    }
     static func main() throws {
         let assets = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         let gltf = try GLTFAsset(url: assets.appendingPathComponent("CarConcept/CarConcept.glb"))
@@ -163,6 +194,39 @@ struct SceneChecks {
             world.selectVehicle(kind); vehicle.kind = kind; vehicle.reset(at:circuit.start)
             check(world.rollingWheels.count == 4 && world.frontWheels.count == 2,
                   "Vehicle switch rebuilds exactly four wheels: \(kind.label)")
+            check(world.rollingWheels.enumerated().allSatisfy { i, wheel in
+                let p = wheel.parent!.simdPosition
+                let x = (i % 2 == 0 ? -1.0 : 1.0) * vehicle.trackWidth/2
+                let z = i < 2 ? kind.frontAxle : -(vehicle.wheelbase-kind.frontAxle)
+                return abs(Double(p.x)-x)<0.025 && abs(Double(p.z)-z)<0.025
+            }, "Visible wheel centres align with physical contact locations: \(kind.label)")
+            for (index, wheel) in world.rollingWheels.enumerated() {
+                let points = wheelVertices(wheel)
+                var widest:Float = 0, axleError:Float = 0
+                for frame in 0..<48 {
+                    vehicle.steeringAngle = 0.35 * sin(Double(frame)*0.4)
+                    for i in 0..<4 { vehicle.wheels[i].rotation = Double(frame)*0.37 }
+                    world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:false,ghost:nil)
+                    let axle = SIMD3<Float>(Float(cos(vehicle.wheelSteer(index))),0,Float(-sin(vehicle.wheelSteer(index))))
+                    let visible = points.map { wheel.simdConvertPosition($0,to:world.car) }
+                    let axial = visible.map { simd_dot($0,axle) }
+                    widest = max(widest,(axial.max() ?? 0)-(axial.min() ?? 0))
+                    axleError = max(axleError,simd_distance(simd_normalize(wheel.simdConvertVector(SIMD3(1,0,0),to:world.car)),axle))
+                }
+                check(!points.isEmpty && widest < 0.48 && axleError < 0.001,
+                      "Actual wheel mesh rolls on its axle during repeated left/right changes: \(kind.label) wheel \(index), axial width \(String(format:"%.3f",widest))m")
+                if kind == .porsche {
+                    let caliper = world.car.childNode(withName:"BrakeCaliper\(index)",recursively:true)
+                    let before = caliper?.simdWorldTransform
+                    vehicle.wheels[index].rotation += .pi/2
+                    world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:false,ghost:nil)
+                    let unchanged = caliper.map { node in
+                        (0..<4).allSatisfy { simd_distance(node.simdWorldTransform[$0],before![$0])<0.0001 }
+                    } ?? false
+                    check(unchanged,"Brake caliper stays fixed while the rim rotates: Porsche wheel \(index)")
+                }
+            }
+            vehicle.reset(at:circuit.start)
             var locations: [SIMD3<Float>] = []
             for mode in DrivingView.allCases {
                 world.resetCamera()

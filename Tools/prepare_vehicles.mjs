@@ -62,11 +62,22 @@ for(const [key,group] of buckets){
  for(const n of group.listChildren())for(const p of n.getMesh().listPrimitives()){
   transformPrimitive(p,[1,0,0,0,0,1,0,0,0,0,1,0,-center[0],-center[1],-center[2],1]);
   if(kind==='porsche'&&key.startsWith('WheelF')){
-   const a=-0.18,c=Math.cos(a),s=Math.sin(a);transformPrimitive(p,[c,0,-s,0,0,1,0,0,s,0,c,0,0,0,0,1]);
+   // Source front tyres have -20 degrees of yaw. Undo it before X-axis roll;
+   // the former -0.18 rad correction compounded the pose and made them wobble.
+   const a=20*Math.PI/180,c=Math.cos(a),s=Math.sin(a);transformPrimitive(p,[c,0,-s,0,0,1,0,0,s,0,c,0,0,0,0,1]);
   }
  }
  group.setTranslation(center);
  console.log(key,center);
+}
+if(kind==='porsche'){
+ // The display steering pose also offsets the front bounding-box centres.
+ // Restore a symmetric neutral axle, matching the straight rear track.
+ const fr=buckets.get('WheelFR'),fl=buckets.get('WheelFL');
+ const halfTrack=(Math.abs(buckets.get('WheelRR').getTranslation()[0])+Math.abs(buckets.get('WheelRL').getTranslation()[0]))/2;
+ const z=(fr.getTranslation()[2]+fl.getTranslation()[2])/2;
+ fr.setTranslation([-halfTrack,fr.getTranslation()[1],z]);
+ fl.setTranslation([halfTrack,fl.getTranslation()[1],z]);
 }
 root.setDefaultScene(scene);
 for(const s of [...root.listScenes()])if(s!==scene)s.dispose();

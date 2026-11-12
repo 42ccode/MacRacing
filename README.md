@@ -1,4 +1,4 @@
-# APEX Lab — Circuit Test 1.5
+# APEX Lab — Circuit Test 1.5.1
 
 面向 Apple Silicon Mac 的原生赛车驾驶原型。使用 Swift、SceneKit / Metal、Game Controller、Core Haptics 和 AVFoundation，无需 Unity 或下载第三方依赖。
 
@@ -17,6 +17,12 @@
 ```sh
 ./build.sh --run
 ```
+
+## 1.5.1 踏板输入显示
+
+左下角升级为放大的实时输入面板：左侧红色 LT 刹车、右侧绿色 RT 油门，显示 0–100% 数值和四分之一刻度，并保留挡位、车速及自动 / 手动状态。直接显示驾驶输入，支持同时按下两个扳机；ABS 卸压和 TCS 限扭仍在车况面板单独显示。按 V 随 HUD 一起隐藏，六种视角均可使用。
+
+![踏板显示：确定性输入渲染检查](Docs/pedal-inputs.png)
 
 ## 1.5 反馈与驾驶变化
 

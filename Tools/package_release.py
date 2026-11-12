@@ -7,14 +7,18 @@ base = Path(__file__).resolve().parents[1]
 app = base / 'dist' / 'APEX Lab.app'
 version = plistlib.loads((app/'Contents/Info.plist').read_bytes())['CFBundleShortVersionString']
 release = '.'.join(version.split('.')[:2])
-root = f'APEX-Lab-{release}'
+archive_version = version if version.split('.')[-1] != '0' else release
+root = f'APEX-Lab-{archive_version}'
 archive = base/'dist'/f'{root}-arm64.zip'
 with ZipFile(archive, 'w', compression=ZIP_DEFLATED, compresslevel=5) as out:
     for f in sorted(app.rglob('*')):
         if f.is_file() and not any(x.startswith('.') for x in f.relative_to(app).parts):
             out.write(f, f'{root}/{app.name}/{f.relative_to(app)}')
     out.write(base/'Docs/试玩说明.md',f'{root}/试玩说明.md')
-    out.write(base/'Docs'/f'VALIDATION-{release}.md',f'{root}/VALIDATION.md')
+    validation = base/'Docs'/f'VALIDATION-{archive_version}.md'
+    if not validation.exists():
+        validation = base/'Docs'/f'VALIDATION-{release}.md'
+    out.write(validation,f'{root}/VALIDATION.md')
     for sample in sorted((base/'Docs'/f'Audio-{release}').glob('*.wav')):
         out.write(sample,f'{root}/{sample.name}')
     credits = base/'Docs'/f'Driving-{release}'/'README.md'

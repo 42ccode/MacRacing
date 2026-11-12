@@ -292,16 +292,45 @@ final class HUDView: NSView {
     }
 
     private func drawPedals(_ game: RacingGame, height: CGFloat) {
-        let y = height-78
-        panel(NSRect(x:16,y:y-9,width:111,height:68),color:NSColor(white:0.04,alpha:0.62),radius:1)
-        for (i, entry) in [("T",game.drivingInput.throttle,NSColor(rgb:0x68A571)),("B",game.drivingInput.brake,NSColor(rgb:0xD9715E))].enumerated() {
-            let x = CGFloat(29+i*24)
-            NSColor(white:0.28,alpha:1).setFill(); NSRect(x:x,y:y,width:10,height:36).fill()
-            entry.2.setFill(); NSRect(x:x,y:y+36*(1-entry.1),width:10,height:36*entry.1).fill()
-            text(entry.0,x:x,y:y+38,size:8,color:muted,width:10,align:.center)
+        let x: CGFloat = 18, y = height-212
+        panel(NSRect(x:x,y:y,width:238,height:194),color:NSColor(white:0.025,alpha:0.88),radius:4)
+        text("踏板输入",x:x+12,y:y+9,size:10,color:muted,weight:.semibold,width:100)
+        text("INPUT",x:x+174,y:y+10,size:9,color:muted,mono:true,width:50,align:.right)
+        line(CGPoint(x:x+12,y:y+29),CGPoint(x:x+226,y:y+29),color:white.withAlphaComponent(0.12))
+
+        text("\(game.vehicle.gear)",x:x+10,y:y+34,size:44,weight:.medium,mono:true,width:70,align:.center)
+        text(game.assists.automatic ? "AUTO" : "MANUAL",x:x+10,y:y+89,size:9,color:muted,width:70,align:.center)
+        text(String(format:"%.0f",game.vehicle.speedKPH),x:x+8,y:y+118,size:24,weight:.medium,mono:true,width:74,align:.center)
+        text("KM/H",x:x+10,y:y+151,size:9,color:muted,width:70,align:.center)
+        line(CGPoint(x:x+94,y:y+40),CGPoint(x:x+94,y:y+179),color:white.withAlphaComponent(0.10))
+
+        // Driver input before ABS/TCS modulation. LT stays on the left, RT on
+        // the right; simultaneous trigger inputs remain independently visible.
+        let entries = [("刹车", "LT", game.drivingInput.brake, NSColor(rgb:0xF14650)),
+                       ("油门", "RT", game.drivingInput.throttle, NSColor(rgb:0x34D774))]
+        for (i,entry) in entries.enumerated() {
+            let raw = entry.2
+            let value = CGFloat(raw.isFinite ? clamp(raw,0,1) : 0)
+            let bx = x+119+CGFloat(i)*59, top = y+65, barHeight: CGFloat = 96
+            text(String(format:"%.0f%%",Double(value)*100),x:bx-10,y:y+38,size:15,
+                 color:value>0 ? entry.3 : muted,weight:.semibold,mono:true,width:52,align:.center)
+            NSColor(white:0.12,alpha:1).setFill()
+            NSRect(x:bx,y:top,width:32,height:barHeight).fill()
+            if value>0 {
+                entry.3.setFill()
+                NSRect(x:bx,y:top+barHeight*(1-value),width:32,height:barHeight*value).fill()
+                // No easing or minimum fill: even a small release remains exact.
+                line(CGPoint(x:bx,y:top+barHeight*(1-value)),
+                     CGPoint(x:bx+32,y:top+barHeight*(1-value)),color:.white.withAlphaComponent(0.8))
+            }
+            for tick in 0...4 {
+                let ty = top+barHeight*CGFloat(tick)/4
+                let color = white.withAlphaComponent(tick==0 || tick==4 ? 0.5 : 0.22)
+                line(CGPoint(x:bx-5,y:ty),CGPoint(x:bx-1,y:ty),color:color)
+                line(CGPoint(x:bx+33,y:ty),CGPoint(x:bx+37,y:ty),color:color)
+            }
+            text(entry.0+" "+entry.1,x:bx-10,y:y+169,size:10,color:muted,width:52,align:.center)
         }
-        text("\(game.vehicle.gear)",x:79,y:y-3,size:26,weight:.semibold,mono:true,width:35,align:.center)
-        text(game.assists.automatic ? "AUTO" : "MAN",x:78,y:y+32,size:8,color:muted,width:35,align:.center)
     }
 
     private func drawHeader(_ game: RacingGame, width: CGFloat) {
@@ -317,7 +346,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.5", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.5.1", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"

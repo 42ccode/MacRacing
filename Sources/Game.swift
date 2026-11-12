@@ -26,6 +26,7 @@ struct SavedPractice: Codable {
     var racingLineEnabled: Bool? = nil
     var opponentCount: Int? = nil
     var hudPositions: [String:HUDPosition]? = nil
+    var brakeBiasByVehicle: [String:Double]? = nil
 }
 
 final class RacingGame {
@@ -37,6 +38,8 @@ final class RacingGame {
     let sceneView: SCNView
     var vehicle = Vehicle()
     var assists = DrivingAssists()
+    private var brakeBiasByVehicle: [String:Double] = [:]
+    private var brakeBiasKey: String { String(vehicle.kind.rawValue) }
     var drivingInput = DrivingInput()
     var session = RaceSession()
     private var records: [String:LapRecord] = [:]
@@ -72,7 +75,7 @@ final class RacingGame {
     private var impactFeedback = SIMD2<Double>.zero
     private var feedback = HapticFeedback()
     private var telemetryClock = 0.0
-    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c,fr_travel_mm,fl_travel_mm,rr_travel_mm,rl_travel_mm,fr_load_n,fl_load_n,rr_load_n,rl_load_n,fr_kerb,fl_kerb,rr_kerb,rl_kerb,car_id,track_id,abs_level,tc_level,abs_release,tc_reduction"]
+    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c,fr_travel_mm,fl_travel_mm,rr_travel_mm,rl_travel_mm,fr_load_n,fl_load_n,rr_load_n,rl_load_n,fr_kerb,fl_kerb,rr_kerb,rl_kerb,car_id,track_id,abs_level,tc_level,abs_release,tc_reduction,front_brake_bias"]
     private let fixedStep = 1.0 / 240
 
     private var dataDirectory: URL {
@@ -237,7 +240,7 @@ final class RacingGame {
                             vehicle.damage.engine, vehicle.coolantTemperature]
                         + vehicle.wheels.map { $0.suspensionTravel * 1000 }
                         + vehicle.wheels.map { $0.normalLoad } + vehicle.wheels.map { $0.kerbFeedback }
-                        + [Double(vehicle.kind.rawValue),Double(circuit.kind.rawValue),Double(assists.absLevel),Double(assists.tcLevel),vehicle.absRelease,vehicle.tcReduction]).map { String(format: ",%.4f", $0) }.joined())
+                        + [Double(vehicle.kind.rawValue),Double(circuit.kind.rawValue),Double(assists.absLevel),Double(assists.tcLevel),vehicle.absRelease,vehicle.tcReduction,assists.frontBrakeBias]).map { String(format: ",%.4f", $0) }.joined())
             }
         }
     }
@@ -281,6 +284,7 @@ final class RacingGame {
             let delta = action == "vehicleNext" ? 1 : -1
             vehicle.kind = VehicleKind(rawValue:(vehicle.kind.rawValue+delta+VehicleKind.allCases.count)%VehicleKind.allCases.count)!
             world.selectVehicle(vehicle.kind)
+            assists.frontBrakeBias = brakeBiasByVehicle[brakeBiasKey] ?? DrivingAssists.defaultBrakeBias
             session = RaceSession(); session.restore(records[recordKey])
             resetAtStart(); savePractice()
             announce("已切换 \(vehicle.kind.label) · 新练习",duration:2)
@@ -327,7 +331,7 @@ final class RacingGame {
                 autoDriveEnabled = true
                 announce("自动驾驶开启 · 操作油门、刹车或转向可接管", duration: 4)
             } else {
-                announce("请在维修结束后对准赛道方向", duration: 3)
+                announce("请挂入前进挡并对准赛道方向", duration: 3)
             }
         case "racingLine":
             racingLineEnabled.toggle();world.showRacingLine=racingLineEnabled;savePractice()
@@ -388,8 +392,23 @@ final class RacingGame {
             world.resetCamera()
             if hasStarted { announce(drivingView.label, duration: 1.5) }
             savePractice()
-        case "upshift": if !autoDriveEnabled && !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(1) }
-        case "downshift": if !autoDriveEnabled && !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(-1) }
+        case "upshift", "downshift":
+            guard hasStarted && !autoDriveEnabled && !isPaused && serviceRemaining == 0 else { return }
+            let previous = vehicle.gear
+            let result = vehicle.requestShift(action == "upshift" ? 1 : -1, pedals: input.pedals, automatic: assists.automatic)
+            if result == .stopAndBrake {
+                announce("接近静止后踩住刹车，并松开油门再换挡", duration: 3)
+            } else if result == .shifted && (previous <= 0 || vehicle.gear <= 0) {
+                announce("挡位 \(vehicle.gearLabel)", duration: 1.2)
+            }
+        case "brakeBiasDown", "brakeBiasUp":
+            let change = action == "brakeBiasUp" ? 0.005 : -0.005
+            let value = DrivingAssists.validatedBrakeBias(assists.frontBrakeBias + change)
+            guard value != assists.frontBrakeBias else { return }
+            assists.frontBrakeBias = value
+            brakeBiasByVehicle[brakeBiasKey] = value
+            savePractice()
+            announce(String(format:"前轴制动力 %.1f%%",value*100), duration: 2)
         case "abs": assists.absLevel = (assists.absLevel+1)%6; savePractice(); announce("ABS \(assists.absLevel)/5 · 0 关闭，5 强介入",duration:2)
         case "tc": assists.tcLevel = (assists.tcLevel+1)%6; savePractice(); announce("TCS \(assists.tcLevel)/5 · 0 关闭，5 强介入",duration:2)
         case "automatic": assists.automatic.toggle(); savePractice()
@@ -480,6 +499,13 @@ final class RacingGame {
         if let level = saved.tcLevel { assists.tcLevel = clamp(level,0,5) }
         input.hapticLevel = clamp(saved.hapticLevel ?? 3,0,4)
         assists.automatic = saved.automatic
+        for kind in VehicleKind.allCases {
+            let key = String(kind.rawValue)
+            if let value = saved.brakeBiasByVehicle?[key], value.isFinite {
+                brakeBiasByVehicle[key] = DrivingAssists.validatedBrakeBias(value)
+            }
+        }
+        assists.frontBrakeBias = brakeBiasByVehicle[brakeBiasKey] ?? DrivingAssists.defaultBrakeBias
         assists.steeringDeadzone = saved.deadzone.isFinite ? clamp(saved.deadzone, 0.02, 0.3) : 0.08
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
         if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
@@ -501,7 +527,7 @@ final class RacingGame {
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions,brakeBiasByVehicle:brakeBiasByVehicle)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             if let legacyPractice {

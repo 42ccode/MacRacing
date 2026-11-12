@@ -181,6 +181,8 @@ final class InputManager {
         case 12: action = "downshift"    // Q
         case 18: action = "abs"          // 1
         case 19: action = "tc"           // 2
+        case 21: action = "brakeBiasDown" // 4
+        case 23: action = "brakeBiasUp"   // 5
         case 20: action = "automatic"    // 3
         case 4: action = "help"          // H
         case 46: action = "mute"         // M
@@ -208,8 +210,15 @@ final class InputManager {
         stopHaptics()
     }
 
+    var pedals: DrivingInput {
+        let pad = controller?.extendedGamepad
+        let throttle = keys.contains(13) || keys.contains(126) ? 1 : Double(pad?.rightTrigger.value ?? 0)
+        let brake = keys.contains(1) || keys.contains(125) || keys.contains(49) ? 1 : Double(pad?.leftTrigger.value ?? 0)
+        return DrivingInput(throttle: throttle, brake: brake)
+    }
+
     func read(dt: Double, deadzone: Double, acceptDriving: Bool = true) -> DrivingInput {
-        var input = DrivingInput()
+        var input = pedals
         if let pad = controller?.extendedGamepad {
             func press(_ name: String, _ isPressed: Bool, _ action: String) {
                 if isPressed && !heldButtons.contains(name) { onAction?(action) }
@@ -225,8 +234,8 @@ final class InputManager {
             press("rb", pad.rightShoulder.isPressed, "upshift")
             press("service", pad.dpad.down.isPressed, "service")
             press("trackNext",pad.dpad.up.isPressed,"trackNext")
-            press("vehiclePrevious", pad.dpad.left.isPressed, "vehiclePrevious")
-            press("vehicleNext", pad.dpad.right.isPressed, "vehicleNext")
+            press("dpadLeft", pad.dpad.left.isPressed, acceptDriving ? "brakeBiasDown" : "vehiclePrevious")
+            press("dpadRight", pad.dpad.right.isPressed, acceptDriving ? "brakeBiasUp" : "vehicleNext")
             if pad.buttonA.isPressed {
                 resetHold += dt
                 if resetHold > 0.8 && !resetFired { resetFired = true; onAction?("reset") }
@@ -234,11 +243,7 @@ final class InputManager {
             let steering = Double(pad.leftThumbstick.xAxis.value)
             let magnitude = abs(steering)
             input.steering = magnitude > deadzone ? (steering < 0 ? -1 : 1) * (magnitude - deadzone) / (1 - deadzone) : 0
-            input.throttle = Double(pad.rightTrigger.value)
-            input.brake = Double(pad.leftTrigger.value)
         }
-        if keys.contains(13) || keys.contains(126) { input.throttle = 1 }
-        if keys.contains(1) || keys.contains(125) || keys.contains(49) { input.brake = 1 }
         let left = keys.contains(0) || keys.contains(123)
         let right = keys.contains(2) || keys.contains(124)
         if left || right { input.steering = (right ? 1.0 : 0) - (left ? 1.0 : 0) }

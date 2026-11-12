@@ -14,6 +14,13 @@ struct DrivingAssists {
     var tractionControl: Bool { get { tcLevel > 0 } set { tcLevel = newValue ? max(1,tcLevel) : 0 } }
     var automatic = true
     var steeringDeadzone = 0.08
+    static let defaultBrakeBias = 2500.0 / 4050.0
+    static let brakeBiasRange = 0.52...0.72
+    var frontBrakeBias = Self.defaultBrakeBias
+
+    static func validatedBrakeBias(_ value: Double) -> Double {
+        value.isFinite ? clamp(value, brakeBiasRange.lowerBound, brakeBiasRange.upperBound) : defaultBrakeBias
+    }
     init(abs: Bool = true, tractionControl: Bool = true, automatic: Bool = true,
          steeringDeadzone: Double = 0.08, absLevel: Int = 3, tcLevel: Int = 3) {
         self.absLevel = abs ? clamp(absLevel,0,5) : 0
@@ -160,6 +167,12 @@ struct Vehicle {
     var wheelRadius: Double { kind.radius }
     var trackWidth: Double { kind.track }
     let gearRatios = [3.20, 2.10, 1.52, 1.18, 0.95, 0.79]
+    var gearLabel: String { gear == -1 ? "R" : (gear == 0 ? "N" : String(gear)) }
+    private var transmissionRatio: Double {
+        if gear == -1 { return 2.80 }
+        return (1...gearRatios.count).contains(gear) ? gearRatios[gear-1] : 0
+    }
+    enum ShiftResult { case shifted, busy, unavailable, stopAndBrake }
     var forward: SIMD2<Double> { SIMD2(sin(heading), cos(heading)) }
     var modelX: SIMD2<Double> { SIMD2(cos(heading), -sin(heading)) }
     var speed: Double { simd_length(velocity) }
@@ -240,10 +253,22 @@ struct Vehicle {
         heading = atan2(sample.tangent.x, sample.tangent.y)
     }
 
-    mutating func shift(_ direction: Int) {
-        guard shiftCooldown <= 0 else { return }
-        gear = clamp(gear + direction, 1, 6)
-        shiftCooldown = 0.22
+    private mutating func engageGear(_ next: Int) {
+        gear = next
+        shiftCooldown = next == 0 ? 0.12 : 0.22
+    }
+
+    mutating func requestShift(_ direction: Int, pedals: DrivingInput, automatic: Bool) -> ShiftResult {
+        guard direction == -1 || direction == 1 else { return .unavailable }
+        let next = gear + direction
+        guard (-1...gearRatios.count).contains(next), !automatic || (gear <= 1 && next <= 1) else { return .unavailable }
+        guard shiftCooldown <= 0 else { return .busy }
+        let changesDirection = next == -1 || gear == -1 || (next == 1 && forwardSpeed < -0.75)
+        if changesDirection || (automatic && next == 0) {
+            guard speed < 0.75, pedals.brake >= 0.25, pedals.throttle < 0.08 else { return .stopAndBrake }
+        }
+        engageGear(next)
+        return .shifted
     }
 
     mutating func step(_ dt: Double, input: DrivingInput, assists: DrivingAssists,
@@ -271,15 +296,15 @@ struct Vehicle {
         let xs = [-halfTrack, halfTrack, -halfTrack, halfTrack]
         let zs = [lf, lf, -lr, -lr]
         let weight = mass * 9.81
-        let ratio = gearRatios[gear - 1] * 3.9
+        let ratio = transmissionRatio * 3.9
         let drivenOmega = (wheels[2].angularVelocity + wheels[3].angularVelocity) / 2
         let coupledRPM = abs(drivenOmega) * ratio * 60 / (2 * .pi)
-        let targetRPM = clamp(coupledRPM, 950 + throttle * 450, 7400)
+        let targetRPM = gear == 0 ? 950 + throttle * 6350 : clamp(coupledRPM, 950 + throttle * 450, 7400)
         rpm += (targetRPM - rpm) * (1 - exp(-dt * 20))
         shiftCooldown = max(0, shiftCooldown - dt)
-        if assists.automatic && shiftCooldown <= 0 {
-            if rpm > 6500 && gear < 6 { shift(1) }
-            else if rpm < 2450 && gear > 1 { shift(-1) }
+        if assists.automatic && gear > 0 && shiftCooldown <= 0 {
+            if rpm > 6500 && gear < gearRatios.count { engageGear(gear+1) }
+            else if rpm < 2450 && gear > 1 { engageGear(gear-1) }
         }
         let engineTorque = kind.torqueScale * powerFactor * (235 + 65 * sin(clamp((rpm - 1000) / 6500, 0, 1) * .pi)) * throttle
         // Thermostat restricts cooling below operating temperature; nose damage
@@ -289,8 +314,12 @@ struct Vehicle {
         coolantTemperature = clamp(coolantTemperature, 26, 160)
         damage.engine = min(1, damage.engine + max(0, coolantTemperature - 125) * dt * 0.00015)
         let engineDrag = throttle < 0.05 && abs(vf) > 0.8 ? 26.0 : 0.0
-        let axleTorque = (engineTorque * ignitionFraction - engineDrag) * gearRatios[gear - 1] * 3.9 * 0.91
-        let diffTransfer = clamp((wheels[3].angularVelocity - wheels[2].angularVelocity) * 15, -350, 350)
+        let driveDirection = gear < 0 ? -1.0 : 1.0
+        let reverseLimit = gear < 0 ? clamp((8 + vf)/2, 0, 1) : 1
+        let axleTorque = (driveDirection * engineTorque * ignitionFraction * reverseLimit - copysign(engineDrag, vf))
+            * transmissionRatio * 3.9 * 0.91
+        let diffTransfer = gear == 0 ? 0 : clamp((wheels[3].angularVelocity - wheels[2].angularVelocity) * 15, -350, 350)
+        let frontBrakeBias = DrivingAssists.validatedBrakeBias(assists.frontBrakeBias)
         let driveTorques = [0, 0, axleTorque / 2 + diffTransfer, axleTorque / 2 - diffTransfer]
         var totalFx = 0.0
         var totalFy = 0.0
@@ -389,23 +418,25 @@ struct Vehicle {
             var driveTorque = driveTorques[i]
             // Do not treat tiny coasting differential torques as accelerator
             // intervention (or amplify them into a false percentage at rest).
-            if assists.tractionControl && throttle > 0.01 && driveTorque > 1 {
+            let requestedDrive = driveTorque * driveDirection
+            if assists.tractionControl && throttle > 0.01 && requestedDrive > 1 {
                 let level = Double(clamp(assists.tcLevel,1,5))
                 let gripTorque = capacity * radius * (1.08-level*0.05)
-                let slipCut = clamp(1 - max(0, wheel.slipRatio - assists.tcSlipThreshold) * (1 + level), 0.12, 1)
-                let limited = min(driveTorque, gripTorque) * slipCut
-                if limited < driveTorque * 0.98 { tcActive = true }
-                tcReduction = max(tcReduction,1-limited/driveTorque)
-                driveTorque = limited
+                let slipCut = clamp(1 - max(0, wheel.slipRatio * driveDirection - assists.tcSlipThreshold) * (1 + level), 0.12, 1)
+                let limited = min(requestedDrive, gripTorque) * slipCut
+                if limited < requestedDrive * 0.98 { tcActive = true }
+                tcReduction = max(tcReduction,1-limited/requestedDrive)
+                driveTorque = limited * driveDirection
             }
-            let locking = wheel.slipRatio < -assists.absSlipThreshold && abs(u) > 3
+            let rollingDirection = u < 0 ? -1.0 : 1.0
+            let locking = wheel.slipRatio * rollingDirection < -assists.absSlipThreshold && abs(u) > 3
             let pressureTarget = assists.abs && locking ? (0.30-Double(clamp(assists.absLevel,1,5))*0.04) : 1.0
             wheel.brakePressure += (pressureTarget - wheel.brakePressure) * min(1, dt * 55)
             if assists.abs && brake > 0.1 {
                 absRelease = max(absRelease,1-wheel.brakePressure)
                 if locking { absActive = true }
             }
-            let brakeTorque = brake * (i < 2 ? 2500 : 1550) * wheel.brakeFadeFactor * (assists.abs ? wheel.brakePressure : 1)
+            let brakeTorque = brake * 4050 * (i < 2 ? frontBrakeBias : 1-frontBrakeBias) * wheel.brakeFadeFactor * (assists.abs ? wheel.brakePressure : 1)
             let inertia = 1.7
             let previousOmega = wheel.angularVelocity
             func balance(_ omega: Double) -> Double {
@@ -440,7 +471,7 @@ struct Vehicle {
             wheel.lateralForce = contact.fy
             let heat = abs(contact.fx * (omega * radius - u)) + abs(contact.fy * v)
             wheel.evolve(dt, slipPower: heat, speed: abs(u), load: load,
-                         locked: contact.ratio < -0.8, grass: onGrass)
+                         locked: contact.ratio * rollingDirection < -0.8, grass: onGrass)
             let fx = contact.fx * c - contact.fy * s
             let fy = contact.fx * s + contact.fy * c
             totalFx += fx

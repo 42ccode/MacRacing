@@ -32,3 +32,6 @@ xcrun swiftc -O -module-cache-path "$module_cache" Sources/Track.swift Tests/Rac
 xcrun swiftc -O -module-cache-path "$module_cache" \
   Sources/Track.swift Sources/Vehicle.swift Sources/ComputerDriving.swift Tests/ComputerDrivingChecks.swift -o .build/computer-driving-checks
 .build/computer-driving-checks
+
+xcrun swiftc -O -module-cache-path "$module_cache" Sources/Track.swift Sources/Vehicle.swift Tests/DrivetrainChecks.swift -o .build/drivetrain-checks
+.build/drivetrain-checks

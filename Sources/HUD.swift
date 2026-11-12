@@ -23,8 +23,8 @@ private enum HUDPanel: String, CaseIterable {
     func defaultFrame(in viewport: CGSize) -> CGRect {
         let width = viewport.width, height = viewport.height
         switch self {
-        case .vehicle: return CGRect(x:18,y:18,width:238,height:262)
-        case .map: return CGRect(x:18,y:290,width:238,height:192)
+        case .vehicle: return CGRect(x:18,y:18,width:238,height:292)
+        case .map: return CGRect(x:18,y:320,width:238,height:192)
         case .tyres: return CGRect(x:width-286,y:18,width:270,height:240)
         case .suspension: return CGRect(x:width-286,y:266,width:270,height:120)
         case .acceleration: return CGRect(x:width-286,y:394,width:270,height:150)
@@ -224,7 +224,7 @@ final class HUDView: NSView {
 
     private func drawVehicleInfo(_ game: RacingGame, x: CGFloat, y: CGFloat) {
         let car = game.vehicle
-        panel(NSRect(x:x,y:y,width:238,height:262),color:NSColor(white:0.035,alpha:0.86),radius:5)
+        panel(NSRect(x:x,y:y,width:238,height:292),color:NSColor(white:0.035,alpha:0.86),radius:5)
         text(car.kind.label,x:x+12,y:y+10,size:14,weight:.semibold,width:214)
         text(String(format:"实验预设 · %.0f kg · 后驱 / 6 挡",car.mass),x:x+12,y:y+34,size:10,color:muted,width:214)
         button("ABS \(game.assists.absLevel)/5",NSRect(x:x+12,y:y+57,width:100,height:28),action:"abs",active:car.absActive)
@@ -239,7 +239,10 @@ final class HUDView: NSView {
         text(String(format:"引擎损伤 %.0f%%   悬架 %.0f%%",car.damage.engine*100,(car.damage.suspension.max() ?? 0)*100),x:x+12,y:y+184,size:10,color:muted,width:214)
         text(String(format:"刹车 %.0f°C   制动力 %.0f%%",car.wheels.map(\.brakeTemperature).max() ?? 40,(car.wheels.map(\.brakeFadeFactor).min() ?? 1)*100),x:x+12,y:y+205,size:10,color:muted,width:214)
         text(String(format:"滑移 %.0f%%   复位后 %.2f km",car.tyreSlip*100,car.distanceTravelled/1000),x:x+12,y:y+225,size:10,color:muted,width:214)
-        text("损伤 0% 完好 · 1 / 2 调节辅助",x:x+12,y:y+244,size:8,color:muted,width:214)
+        button("−",NSRect(x:x+12,y:y+246,width:32,height:23),action:"brakeBiasDown")
+        text(String(format:"前轴制动力 %.1f%%",game.assists.frontBrakeBias*100),x:x+49,y:y+249,size:10,mono:true,width:140,align:.center)
+        button("+",NSRect(x:x+194,y:y+246,width:32,height:23),action:"brakeBiasUp")
+        text("4 / 5 或十字键 ← / → 调节制动力分配",x:x+12,y:y+275,size:8,color:muted,width:214)
     }
 
     private func drawTrackMap(_ game: RacingGame, x: CGFloat, y: CGFloat) {
@@ -480,7 +483,7 @@ final class HUDView: NSView {
                 line(CGPoint(x:bar.minX,y:bar.minY+bar.height*t),CGPoint(x:bar.maxX,y:bar.minY+bar.height*t),color:white.withAlphaComponent(0.16))
             }
         }
-        text("\(game.vehicle.gear)",x:x+241,y:y+14,size:40,color:yellow,weight:.bold,mono:true,width:38,align:.center)
+        text(game.vehicle.gearLabel,x:x+241,y:y+14,size:40,color:yellow,weight:.bold,mono:true,width:38,align:.center)
         text(String(format:"%.0f",game.vehicle.speedKPH),x:x+281,y:y+21,size:18,weight:.bold,mono:true,width:48,align:.center)
         text("km/h",x:x+281,y:y+44,size:11,color:muted,weight:.semibold,width:48,align:.center)
 
@@ -519,7 +522,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.8", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.9", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"

@@ -615,7 +615,7 @@ final class RacingWorld {
         (String(format: "%03d", Int(vehicle.speedKPH)) as NSString).draw(at: NSPoint(x: 23, y: 24), withAttributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 106, weight: .medium), .foregroundColor: NSColor.white
         ])
-        ("\(vehicle.gear)" as NSString).draw(at: NSPoint(x: 369, y: 29), withAttributes: [
+        (vehicle.gearLabel as NSString).draw(at: NSPoint(x: 369, y: 29), withAttributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 95, weight: .bold), .foregroundColor: lime
         ])
         ("KM/H                                  GEAR" as NSString).draw(at: NSPoint(x: 27, y: 13), withAttributes: [

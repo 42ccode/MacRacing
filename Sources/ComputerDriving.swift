@@ -13,7 +13,7 @@ struct ComputerDriver {
     }
 
     static func canDrive(_ vehicle: Vehicle, at location: TrackLocation, on circuit: Circuit) -> Bool {
-        location.distance < circuit.width/2 + 1 && simd_dot(vehicle.forward, location.tangent) > 0.25
+        vehicle.gear > 0 && location.distance < circuit.width/2 + 1 && simd_dot(vehicle.forward, location.tangent) > 0.25
     }
 
     static func input(for car: Vehicle, at location: TrackLocation, circuit: Circuit, line: RacingLine,

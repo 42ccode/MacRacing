@@ -45,7 +45,8 @@ struct HapticFeedback {
             }.max() ?? 0
         }
         let absPulse = vehicle.absActive && input.brake>0.1 ? vehicle.absRelease*(0.4+0.6*max(0,sin(phase * .pi*26))) : 0
-        let spin = input.throttle>0.1 ? clamp((max(vehicle.wheels[2].slipRatio,vehicle.wheels[3].slipRatio)-0.12)*0.7,0,0.5)*rolling : 0
+        let driveDirection = vehicle.gear < 0 ? -1.0 : 1.0
+        let spin = input.throttle>0.1 && vehicle.gear != 0 ? clamp((max(vehicle.wheels[2].slipRatio*driveDirection,vehicle.wheels[3].slipRatio*driveDirection)-0.12)*0.7,0,0.5)*rolling : 0
         let target = HapticOutput(left:side([1,3])+impact.x*0.7+absPulse*0.12,
             right:side([0,2])+impact.y*0.7+spin*0.18,brake:absPulse*0.6,throttle:spin,
             sharpness:vehicle.kerbFeedback>0.1 ? 0.65 : 0.3)

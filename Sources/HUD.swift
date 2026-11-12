@@ -99,17 +99,18 @@ final class HUDView: NSView {
         if game.hasStarted {
             if game.showHUD {
                 drawCompactTiming(game, width: w, height: h)
+                if game.serviceRemaining==0 {drawLapDelta(game,width:w)}
                 drawPedals(game, height: h)
                 drawCondition(game, width: w)
                 drawVehicleInfo(game)
             }
             if game.noticeRemaining > 0 {
-                let rect = NSRect(x: (w - 460) / 2, y: 30, width: 460, height: 30)
+                let rect = NSRect(x: (w - 460) / 2, y: 155, width: 460, height: 30)
                 panel(rect)
                 text(game.notice, x: rect.minX + 14, y: rect.minY + 6, size: 11, color: lime, weight: .semibold, width: 432, align: .center)
             }
             if !game.session.validLap && !game.isPaused {
-                text("本圈无效 · 驶回赛道，下圈重新计时", x: (w - 440) / 2, y: h - 266, size: 13,
+                text(game.session.status, x: (w - 440) / 2, y: h - 266, size: 13,
                      color: NSColor(rgb: 0xFFD19A), weight: .semibold, width: 440, align: .center)
             }
             if game.serviceRemaining > 0 {
@@ -160,6 +161,11 @@ final class HUDView: NSView {
         let path = NSBezierPath(); path.move(to:project(points[0]))
         for p in points.dropFirst() { path.line(to:project(p)) }
         path.close(); path.lineWidth = 4; NSColor(white:0.5,alpha:0.8).setStroke(); path.stroke()
+        for sector in 1...2 {
+            let p=project(game.circuit.sample(at:game.circuit.length*Double(sector)/3).point)
+            NSColor(rgb:0x78B8C8).setFill();NSRect(x:p.x-2.5,y:p.y-2.5,width:5,height:5).fill()
+            text("S\(sector)",x:p.x+5,y:p.y-8,size:8,color:white,width:20)
+        }
         let start = project(game.circuit.start.point)
         white.setFill(); NSRect(x:start.x-3,y:start.y-3,width:6,height:6).fill()
         let p = project(game.vehicle.position)
@@ -285,9 +291,34 @@ final class HUDView: NSView {
         for (i,item) in [("Current",lapTime(game.session.elapsed)),("Last lap",lapTime(game.session.last)),("Best lap",lapTime(game.session.best))].enumerated() {
             let row = y+34+CGFloat(i)*23
             text(item.0,x:x+10,y:row,size:11,color:muted)
-            text(item.1,x:x+90,y:row,size:13,color:i==0 && !game.session.validLap ? NSColor(rgb:0xE69B69) : white,mono:true,width:120,align:.right)
+            text(item.1,x:x+90,y:row,size:13,color:(i==0 && !game.session.validLap) || (i==1 && game.session.last != nil && !game.session.lastValid) ? NSColor(rgb:0xE69B69) : white,mono:true,width:120,align:.right)
         }
         text("Y / Tab 六种视角  ·  V 隐藏仪表",x:x+10,y:y+109,size:9,color:muted)
+    }
+
+    private func drawLapDelta(_ game:RacingGame,width:CGFloat) {
+        let x=(width-340)/2, y:CGFloat=18, session=game.session
+        let green=NSColor(rgb:0x78D947), red=NSColor(rgb:0xED696C)
+        panel(NSRect(x:x,y:y,width:340,height:126),color:NSColor(white:0.035,alpha:0.86),radius:5)
+        text("个人最佳圈速差",x:x+12,y:y+9,size:10,color:muted,width:160)
+        text("DELTA / PB",x:x+220,y:y+9,size:9,color:muted,mono:true,width:108,align:.right)
+        let delta=session.delta
+        text(delta.map {String(format:"%+.3f",$0)} ?? "—.——",x:x+12,y:y+27,size:30,
+             color:delta.map {$0<=0 ? green : red} ?? muted,weight:.semibold,mono:true,width:165)
+        text(session.status,x:x+184,y:y+31,size:10,color:session.validLap ? muted : red,width:145)
+        text(session.best == nil ? "完成有效圈建立参考" : "负值领先 · 正值落后",x:x+184,y:y+49,size:9,color:muted,width:145)
+        let previous=session.sectors.isEmpty && session.last != nil
+        let values=previous ? session.lastSectors : session.sectors
+        text(previous ? "上圈分段" : "本圈分段",x:x+12,y:y+72,size:9,color:muted,width:120)
+        for i in 0..<3 {
+            let sx=x+12+CGFloat(i)*108
+            let value=i<values.count ? values[i] : nil
+            let valid=previous ? session.lastValid : session.validLap
+            let reference=i<session.bestSectors.count ? session.bestSectors[i] : nil
+            let color: NSColor = !valid ? red : (value != nil && reference != nil && value!<=reference!+0.001 ? green : white)
+            text("S\(i+1)",x:sx,y:y+96,size:10,color:muted,width:22)
+            text(value.map {String(format:"%.3f",$0)} ?? "—.——",x:sx+22,y:y+93,size:13,color:color,mono:true,width:74,align:.right)
+        }
     }
 
     private func drawPedals(_ game: RacingGame, height: CGFloat) {
@@ -344,6 +375,13 @@ final class HUDView: NSView {
         text(String(format:"%.0f",game.vehicle.speedKPH),x:x+281,y:y+21,size:18,weight:.bold,mono:true,width:48,align:.center)
         text("km/h",x:x+281,y:y+44,size:11,color:muted,weight:.semibold,width:48,align:.center)
 
+        for lamp in 0..<8 {
+            let active=game.vehicle.rpm>=3500+Double(lamp)*400
+            let color=lamp<4 ? green : (lamp<6 ? yellow : red)
+            (active ? color : NSColor(white:0.15,alpha:1)).setFill()
+            NSRect(x:x+242+CGFloat(lamp)*11,y:y+68,width:8,height:4).fill()
+        }
+
         // Positive controller input is driver-right; the flipped HUD rotates
         // clockwise for a positive angle. This is an input indicator, not FFB.
         let raw=game.drivingInput.steering
@@ -372,7 +410,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.5.2", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.6", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"

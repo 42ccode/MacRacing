@@ -24,7 +24,9 @@ with ZipFile(archive, 'w', compression=ZIP_DEFLATED, compresslevel=5) as out:
     credits = base/'Docs'/f'Driving-{release}'/'README.md'
     if credits.exists():
         out.write(credits,f'{root}/实机截图/README.md')
-    for f in sorted((base/'Docs'/f'Driving-{release}').glob('*.jpg')):
+    for f in sorted((base/'Docs'/f'Driving-{release}').glob('*')):
+        if f.suffix.lower() not in {'.jpg', '.png'}:
+            continue
         out.write(f,f'{root}/实机截图/{f.name}')
 with ZipFile(archive) as out:
     assert out.testzip() is None

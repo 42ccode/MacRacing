@@ -22,6 +22,7 @@ struct SavedPractice: Codable {
     var absLevel: Int? = nil
     var tcLevel: Int? = nil
     var hapticLevel: Int? = nil
+    var records: [String:LapRecord]? = nil
 }
 
 final class RacingGame {
@@ -35,6 +36,9 @@ final class RacingGame {
     var assists = DrivingAssists()
     var drivingInput = DrivingInput()
     var session = RaceSession()
+    private var records: [String:LapRecord] = [:]
+    private var legacyPractice: Data?
+    private var recordKey: String { LapRecord.key(vehicle:vehicle.kind,circuit:circuit.kind) }
     var location: TrackLocation
     var hasStarted = false
     var isPaused = true
@@ -182,7 +186,7 @@ final class RacingGame {
             if session.newBest {
                 announce("个人最佳  \(lapTime(session.best))  ·  幽灵车已更新", duration: 6)
                 savePractice()
-            } else { announce("完成一圈  \(lapTime(session.last))", duration: 5) }
+            } else { announce((session.lastValid ? "完成有效圈  " : "本圈无效 · 不计入最佳  ")+lapTime(session.last), duration:5) }
         }
         telemetryClock += dt
         if telemetryClock >= 0.1 {
@@ -235,18 +239,18 @@ final class RacingGame {
             world.resetCamera()
         case "vehicleNext", "vehiclePrevious":
             guard isPaused && serviceRemaining == 0 else { return }
-            saveTelemetry()
+            saveTelemetry(); savePractice()
             let delta = action == "vehicleNext" ? 1 : -1
             vehicle.kind = VehicleKind(rawValue:(vehicle.kind.rawValue+delta+VehicleKind.allCases.count)%VehicleKind.allCases.count)!
             world.selectVehicle(vehicle.kind)
-            session = RaceSession()
+            session = RaceSession(); session.restore(records[recordKey])
             resetAtStart(); savePractice()
             announce("已切换 \(vehicle.kind.label) · 新练习",duration:2)
         case "trackNext":
             guard isPaused && serviceRemaining == 0 else { return }
-            saveTelemetry()
+            saveTelemetry(); savePractice()
             changeCircuit(CircuitKind(rawValue:(circuit.kind.rawValue+1)%CircuitKind.allCases.count)!)
-            session = RaceSession(); resetAtStart(); savePractice()
+            session = RaceSession(); session.restore(records[recordKey]); resetAtStart(); savePractice()
             announce("已切换 \(circuit.kind.label) · 新练习",duration:2)
         case "compound":
             guard isPaused && serviceRemaining == 0 else { return }
@@ -380,13 +384,16 @@ final class RacingGame {
 
     private func loadPractice() {
         let url = dataDirectory.appendingPathComponent("practice.json")
-        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4, 5, 6, 7, 8].contains(saved.version) else { return }
+        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), (1...9).contains(saved.version) else { return }
+        if saved.version<9 {legacyPractice=data}
         if let raw = saved.vehicleKind, let kind = VehicleKind(rawValue:raw) { vehicle.kind = kind }
         if let raw = saved.circuitKind, let kind = CircuitKind(rawValue:raw), kind != circuit.kind { changeCircuit(kind) }
-        if saved.version == 8, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
-           saved.ghost.allSatisfy({ $0.time.isFinite && $0.x.isFinite && $0.z.isFinite && $0.heading.isFinite }) {
-            session.best = best
-            session.bestGhost = saved.ghost
+        if saved.version==9, let savedRecords=saved.records {
+            for car in VehicleKind.allCases { for track in CircuitKind.allCases {
+                let key=LapRecord.key(vehicle:car,circuit:track)
+                if let record=savedRecords[key],record.isValid {records[key]=record}
+            }}
+            session.restore(records[recordKey])
         }
         assists.abs = saved.abs
         assists.tractionControl = saved.tractionControl
@@ -404,15 +411,21 @@ final class RacingGame {
     }
 
     private func savePractice() {
-        let saved = SavedPractice(version: 8, best: session.best, ghost: session.bestGhost,
+        if let record=session.record {records[recordKey]=record}
+        let saved = SavedPractice(version: 9, best: session.best, ghost: session.bestGhost,
             abs: assists.abs, tractionControl: assists.tractionControl, automatic: assists.automatic,
             deadzone: assists.steeringDeadzone, muted: sound.muted, cockpit: cockpit,
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+            if let legacyPractice {
+                let backup=dataDirectory.appendingPathComponent("practice-before-1.6.json")
+                if !FileManager.default.fileExists(atPath:backup.path) {try legacyPractice.write(to:backup,options:.atomic)}
+                self.legacyPractice=nil
+            }
             let data = try JSONEncoder().encode(saved)
             try data.write(to: dataDirectory.appendingPathComponent("practice.json"), options: .atomic)
         } catch { announce("设置保存失败：请将应用放在可写文件夹中", duration: 4) }

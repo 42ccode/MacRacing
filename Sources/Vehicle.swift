@@ -497,6 +497,37 @@ struct GhostFrame: Codable {
     let heading: Double
 }
 
+struct LapProgress: Codable {
+    let fraction: Double
+    let time: Double
+}
+
+struct LapRecord: Codable {
+    let time: Double
+    let sectors: [Double]
+    let trace: [LapProgress]
+    let ghost: [GhostFrame]
+
+    static func key(vehicle: VehicleKind, circuit: CircuitKind) -> String { "timing9-\(vehicle.rawValue)-\(circuit.rawValue)" }
+    var isValid: Bool {
+        guard time.isFinite, time>15, time<=3600, sectors.count==3,
+              sectors.allSatisfy({$0.isFinite && $0>0}), abs(sectors.reduce(0,+)-time)<0.02,
+              trace.count>=2, trace.count<=20000, ghost.count>=2, ghost.count<=20000,
+              trace.first?.time==0, (trace.first?.fraction ?? 1)<=0.02, ghost.first?.time==0,
+              trace.last?.fraction==1, abs((trace.last?.time ?? 0)-time)<0.001 else {return false}
+        for (i,s) in trace.enumerated() {
+            guard s.fraction.isFinite, (0...1).contains(s.fraction), s.time.isFinite, (0...time).contains(s.time) else {return false}
+            if i>0 && (s.fraction<=trace[i-1].fraction || s.time<=trace[i-1].time) {return false}
+        }
+        for (i,g) in ghost.enumerated() {
+            guard g.time.isFinite, (0...time).contains(g.time), g.x.isFinite, g.z.isFinite, g.heading.isFinite,
+                  abs(g.x)<100000, abs(g.z)<100000 else {return false}
+            if i>0 && g.time<=ghost[i-1].time {return false}
+        }
+        return true
+    }
+}
+
 struct RaceSession {
     var elapsed = 0.0
     var lap = 1
@@ -508,74 +539,126 @@ struct RaceSession {
     var currentGhost: [GhostFrame] = []
     var bestGhost: [GhostFrame] = []
     var newBest = false
+    var bestTrace: [LapProgress] = []
+    var bestSectors: [Double] = []
+    private(set) var sectors: [Double] = []
+    private(set) var lastSectors: [Double] = []
+    private(set) var lastValid = false
+    private(set) var invalidReason = ""
+    private(set) var waitingForStart = false
+    private(set) var delta: Double?
+    private var currentTrace: [LapProgress] = []
+    private var sectorSplits: [Double] = []
     private var previousProgress: Double?
     private var recordingClock = 0.0
+    private var wrongWayTime = 0.0
     private var started = false
-    private var waitingForStart = false
 
     var nextCheckpointFraction: Double { checkpoint < 3 ? Double(checkpoint + 1) / 4 : 1 }
-
-    mutating func resetLap(at progress: Double) {
-        elapsed = 0
-        checkpoint = 0
-        validLap = true
-        previousProgress = progress
-        currentGhost = []
-        recordingClock = 0
-        started = false
-        // A recovery on the back half must return to the start before timing.
-        waitingForStart = progress > 20
+    var status: String {
+        waitingForStart ? "出场圈 · 通过起点后计时" : (!validLap ? "本圈无效 · "+invalidReason : (started ? "有效圈" : "准备起步"))
     }
-
+    var record: LapRecord? {
+        guard let best else {return nil}
+        let result=LapRecord(time:best,sectors:bestSectors,trace:bestTrace,ghost:bestGhost)
+        return result.isValid ? result : nil
+    }
+    mutating func restore(_ record: LapRecord?) {
+        guard let record, record.isValid else {return}
+        best=record.time;bestSectors=record.sectors;bestTrace=record.trace;bestGhost=record.ghost
+    }
+    mutating func invalidate(_ reason:String) {
+        if validLap {invalidReason=reason};validLap=false;delta=nil
+    }
+    mutating func resetLap(at progress: Double) {
+        elapsed=0;checkpoint=0;validLap=true;invalidReason="";delta=nil
+        previousProgress=progress;currentGhost=[];currentTrace=[];sectors=[];sectorSplits=[]
+        recordingClock=0;wrongWayTime=0;started=false;waitingForStart=progress>20
+    }
+    private mutating func beginFlyingLap(progress:Double,remainder:Double,vehicle:Vehicle) {
+        resetLap(at:0);waitingForStart=false;started=true;elapsed=remainder;previousProgress=progress
+        currentTrace=[LapProgress(fraction:0,time:0)]
+        currentGhost=[GhostFrame(time:0,x:vehicle.position.x,z:vehicle.position.y,heading:vehicle.heading)]
+    }
+    func referenceTime(at fraction:Double) -> Double? {
+        guard bestTrace.count>=2, fraction>=bestTrace[0].fraction, fraction<=1 else {return nil}
+        var lo=0, hi=bestTrace.count-1
+        while lo+1<hi {let mid=(lo+hi)/2;if bestTrace[mid].fraction<=fraction {lo=mid}else{hi=mid}}
+        let a=bestTrace[lo],b=bestTrace[hi]
+        return a.time+(b.time-a.time)*(fraction-a.fraction)/(b.fraction-a.fraction)
+    }
     mutating func step(_ dt: Double, vehicle: Vehicle, location: TrackLocation, trackLength: Double, trackWidth: Double) -> Bool {
-        newBest = false
-        if !started && vehicle.speed > 0.8 && !waitingForStart { started = true }
-        if started { elapsed += dt }
-        if location.distance > trackWidth * 0.5 + 2.5 && started { validLap = false }
+        newBest=false
+        let fraction=clamp(location.progress/trackLength,0,1)
+        let forwardSpeed=simd_dot(vehicle.velocity,location.tangent), movingForward=forwardSpeed>0.5
+        if !started && vehicle.speed>0.8 && !waitingForStart {
+            started=true
+            currentTrace=[LapProgress(fraction:clamp((previousProgress ?? location.progress)/trackLength,0,1),time:0)]
+            currentGhost=[GhostFrame(time:0,x:vehicle.position.x,z:vehicle.position.y,heading:vehicle.heading)]
+        }
+        let before=elapsed
+        if started {
+            elapsed += dt
+            if location.distance>trackWidth*0.5+2.5 {invalidate("驶出赛道边界")}
+            wrongWayTime=forwardSpeed < -1 ? wrongWayTime+dt : 0
+            if wrongWayTime>0.6 {invalidate("逆向行驶")}
+            if elapsed>3600 {invalidate("超过单圈记录时限")}
+        }
+        if let previous=previousProgress {
+            let crossed=previous>trackLength*0.90 && location.progress<trackLength*0.10 && movingForward
+            let distance=crossed ? trackLength-previous+location.progress : location.progress-previous
+            if started && abs(distance)>trackLength*0.03 {invalidate("跳过赛道检查点")}
+            if crossed && waitingForStart {
+                let share=(trackLength-previous)/max(distance,0.001)
+                beginFlyingLap(progress:location.progress,remainder:dt*(1-share),vehicle:vehicle)
+                return false
+            }
+            if crossed && started {
+                let share=clamp((trackLength-previous)/max(distance,0.001),0,1)
+                let finished=before+dt*share
+                if checkpoint != 3 {invalidate("缺少赛道检查点")}
+                if sectorSplits.count != 2 {invalidate("缺少分段检查点")}
+                let completeSectors=sectors+[max(0,finished-(sectorSplits.last ?? 0))]
+                let finishedValid=validLap && finished>15
+                if currentTrace.last!.fraction<1 && (currentTrace.last?.time ?? 0)<finished {currentTrace.append(LapProgress(fraction:1,time:finished))}
+                if (currentGhost.last?.time ?? 0)<finished {currentGhost.append(GhostFrame(time:finished,x:vehicle.position.x,z:vehicle.position.y,heading:vehicle.heading))}
+                let candidate=LapRecord(time:finished,sectors:completeSectors,trace:currentTrace,ghost:currentGhost)
+                let recorded=finished>15
+                if recorded {
+                    last=finished;lastSectors=completeSectors.count==3 ? completeSectors : [];lastValid=finishedValid;completedLaps += 1;lap += 1
+                    if finishedValid && candidate.isValid && (best == nil || finished<best!) {
+                        best=finished;bestGhost=currentGhost;bestTrace=currentTrace;bestSectors=completeSectors;newBest=true
+                    }
+                }
+                beginFlyingLap(progress:location.progress,remainder:dt*(1-share),vehicle:vehicle)
+                return recorded
+            }
+            if started && movingForward && distance>0 && distance<trackLength*0.03 {
+                if checkpoint<3 {
+                    let target=Double(checkpoint+1)*trackLength/4
+                    if previous<target && location.progress>=target {checkpoint += 1}
+                }
+                if sectorSplits.count<2 {
+                    let target=Double(sectorSplits.count+1)*trackLength/3
+                    if previous<target && location.progress>=target {
+                        let split=before+dt*(target-previous)/distance
+                        sectors.append(split-(sectorSplits.last ?? 0));sectorSplits.append(split)
+                    }
+                }
+            }
+        }
         if started {
             recordingClock += dt
-            if recordingClock >= 0.05 {
-                recordingClock = 0
-                currentGhost.append(GhostFrame(time: elapsed, x: vehicle.position.x, z: vehicle.position.y, heading: vehicle.heading))
+            if recordingClock>=0.05 {
+                recordingClock.formTruncatingRemainder(dividingBy:0.05)
+                if currentGhost.count<19998 {
+                    currentGhost.append(GhostFrame(time:elapsed,x:vehicle.position.x,z:vehicle.position.y,heading:vehicle.heading))
+                    if fraction>(currentTrace.last?.fraction ?? -1) {currentTrace.append(LapProgress(fraction:fraction,time:elapsed))}
+                } else {invalidate("超过单圈记录容量")}
             }
         }
-        let fraction = location.progress / trackLength
-        let movingForward = simd_dot(vehicle.velocity, location.tangent) > 0.5
-        if let previousProgress {
-            let crossedFinish = previousProgress > trackLength * 0.90 && location.progress < trackLength * 0.10 && movingForward
-            if waitingForStart && crossedFinish {
-                waitingForStart = false
-                started = true
-                elapsed = 0
-                checkpoint = 0
-                validLap = true
-                currentGhost = []
-            } else if checkpoint == 3 && crossedFinish && elapsed > 15 {
-                let finished = elapsed
-                last = finished
-                completedLaps += 1
-                if validLap && (best == nil || finished < best!) {
-                    best = finished
-                    bestGhost = currentGhost
-                    newBest = true
-                }
-                lap += 1
-                elapsed = 0
-                checkpoint = 0
-                validLap = true
-                currentGhost = []
-                self.previousProgress = location.progress
-                return true
-            }
-            let previousFraction = previousProgress / trackLength
-            if checkpoint < 3 {
-                let target = Double(checkpoint + 1) / 4
-                if previousFraction < target && fraction >= target && fraction - previousFraction < 0.03 && movingForward {
-                    checkpoint += 1
-                }
-            }
-        }
-        previousProgress = location.progress
+        delta = started && validLap && movingForward ? referenceTime(at:fraction).map {elapsed-$0} : nil
+        previousProgress=location.progress
         return false
     }
 

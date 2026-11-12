@@ -46,6 +46,7 @@ final class RacingGame {
     var tyreSetup = TyreSetup()
     var serviceRemaining = 0.0
     var gTrace: [SIMD2<Double>] = []
+    var inputHistory = InputHistory()
     var notice = ""
     var noticeRemaining = 0.0
     private var timer: Timer?
@@ -120,6 +121,7 @@ final class RacingGame {
         } else { accumulator = 0 }
         if noticeRemaining > 0 { noticeRemaining -= dt }
         let driving = hasStarted && !isPaused && serviceRemaining == 0
+        inputHistory.update(input:drivingInput,absActive:vehicle.absActive,dt:dt,active:driving)
         impactFeedback *= exp(-dt*12)
         let signal = feedback.update(vehicle:vehicle,input:drivingInput,impact:impactFeedback,dt:dt,active:driving)
         input.updateHaptics(signal,dt:dt,driving:driving)
@@ -223,6 +225,7 @@ final class RacingGame {
             location = circuit.nearest(to: vehicle.position)
             session.resetLap(at: location.progress)
             gTrace.removeAll(keepingCapacity: true)
+            inputHistory.reset()
             serviceRemaining = 12
             collisionCooldown = 0
             accumulator = 0
@@ -298,6 +301,7 @@ final class RacingGame {
             let sample = circuit.sample(at: location.progress)
             vehicle.reset(at: sample, preservingCondition: true)
             gTrace.removeAll(keepingCapacity: true)
+            inputHistory.reset()
             location = circuit.nearest(to: vehicle.position)
             session.resetLap(at: location.progress)
             world.resetCamera()
@@ -344,6 +348,7 @@ final class RacingGame {
 
     private func resetAtStart() {
         gTrace.removeAll(keepingCapacity: true)
+        inputHistory.reset()
         feedback.reset(); impactFeedback = .zero; input.stopHaptics()
         collisionCooldown = 0
         serviceRemaining = 0

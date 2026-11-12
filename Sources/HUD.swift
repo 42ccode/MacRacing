@@ -102,7 +102,6 @@ final class HUDView: NSView {
                 drawPedals(game, height: h)
                 drawCondition(game, width: w)
                 drawVehicleInfo(game)
-                if game.drivingView != .cockpit { drawDashboard(game, width: w, height: h) }
             }
             if game.noticeRemaining > 0 {
                 let rect = NSRect(x: (w - 460) / 2, y: 30, width: 460, height: 30)
@@ -292,45 +291,72 @@ final class HUDView: NSView {
     }
 
     private func drawPedals(_ game: RacingGame, height: CGFloat) {
-        let x: CGFloat = 18, y = height-212
-        panel(NSRect(x:x,y:y,width:238,height:194),color:NSColor(white:0.025,alpha:0.88),radius:4)
-        text("踏板输入",x:x+12,y:y+9,size:10,color:muted,weight:.semibold,width:100)
-        text("INPUT",x:x+174,y:y+10,size:9,color:muted,mono:true,width:50,align:.right)
-        line(CGPoint(x:x+12,y:y+29),CGPoint(x:x+226,y:y+29),color:white.withAlphaComponent(0.12))
-
-        text("\(game.vehicle.gear)",x:x+10,y:y+34,size:44,weight:.medium,mono:true,width:70,align:.center)
-        text(game.assists.automatic ? "AUTO" : "MANUAL",x:x+10,y:y+89,size:9,color:muted,width:70,align:.center)
-        text(String(format:"%.0f",game.vehicle.speedKPH),x:x+8,y:y+118,size:24,weight:.medium,mono:true,width:74,align:.center)
-        text("KM/H",x:x+10,y:y+151,size:9,color:muted,width:70,align:.center)
-        line(CGPoint(x:x+94,y:y+40),CGPoint(x:x+94,y:y+179),color:white.withAlphaComponent(0.10))
-
-        // Driver input before ABS/TCS modulation. LT stays on the left, RT on
-        // the right; simultaneous trigger inputs remain independently visible.
-        let entries = [("刹车", "LT", game.drivingInput.brake, NSColor(rgb:0xF14650)),
-                       ("油门", "RT", game.drivingInput.throttle, NSColor(rgb:0x34D774))]
-        for (i,entry) in entries.enumerated() {
-            let raw = entry.2
-            let value = CGFloat(raw.isFinite ? clamp(raw,0,1) : 0)
-            let bx = x+119+CGFloat(i)*59, top = y+65, barHeight: CGFloat = 96
-            text(String(format:"%.0f%%",Double(value)*100),x:bx-10,y:y+38,size:15,
-                 color:value>0 ? entry.3 : muted,weight:.semibold,mono:true,width:52,align:.center)
-            NSColor(white:0.12,alpha:1).setFill()
-            NSRect(x:bx,y:top,width:32,height:barHeight).fill()
-            if value>0 {
-                entry.3.setFill()
-                NSRect(x:bx,y:top+barHeight*(1-value),width:32,height:barHeight*value).fill()
-                // No easing or minimum fill: even a small release remains exact.
-                line(CGPoint(x:bx,y:top+barHeight*(1-value)),
-                     CGPoint(x:bx+32,y:top+barHeight*(1-value)),color:.white.withAlphaComponent(0.8))
-            }
-            for tick in 0...4 {
-                let ty = top+barHeight*CGFloat(tick)/4
-                let color = white.withAlphaComponent(tick==0 || tick==4 ? 0.5 : 0.22)
-                line(CGPoint(x:bx-5,y:ty),CGPoint(x:bx-1,y:ty),color:color)
-                line(CGPoint(x:bx+33,y:ty),CGPoint(x:bx+37,y:ty),color:color)
-            }
-            text(entry.0+" "+entry.1,x:bx-10,y:y+169,size:10,color:muted,width:52,align:.center)
+        let x: CGFloat = 18, y = height-100
+        let green = NSColor(rgb:0x78D947), red = NSColor(rgb:0xDF404A), yellow = NSColor(rgb:0xFFD644)
+        let rect = NSRect(x:x,y:y,width:414,height:82)
+        panel(rect,color:NSColor(rgb:0x23242A,alpha:0.94),radius:10)
+        let plot = NSRect(x:x+7,y:y+10,width:185,height:62)
+        NSColor(white:0.18,alpha:1).setFill();plot.fill()
+        for tick in 0...10 {
+            let gx=plot.minX+plot.width*CGFloat(tick)/10
+            line(CGPoint(x:gx,y:plot.minY),CGPoint(x:gx,y:plot.maxY),color:white.withAlphaComponent(tick%2==0 ? 0.07 : 0.025))
         }
+        for tick in 0...2 {
+            let gy=plot.minY+plot.height*CGFloat(tick)/2
+            line(CGPoint(x:plot.minX,y:gy),CGPoint(x:plot.maxX,y:gy),color:white.withAlphaComponent(0.06))
+        }
+        func point(_ sample:InputHistory.Sample,_ value:Double) -> CGPoint {
+            CGPoint(x:plot.maxX-CGFloat((game.inputHistory.time-sample.time)/InputHistory.duration)*plot.width,
+                    y:plot.maxY-CGFloat(value)*plot.height)
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect:plot.insetBy(dx:-1,dy:-1)).addClip()
+        let samples=game.inputHistory.samples
+        func trace(color:NSColor,value:(InputHistory.Sample)->Double,enabled:(InputHistory.Sample)->Bool) {
+            let path=NSBezierPath();path.lineWidth=1.8;path.lineJoinStyle = .round;path.lineCapStyle = .round
+            var connected=false
+            for i in 1..<max(1,samples.count) {
+                let a=samples[i-1], b=samples[i]
+                if enabled(b) {
+                    if !connected {path.move(to:point(a,value(a)))}
+                    path.line(to:point(b,value(b)));connected=true
+                } else {connected=false}
+            }
+            color.setStroke();path.stroke()
+        }
+        trace(color:green,value:{$0.throttle},enabled:{_ in true})
+        trace(color:red,value:{$0.brake},enabled:{_ in true})
+        trace(color:yellow,value:{$0.brake},enabled:{$0.absActive && $0.brake>0.01})
+        NSGraphicsContext.restoreGraphicsState()
+        // The two bars are LT (left, brake) and RT (right, throttle).
+        for (i,raw) in [game.drivingInput.brake,game.drivingInput.throttle].enumerated() {
+            let value=CGFloat(raw.isFinite ? clamp(raw,0,1) : 0)
+            let bar=NSRect(x:x+204+CGFloat(i)*19,y:y+10,width:13,height:62)
+            NSColor(white:0.12,alpha:1).setFill();bar.fill()
+            NSColor.white.withAlphaComponent(0.06).setFill();NSRect(x:bar.minX+2,y:bar.minY+2,width:bar.width-4,height:bar.height-4).fill()
+            (i==0 ? (game.vehicle.absActive && value>0 ? yellow : red) : green).setFill()
+            NSRect(x:bar.minX,y:bar.maxY-bar.height*value,width:bar.width,height:bar.height*value).fill()
+            for t in [0.0,1.0] {
+                line(CGPoint(x:bar.minX,y:bar.minY+bar.height*t),CGPoint(x:bar.maxX,y:bar.minY+bar.height*t),color:white.withAlphaComponent(0.16))
+            }
+        }
+        text("\(game.vehicle.gear)",x:x+241,y:y+14,size:40,color:yellow,weight:.bold,mono:true,width:38,align:.center)
+        text(String(format:"%.0f",game.vehicle.speedKPH),x:x+281,y:y+21,size:18,weight:.bold,mono:true,width:48,align:.center)
+        text("km/h",x:x+281,y:y+44,size:11,color:muted,weight:.semibold,width:48,align:.center)
+
+        // Positive controller input is driver-right; the flipped HUD rotates
+        // clockwise for a positive angle. This is an input indicator, not FFB.
+        let raw=game.drivingInput.steering
+        let angle=CGFloat(raw.isFinite ? clamp(raw,-1,1) : 0)*CGFloat.pi*0.75
+        let centre=CGPoint(x:x+371,y:y+41), radius:CGFloat=28
+        func rotated(_ dx:CGFloat,_ dy:CGFloat) -> CGPoint {
+            CGPoint(x:centre.x+dx*cos(angle)-dy*sin(angle),y:centre.y+dx*sin(angle)+dy*cos(angle))
+        }
+        let rim=NSBezierPath(ovalIn:NSRect(x:centre.x-radius,y:centre.y-radius,width:radius*2,height:radius*2))
+        white.setStroke();rim.lineWidth=6;rim.stroke()
+        for end in [rotated(-25,-6),rotated(25,-6),rotated(0,25)] { line(centre,end,color:white,width:7) }
+        white.setFill();NSBezierPath(ovalIn:NSRect(x:centre.x-8,y:centre.y-8,width:16,height:16)).fill()
+        line(rotated(0,-31),rotated(0,-25),color:red,width:3)
     }
 
     private func drawHeader(_ game: RacingGame, width: CGFloat) {
@@ -346,21 +372,13 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.5.1", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.5.2", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
         panel(NSRect(x: width - 310, y: 25, width: 222, height: 35), radius: 7)
         text(status, x: width - 300, y: 34, size: 11, color: connected ? lime : muted, weight: .medium, width: 203, align: .center)
         button("?", NSRect(x: width - 73, y: 25, width: 45, height: 35), action: "help")
-    }
-
-    private func drawDashboard(_ game: RacingGame, width: CGFloat, height: CGFloat) {
-        let y = height-87
-        panel(NSRect(x:135,y:y,width:160,height:68), color:NSColor(white:0.04,alpha:0.72),radius:1)
-        text(String(format:"%03d",Int(game.vehicle.speedKPH)),x:147,y:y+4,size:28,color:white,weight:.semibold,mono:true,width:75)
-        text("KM/H",x:218,y:y+20,size:9,color:muted)
-        text(String(format:"%4d RPM",Int(game.vehicle.rpm)),x:148,y:y+43,size:10,color:muted,mono:true)
     }
 
     private func drawWelcome(_ game: RacingGame, width: CGFloat, height: CGFloat) {

@@ -17,3 +17,7 @@ xcrun swiftc -O -swift-version 5 -module-cache-path "$module_cache" -framework A
 xcrun swiftc -O -module-cache-path "$module_cache" \
   Sources/Track.swift Sources/Vehicle.swift Sources/HapticFeedback.swift Tests/FeedbackChecks.swift -o .build/feedback-checks
 .build/feedback-checks
+
+xcrun swiftc -O -module-cache-path "$module_cache" \
+  Sources/Track.swift Sources/Vehicle.swift Sources/InputHistory.swift Tests/InputHistoryChecks.swift -o .build/input-history-checks
+.build/input-history-checks

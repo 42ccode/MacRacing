@@ -25,6 +25,7 @@ struct SavedPractice: Codable {
     var records: [String:LapRecord]? = nil
     var racingLineEnabled: Bool? = nil
     var opponentCount: Int? = nil
+    var hudPositions: [String:HUDPosition]? = nil
 }
 
 final class RacingGame {
@@ -49,6 +50,9 @@ final class RacingGame {
     var cockpit: Bool { drivingView.isInterior }
     var ghostEnabled = true
     var showHUD = true
+    var hudPositions: [String:HUDPosition] = [:]
+    private(set) var editingHUD = false
+    private var resumeAfterHUDEdit = false
     var racingLineEnabled = true
     private(set) var opponentCount = 3
     private(set) var traffic = ComputerTraffic()
@@ -252,6 +256,7 @@ final class RacingGame {
     }
 
     func action(_ action: String) {
+        if editingHUD && !["hudLayout", "hudLayoutReset", "pause", "controllerDisconnected"].contains(action) { return }
         sceneDirty = true
         switch action {
         case "service":
@@ -293,6 +298,22 @@ final class RacingGame {
             guard isPaused && serviceRemaining == 0 else { return }
             tyreSetup.coldPressure = clamp(tyreSetup.coldPressure + (action == "pressureUp" ? 0.05 : -0.05), 1.3, 2.1)
             savePractice()
+        case "hudLayout":
+            guard hasStarted else { return }
+            if editingHUD {
+                editingHUD = false
+                isPaused = !resumeAfterHUDEdit
+                savePractice()
+            } else {
+                resumeAfterHUDEdit = !isPaused
+                isPaused = true
+                editingHUD = true
+            }
+            input.clear()
+            hud.layoutModeChanged()
+        case "hudLayoutReset":
+            guard editingHUD else { return }
+            hudPositions.removeAll()
         case "opponents":
             guard isPaused else { return }
             opponentCount = (opponentCount + 1) % 4
@@ -328,6 +349,7 @@ final class RacingGame {
             resetAtStart()
             announce("驶出发车区 · 先熟悉制动点和赛道", duration: 5)
         case "pause":
+            if editingHUD { self.action("hudLayout"); return }
             if !hasStarted { self.action("start"); return }
             isPaused.toggle()
             showHelp = false
@@ -381,6 +403,7 @@ final class RacingGame {
         case "deadzoneDown": assists.steeringDeadzone = max(0.02, assists.steeringDeadzone - 0.02); savePractice()
         case "deadzoneUp": assists.steeringDeadzone = min(0.30, assists.steeringDeadzone + 0.02); savePractice()
         case "controllerDisconnected":
+            resumeAfterHUDEdit = false
             autoDriveEnabled = false
             if hasStarted { isPaused = true; input.clear(); announce("手柄连接断开 · 已暂停", duration: 6) }
         default: break
@@ -389,6 +412,7 @@ final class RacingGame {
     }
 
     func loseFocus() {
+        resumeAfterHUDEdit = false
         autoDriveEnabled = false
         input.clear()
         if hasStarted { isPaused = true }
@@ -460,6 +484,7 @@ final class RacingGame {
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
         if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
         opponentCount = clamp(saved.opponentCount ?? 3, 0, 3)
+        hudPositions = (saved.hudPositions ?? [:]).filter { $0.value.x.isFinite && $0.value.y.isFinite }
         racingLineEnabled=saved.racingLineEnabled ?? true
         world.showRacingLine=racingLineEnabled
         sound.muted = saved.muted
@@ -476,7 +501,7 @@ final class RacingGame {
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             if let legacyPractice {

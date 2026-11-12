@@ -355,11 +355,11 @@ final class RacingWorld {
 
     private func buildProductionCar() {
         car.addChildNode(body); scene.rootNode.addChildNode(car)
-        let file = vehicleKind == .ferrari ? "Ferrari458" : "Porsche911"
+        let file = vehicleKind.assetName
         guard let url = assetURL("Vehicles/\(file).glb"), let asset = try? GLTFAsset(url:url),
               let model = try? asset.makeScene() else { fatalError("Missing bundled vehicle: \(file)") }
         body.addChildNode(model)
-        let paint = vehicleKind == .ferrari ? NSColor(rgb:0x951B16) : NSColor(rgb:0x66777E)
+        let paint = NSColor(rgb: ([0x566875, 0x951B16, 0x66777E, 0xB4B7BD, 0x244E69] as [UInt32])[vehicleKind.rawValue])
         model.enumerateChildNodes { node, _ in
             for m in node.geometry?.materials ?? [] {
                 switch m.name ?? "" {
@@ -376,6 +376,12 @@ final class RacingWorld {
                     m.clearCoat.contents = 0.12; m.clearCoatRoughness.contents = 0.15
                     m.transparencyMode = .aOne; m.writesToDepthBuffer = false
                     self.glassNodes.append(node)
+                case "InteriorBlocker": self.glassNodes.append(node)
+                case "RLA_miata_seats": self.seatNodes.append(node)
+                case "RLA_miata_alcantara":
+                    m.diffuse.contents = NSColor(rgb:0x27292A)
+                    m.metalness.contents = 0; m.roughness.contents = 0.94
+                    m.normal.intensity = 0.25
                 case "Leather_red", "Leather", "Interior_dark", "Interior_light", "Carpet", "Carbon_Fiber", "plastic_gray":
                     m.diffuse.contents = NSColor(rgb:0x202225); m.metalness.contents = 0
                     m.roughness.contents = 0.85
@@ -399,12 +405,13 @@ final class RacingWorld {
             mesh.removeFromParentNode(); mesh.simdPosition = .zero
             let pivot = SCNNode(); pivot.simdPosition = position
             let roll = SCNNode(); roll.addChildNode(mesh); pivot.addChildNode(roll); car.addChildNode(pivot)
-            if vehicleKind == .porsche {
-                // Yellow calipers belong to the upright: steer with the wheel,
+            if vehicleKind == .porsche || vehicleKind == .bmw || vehicleKind == .mazda {
+                // Calipers belong to the upright: steer with the wheel,
                 // but never spin with the tyre/rim and brake disc.
                 var calipers: [SCNNode] = []
                 mesh.enumerateChildNodes { node, _ in
-                    if node.geometry?.materials.contains(where: { $0.name == "Material.001" }) == true { calipers.append(node) }
+                    if (vehicleKind == .porsche && node.geometry?.materials.contains(where: { $0.name == "Material.001" }) == true) ||
+                        (node.geometry != nil && node.parent?.name == "BrakeCaliperMesh") { calipers.append(node) }
                 }
                 for node in calipers {
                     let local = simd_inverse(pivot.simdWorldTransform) * node.simdWorldTransform
@@ -417,13 +424,21 @@ final class RacingWorld {
         }
         importedSteering = model.childNode(withName:"Steering",recursively:true)
         steeringAxis = SIMD3(0,0,-1)
-        if vehicleKind == .porsche { buildSimpleCabin() }
+        if vehicleKind.hasSimpleCabin { buildSimpleCabin() }
         steeringBase = importedSteering?.simdTransform ?? matrix_identity_float4x4
         // Functional display sits on the dashboard; the exterior model stays intact.
         let display = SCNPlane(width:0.19,height:0.07)
         instrumentMaterial.lightingModel = .constant; display.materials = [instrumentMaterial]
         let instrument = SCNNode(geometry:display); instrument.name = "LiveInstrumentDisplay"
-        instrument.position = vehicleKind == .ferrari ? SCNVector3(0.345,0.84,0.69) : SCNVector3(-0.25,0.73,0.65)
+        switch vehicleKind {
+        case .ferrari: instrument.position = SCNVector3(0.345,0.84,0.69)
+        case .mazda:
+            instrument.position = SCNVector3(0.345,0.815,0.380)
+            let housing = box(0.205,0.082,0.025,at:SCNVector3(0.345,0.815,0.394),
+                              material:material(NSColor(rgb:0x202326)),parent:body,chamfer:0.003)
+            housing.name = "InstrumentHousing"
+        default: instrument.position = SCNVector3(-0.25,0.73,0.65)
+        }
         instrument.eulerAngles.y = .pi; body.addChildNode(instrument)
         model.enumerateChildNodes { node, _ in
             guard let geometry = node.geometry,
@@ -659,6 +674,10 @@ final class RacingWorld {
             var longitudinal = 0.38, lateral = side, height = seatHeight
             if vehicleKind != .concept { longitudinal = -0.12 }
             if mode == .dashboard { longitudinal += 0.42; height = vehicleKind == .ferrari ? 0.96 : 1.04 }
+            if mode == .cockpit && vehicleKind == .mazda {
+                longitudinal = -0.24
+                height = seatHeight - 0.06
+            }
             if mode == .bonnet { longitudinal = 1.25; lateral = 0; height = 1.10 }
             if mode == .bumper { longitudinal = 2.6; lateral = 0; height = 0.42 }
             let p = vehicle.position + f * longitudinal + vehicle.modelX * lateral

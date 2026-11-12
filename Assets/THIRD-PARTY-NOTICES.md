@@ -49,3 +49,7 @@ The following Poly Haven assets are CC0. Trees are rendered from the original 3D
 - **Porsche 911 Carrera 4S** — Lionsharp Studios / Karol Miklas, [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). [Author model](https://sketchfab.com/3d-models/free-porsche-911-carrera-4s-d01b254483794de3819786d93e0e1ebf), distributed through [PlayCanvas](https://github.com/playcanvas/web-components/tree/main/examples/assets/models). The adapted Porsche model and model appearance remain under CC BY-SA 4.0.
 
 Both models are decoded and adapted for the native renderer, with normalized transforms and separate animated wheels. Runtime paint, instruments and deformation differ from the sources; Porsche uses a generic simplified cabin. See `Vehicles/README.md` for modifications, licensing, source hashes and reproduction instructions. Vehicle names/designs/marks remain their owners' property; no endorsement is claimed. The simulation presets and shared engine sound are not manufacturer-calibrated.
+
+## Additional vehicles (1.8)
+
+BMW M3 E30 by Martin Trafas and Mazda Miata MX-5 by Black Snow, each under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Original model links, distribution sources, hashes and modifications are in [Vehicles/README.md](Vehicles/README.md).

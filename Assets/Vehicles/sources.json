@@ -14,5 +14,23 @@
     "sha256": "98ae6196c47be50782c8a15e0def7b8dcc81ab8026692465e98caa7f77801013",
     "author": "Lionsharp Studios / Karol Miklas",
     "license": "CC-BY-SA-4.0"
+  },
+  {
+    "file": "BMWM3E30.glb",
+    "source": "https://raw.githubusercontent.com/pedrosoandre/carros/main/assets/bmw-m3-e30.glb",
+    "source_sha256": "35cad98e89e6f1e54ccd238a3df049d29f20ecec3fc0aa2a85e0ad6c2663d330",
+    "sha256": "a1961036776a0485393b4a6d2f8ba35d44a8e7775d4ce3e947c0ea9f8b9732c7",
+    "author": "Martin Trafas",
+    "original": "https://sketchfab.com/3d-models/free-bmw-m3-e30-ac3c7013434e403e8faff87948caf422",
+    "license": "CC-BY-4.0"
+  },
+  {
+    "file": "MazdaMX5.glb",
+    "source": "https://raw.githubusercontent.com/pedrosoandre/carros/main/assets/mazda-miata-mx-5.glb",
+    "source_sha256": "8faaa344af0fe12ac650e042a3d481e67c98ba87ca0008007bbf42e28d83bdc9",
+    "sha256": "2970dd5334a5a3b19ea2ec5927a58be4dee8e4896188f5aeb36a49d8f7815dd3",
+    "author": "Black Snow",
+    "original": "https://sketchfab.com/3d-models/mazda-miata-mx-5-e074e29ccc3847dca74ed5e9cb92d3e7",
+    "license": "CC-BY-4.0"
   }
 ]

@@ -57,7 +57,7 @@ import simd
         check(repair.wheels[0].brakeTemperature==850,"Recovery preserves overheated brake condition")
         repair.service(setup:TyreSetup())
         check(repair.wheels.allSatisfy { $0.brakeTemperature==40 && $0.brakeFadeFactor==1 },"Service restores brake temperature and available torque")
-        check(CircuitKind.allCases.allSatisfy { !Circuit(kind:$0).cornerDistances.isEmpty },"All four maps derive braking markers from their own bends")
+        check(CircuitKind.allCases.allSatisfy { !Circuit(kind:$0).cornerDistances.isEmpty },"All six maps derive braking markers from their own bends")
         if failures>0 {exit(1)}
     }
 }

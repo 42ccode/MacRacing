@@ -1,4 +1,4 @@
-# Vehicles introduced in 1.2
+# Additional vehicles
 
 ## Ferrari 458
 
@@ -24,3 +24,14 @@ node prepare_vehicles.mjs porsche.glb Porsche911.glb porsche
 ```
 
 Keep this notice, source credits and the corresponding Creative Commons license with redistributed models and adaptations. Public game screenshots should also retain the model credit or place it in the accompanying caption.
+
+## BMW M3 E30 and Mazda MX-5 (1.8)
+
+- **BMW M3 E30** by **Martin Trafas**. [Original model](https://sketchfab.com/3d-models/free-bmw-m3-e30-ac3c7013434e403e8faff87948caf422) and [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Mazda Miata mx-5** by **Black Snow**. [Original model](https://sketchfab.com/3d-models/mazda-miata-mx-5-e074e29ccc3847dca74ed5e9cb92d3e7) and [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+The downloaded assets were obtained from the `carros` distribution. Its catalog records the original author and license. [Model licensing and redistribution credits](https://github.com/pedrosoandre/carros/blob/main/LICENSE-3D-MODELS.md).
+
+APEX Lab decoded Meshopt and quantized attributes, baked the original transforms, centered and aligned the four wheels, neutralized the BMW front steering and Mazda tire camber, separated rolling meshes from calipers, and adapted materials, instruments and body deformation. The BMW uses the prototype's simplified cabin. The Mazda retains its modelled interior and steering wheel. Both use experimental rear-wheel-drive presets. Source and output SHA-256 values are listed in `sources.json`.
+
+To reproduce these adaptations, place `Tools/prepare_club_cars.mjs` in the offline asset tool directory with the glTF Transform packages listed above and `meshoptimizer` 1.3.0. Run `node prepare_club_cars.mjs input.glb output.glb bmw` or use `mazda` for the MX-5.

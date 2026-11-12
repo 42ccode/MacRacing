@@ -22,10 +22,10 @@ struct TrackLocation {
 }
 
 enum CircuitKind: Int, CaseIterable, Codable {
-    case north, sprint, technical, grand
-    var name: String { ["NORTH LOOP", "CLUB SPRINT", "TECHNICAL PARK", "GRAND CIRCUIT"][rawValue] }
-    var label: String { ["北环赛道", "俱乐部短环", "技术公园", "大奖赛长环"][rawValue] }
-    var detail: String { ["均衡弯道 · 基础练习", "短直道 · 连续中速弯", "发卡与变向 · 制动练习", "长直道 · 高速弯与减速弯"][rawValue] }
+    case north, sprint, technical, grand, ridge, valley
+    var name: String { ["NORTH LOOP", "CLUB SPRINT", "TECHNICAL PARK", "GRAND CIRCUIT", "RIDGE RING", "VALLEY CIRCUIT"][rawValue] }
+    var label: String { ["北环赛道", "俱乐部短环", "技术公园", "大奖赛长环", "高原高速环", "河谷环线"][rawValue] }
+    var detail: String { ["均衡弯道 · 基础练习", "短直道 · 连续中速弯", "发卡与变向 · 制动练习", "长直道 · 高速弯与减速弯", "长直道 · 连续高速弧线", "连续变向 · 回头弯"][rawValue] }
     var controls: [SIMD2<Double>] {
         switch self {
         case .north: return [
@@ -45,6 +45,14 @@ enum CircuitKind: Int, CaseIterable, Codable {
             [-100,-165],[100,-165],[360,-140],[470,0],
             [420,160],[250,235],[90,235],[20,165],
             [-70,165],[-145,240],[-325,180],[-420,20],[-330,-150]]
+        case .ridge: return [
+            [-260,-220],[0,-220],[255,-220],[420,-132],[455,34],
+            [355,145],[212,186],[110,300],[-55,315],[-150,215],
+            [-270,200],[-430,120],[-450,-65],[-370,-178]]
+        case .valley: return [
+            [-120,-180],[10,-180],[170,-180],[240,-127],[244,-42],
+            [200,4],[90,9],[53,65],[106,122],[219,132],[242,190],
+            [159,250],[18,243],[-101,188],[-159,90],[-215,38],[-221,-82]]
         }
     }
 }

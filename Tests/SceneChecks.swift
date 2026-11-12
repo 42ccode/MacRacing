@@ -190,7 +190,7 @@ struct SceneChecks {
         world.update(vehicle:vehicle,input:DrivingInput(),dt:0,cockpit:true,ghost:nil)
         check(hoodMesh.geometry!.sources(for:.vertex)[0].data == originalHood && wing.eulerAngles.z == 0 && world.frontWheels.allSatisfy { $0.scale.y == 1 },
               "Repair restores original body geometry, wheel shape and wing alignment")
-        for kind in [VehicleKind.ferrari,.porsche,.concept] {
+        for kind in [VehicleKind.ferrari,.porsche,.bmw,.mazda,.concept] {
             world.selectVehicle(kind); vehicle.kind = kind; vehicle.reset(at:circuit.start)
             check(world.rollingWheels.count == 4 && world.frontWheels.count == 2,
                   "Vehicle switch rebuilds exactly four wheels: \(kind.label)")
@@ -215,7 +215,7 @@ struct SceneChecks {
                 }
                 check(!points.isEmpty && widest < 0.48 && axleError < 0.001,
                       "Actual wheel mesh rolls on its axle during repeated left/right changes: \(kind.label) wheel \(index), axial width \(String(format:"%.3f",widest))m")
-                if kind == .porsche {
+                if [.porsche,.bmw,.mazda].contains(kind) {
                     let caliper = world.car.childNode(withName:"BrakeCaliper\(index)",recursively:true)
                     let before = caliper?.simdWorldTransform
                     vehicle.wheels[index].rotation += .pi/2
@@ -223,7 +223,7 @@ struct SceneChecks {
                     let unchanged = caliper.map { node in
                         (0..<4).allSatisfy { simd_distance(node.simdWorldTransform[$0],before![$0])<0.0001 }
                     } ?? false
-                    check(unchanged,"Brake caliper stays fixed while the rim rotates: Porsche wheel \(index)")
+                    check(unchanged,"Brake caliper stays fixed while the rim rotates: \(kind.label) wheel \(index)")
                 }
             }
             vehicle.reset(at:circuit.start)

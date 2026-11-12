@@ -1,11 +1,54 @@
 import AppKit
 import simd
 
+struct HUDPosition: Codable {
+    let x: Double
+    let y: Double
+
+    init(origin: CGPoint, size: CGSize, viewport: CGSize) {
+        x = Double(clamp((origin.x - 12) / max(1, viewport.width-size.width-24), 0, 1))
+        y = Double(clamp((origin.y - 12) / max(1, viewport.height-size.height-24), 0, 1))
+    }
+
+    func origin(size: CGSize, viewport: CGSize) -> CGPoint? {
+        guard x.isFinite, y.isFinite else { return nil }
+        return CGPoint(x: 12 + clamp(x,0,1)*max(0,viewport.width-size.width-24),
+                       y: 12 + clamp(y,0,1)*max(0,viewport.height-size.height-24))
+    }
+}
+
+private enum HUDPanel: String, CaseIterable {
+    case vehicle, map, tyres, suspension, acceleration, timing, delta, pedals
+
+    func defaultFrame(in viewport: CGSize) -> CGRect {
+        let width = viewport.width, height = viewport.height
+        switch self {
+        case .vehicle: return CGRect(x:18,y:18,width:238,height:262)
+        case .map: return CGRect(x:18,y:290,width:238,height:192)
+        case .tyres: return CGRect(x:width-286,y:18,width:270,height:240)
+        case .suspension: return CGRect(x:width-286,y:266,width:270,height:120)
+        case .acceleration: return CGRect(x:width-286,y:394,width:270,height:150)
+        case .timing: return CGRect(x:width-238,y:height-151,width:222,height:132)
+        case .delta: return CGRect(x:(width-340)/2,y:18,width:340,height:126)
+        case .pedals: return CGRect(x:18,y:height-162,width:414,height:144)
+        }
+    }
+}
+
 final class HUDView: NSView {
     weak var game: RacingGame?
     private var actions: [(NSRect, String)] = []
     private var nativeButtons: [String: NSButton] = [:]
     private var buttonLabels: [String: String] = [:]
+    private var panelFrames: [(HUDPanel, CGRect)] = []
+    private var drag: (panel: HUDPanel, offset: CGPoint, size: CGSize)?
+
+    func layoutModeChanged() {
+        drag = nil
+        actions.removeAll()
+        synchronizeAccessibleButtons()
+        needsDisplay = true
+    }
 
     @objc private func activateButton(_ sender: NSButton) {
         window?.makeFirstResponder(self)
@@ -48,7 +91,62 @@ final class HUDView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
-        if let hit = actions.reversed().first(where: { $0.0.contains(point) }) { game?.action(hit.1) }
+        if let hit = actions.reversed().first(where: { $0.0.contains(point) }) {
+            game?.action(hit.1)
+        } else if game?.editingHUD == true, let (panel, frame) = panelFrames.reversed().first(where: { $0.1.contains(point) }) {
+            drag = (panel, CGPoint(x: point.x-frame.minX, y: point.y-frame.minY), frame.size)
+            needsDisplay = true
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let game, game.editingHUD, let drag else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let origin = CGPoint(x: point.x-drag.offset.x, y: point.y-drag.offset.y)
+        game.hudPositions[drag.panel.rawValue] = HUDPosition(origin: origin, size: drag.size, viewport: bounds.size)
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if drag != nil { drag = nil; needsDisplay = true }
+    }
+
+    private func drawDrivingPanels(_ game: RacingGame) {
+        panelFrames.removeAll(keepingCapacity: true)
+        for item in HUDPanel.allCases {
+            if item == .delta && game.serviceRemaining > 0 && !game.editingHUD { continue }
+            var frame = item.defaultFrame(in: bounds.size)
+            if let origin = game.hudPositions[item.rawValue]?.origin(size:frame.size,viewport:bounds.size) {
+                frame.origin = origin
+            }
+            let x = frame.minX, y = frame.minY
+            switch item {
+            case .vehicle: drawVehicleInfo(game,x:x,y:y)
+            case .map: drawTrackMap(game,x:x,y:y)
+            case .tyres: drawCondition(game,x:x,y:y)
+            case .suspension: drawSuspension(game,x:x,y:y)
+            case .acceleration: drawGForce(game,x:x,y:y)
+            case .timing: drawCompactTiming(game,x:x,y:y)
+            case .delta: drawLapDelta(game,x:x,y:y)
+            case .pedals: drawPedals(game,x:x,y:y+62)
+            }
+            panelFrames.append((item, frame))
+            if game.editingHUD {
+                NSColor(rgb:0x78DCE8,alpha:drag?.panel == item ? 1 : 0.65).setStroke()
+                let border = NSBezierPath(roundedRect:frame,xRadius:5,yRadius:5)
+                border.lineWidth = drag?.panel == item ? 2.5 : 1.5
+                border.stroke()
+            }
+        }
+    }
+
+    private func drawLayoutToolbar() {
+        actions.removeAll()
+        let x = min((bounds.width-420)/2+100,bounds.width-432), y = bounds.height-51
+        panel(NSRect(x:x,y:y,width:420,height:39),color:NSColor(rgb:0x172A31),radius:7)
+        text("拖动面板调整位置",x:x+14,y:y+11,size:11,width:150)
+        button("恢复默认",NSRect(x:x+166,y:y+5,width:110,height:29),action:"hudLayoutReset")
+        button("保存布局  [ F6 ]",NSRect(x:x+285,y:y+5,width:125,height:29),action:"hudLayout",primary:true)
     }
 
     private func panel(_ rect: NSRect, color: NSColor? = nil, radius: CGFloat = 12) {
@@ -97,12 +195,10 @@ final class HUDView: NSView {
         let h = bounds.height
         if !game.hasStarted { drawHeader(game, width: w) }
         if game.hasStarted {
-            if game.showHUD {
-                drawCompactTiming(game, width: w, height: h)
-                if game.serviceRemaining==0 {drawLapDelta(game,width:w)}
-                drawPedals(game, height: h)
-                drawCondition(game, width: w)
-                drawVehicleInfo(game)
+            if game.showHUD || game.editingHUD { drawDrivingPanels(game) }
+            if game.editingHUD {
+                drawLayoutToolbar()
+                return
             }
             if game.noticeRemaining > 0 {
                 let rect = NSRect(x: (w - 460) / 2, y: 155, width: 460, height: 30)
@@ -126,8 +222,8 @@ final class HUDView: NSView {
         }
     }
 
-    private func drawVehicleInfo(_ game: RacingGame) {
-        let x: CGFloat = 18, y: CGFloat = 18, car = game.vehicle
+    private func drawVehicleInfo(_ game: RacingGame, x: CGFloat, y: CGFloat) {
+        let car = game.vehicle
         panel(NSRect(x:x,y:y,width:238,height:262),color:NSColor(white:0.035,alpha:0.86),radius:5)
         text(car.kind.label,x:x+12,y:y+10,size:14,weight:.semibold,width:214)
         text(String(format:"实验预设 · %.0f kg · 后驱 / 6 挡",car.mass),x:x+12,y:y+34,size:10,color:muted,width:214)
@@ -144,7 +240,6 @@ final class HUDView: NSView {
         text(String(format:"刹车 %.0f°C   制动力 %.0f%%",car.wheels.map(\.brakeTemperature).max() ?? 40,(car.wheels.map(\.brakeFadeFactor).min() ?? 1)*100),x:x+12,y:y+205,size:10,color:muted,width:214)
         text(String(format:"滑移 %.0f%%   复位后 %.2f km",car.tyreSlip*100,car.distanceTravelled/1000),x:x+12,y:y+225,size:10,color:muted,width:214)
         text("损伤 0% 完好 · 1 / 2 调节辅助",x:x+12,y:y+244,size:8,color:muted,width:214)
-        drawTrackMap(game,x:x,y:y+272)
     }
 
     private func drawTrackMap(_ game: RacingGame, x: CGFloat, y: CGFloat) {
@@ -182,8 +277,7 @@ final class HUDView: NSView {
         text(game.circuit.kind.detail,x:x+12,y:y+171,size:9,color:muted,width:214)
     }
 
-    private func drawCondition(_ game: RacingGame, width: CGFloat) {
-        let x = width - 286, y: CGFloat = 18
+    private func drawCondition(_ game: RacingGame, x: CGFloat, y: CGFloat) {
         let car = game.vehicle
         let amber = NSColor(rgb:0xF2B875)
         let green = NSColor(rgb:0x7EBB9C)
@@ -228,8 +322,6 @@ final class HUDView: NSView {
         text("蓝 冷胎   绿 工作区   橙 过热 / 路肩",x:x+12,y:y+197,size:9,color:muted,width:247)
         text(String(format:"车损 %.0f%%   水温 %.0f°C   P / ↓ 维修",car.damage.worst*100,car.coolantTemperature),
              x:x+12,y:y+217,size:10,color:car.damage.worst>0.3 ? amber : muted,width:247)
-        drawSuspension(game,x:x,y:y+248)
-        drawGForce(game,x:x,y:y+376)
     }
 
     private func drawSuspension(_ game: RacingGame, x: CGFloat, y: CGFloat) {
@@ -290,8 +382,7 @@ final class HUDView: NSView {
         NSColor(rgb:0xF2B875).setFill(); NSRect(x:x+143,y:y+123,width:110*CGFloat(pulse),height:5).fill()
     }
 
-    private func drawCompactTiming(_ game: RacingGame, width: CGFloat, height: CGFloat) {
-        let x = width - 238, y = height - 151
+    private func drawCompactTiming(_ game: RacingGame, x: CGFloat, y: CGFloat) {
         panel(NSRect(x:x,y:y,width:222,height:132), color:NSColor(white:0.04,alpha:0.76),radius:1)
         text("LAP TIMING",x:x+10,y:y+8,size:10,color:muted,weight:.semibold)
         text(String(format:"LAP %02d",game.session.lap),x:x+140,y:y+8,size:10,color:white,mono:true,width:70,align:.right)
@@ -304,8 +395,8 @@ final class HUDView: NSView {
         text("Y / Tab 六种视角  ·  V 隐藏仪表",x:x+10,y:y+109,size:9,color:muted)
     }
 
-    private func drawLapDelta(_ game:RacingGame,width:CGFloat) {
-        let x=(width-340)/2, y:CGFloat=18, session=game.session
+    private func drawLapDelta(_ game:RacingGame,x:CGFloat,y:CGFloat) {
+        let session=game.session
         let green=NSColor(rgb:0x78D947), red=NSColor(rgb:0xED696C)
         panel(NSRect(x:x,y:y,width:340,height:126),color:NSColor(white:0.035,alpha:0.86),radius:5)
         text("个人最佳圈速差",x:x+12,y:y+9,size:10,color:muted,width:160)
@@ -329,8 +420,7 @@ final class HUDView: NSView {
         }
     }
 
-    private func drawPedals(_ game: RacingGame, height: CGFloat) {
-        let x: CGFloat = 18, y = height-100
+    private func drawPedals(_ game: RacingGame, x: CGFloat, y: CGFloat) {
         if game.autoDriveEnabled {
             let top = y - (game.racingLineEnabled ? 62 : 31)
             panel(NSRect(x:x,y:top,width:282,height:24),color:NSColor(rgb:0x162C33,alpha:0.92),radius:4)
@@ -429,7 +519,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.7", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.8", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -464,7 +554,7 @@ final class HUDView: NSView {
         panel(NSRect(x: width - 260, y: height - 179, width: 232, height: 125))
         text("BUILT FOR MAC", x: width - 243, y: height - 160, size: 10, color: lime, weight: .bold)
         text(game.vehicle.kind.label, x: width - 244, y: height - 138, size: 20, weight: .bold, width:215)
-        text(game.vehicle.kind == .porsche ? "实验驾驶预设 · 简化座舱" : "实验驾驶预设 · 非实车标定", x: width - 243, y: height - 108, size: 10, color: muted)
+        text(game.vehicle.kind.hasSimpleCabin ? "实验驾驶预设 · 简化座舱" : "实验驾驶预设 · 非实车标定", x: width - 243, y: height - 108, size: 10, color: muted)
         text(game.vehicle.kind.credit,x:width-243,y:height-88,size:8,color:muted,width:215)
     }
 
@@ -508,6 +598,7 @@ final class HUDView: NSView {
         text(String(format: "摇杆死区  %.0f%%", game.assists.steeringDeadzone * 100), x: x + 29, y: y + 393, size: 12, color: muted)
         button("−", NSRect(x: x + 147, y: y + 386, width: 34, height: 28), action: "deadzoneDown")
         button("+", NSRect(x: x + 190, y: y + 386, width: 34, height: 28), action: "deadzoneUp")
+        button("布局编辑  [ F6 ]",NSRect(x:x+237,y:y+386,width:125,height:28),action:"hudLayout")
         button(game.ghostEnabled ? "幽灵车 开" : "幽灵车 关", NSRect(x: x + 373, y: y + 386, width: 149, height: 28), action: "ghost", active: game.ghostEnabled)
         button("下次换胎：\(game.tyreSetup.compound.label)",NSRect(x:x+28,y:y+433,width:174,height:32),action:"compound")
         text(String(format:"冷压 %.2f bar",game.tyreSetup.coldPressure),x:x+219,y:y+442,size:11,color:muted,width:118)

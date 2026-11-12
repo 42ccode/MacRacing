@@ -187,6 +187,7 @@ final class InputManager {
         case 20: action = "automatic"    // 3
         case 4: action = "help"          // H
         case 46: action = "mute"         // M
+        case 98: action = "compactHUD"  // F7
         case 97: action = "hudLayout"   // F6
         case 32: action = "autoDrive"   // U
         case 31: action = "opponents"   // O, in menus

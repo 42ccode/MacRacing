@@ -117,7 +117,7 @@ final class RacingWorld {
         ambient.light = SCNLight()
         ambient.light!.type = .ambient
         ambient.light!.color = NSColor(rgb: 0xD7E4ED)
-        ambient.light!.intensity = 18
+        ambient.light!.intensity = 28
         scene.rootNode.addChildNode(ambient)
         let sun = sunlight
         sun.light = SCNLight()
@@ -126,7 +126,7 @@ final class RacingWorld {
         sun.light!.intensity = 900
         sun.light!.castsShadow = true
         sun.light!.shadowMode = .deferred
-        sun.light!.shadowColor = NSColor.black.withAlphaComponent(0.62)
+        sun.light!.shadowColor = NSColor.black.withAlphaComponent(0.50)
         sun.light!.shadowMapSize = CGSize(width: 4096, height: 4096)
         sun.light!.shadowSampleCount = 8
         sun.light!.shadowBias = 0.03
@@ -598,8 +598,8 @@ final class RacingWorld {
         let base=floor(progress/racingLine.spacing)*racingLine.spacing
         for step in -2..<55 {
             let d=base+Double(step)*racingLine.spacing
-            let a=racingLine.sample(at:d), b=racingLine.sample(at:d+racingLine.spacing*0.76)
-            let direction=simd_normalize(b.position-a.position), side=SIMD2(direction.y,-direction.x)*0.34
+            let a=racingLine.sample(at:d), b=racingLine.sample(at:d+racingLine.spacing*0.66)
+            let direction=simd_normalize(b.position-a.position), side=SIMD2(direction.y,-direction.x)*0.23
             let index=Int32(vertices.count)
             vertices += [vector(a.position-side,y:0.045),vector(a.position+side,y:0.045),
                          vector(b.position-side,y:0.045),vector(b.position+side,y:0.045)]
@@ -607,9 +607,9 @@ final class RacingWorld {
             let group=cue == .brake ? 2 : (cue == .lift ? 1 : 0)
             groups[group] += [index,index+2,index+1,index+1,index+2,index+3]
         }
-        let materials=[0x68D640,0xFFD34A,0xF14B45].map { rgb -> SCNMaterial in
+        let materials=[0x77B66F,0xE3BD58,0xD95750].map { rgb -> SCNMaterial in
             let m=SCNMaterial();m.lightingModel = .constant
-            m.diffuse.contents=NSColor(rgb:UInt32(rgb),alpha:0.72);m.isDoubleSided=true
+            m.diffuse.contents=NSColor(rgb:UInt32(rgb),alpha:0.60);m.isDoubleSided=true
             m.writesToDepthBuffer=false;m.readsFromDepthBuffer=true
             return m
         }

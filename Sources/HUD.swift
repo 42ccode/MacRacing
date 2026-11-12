@@ -20,6 +20,13 @@ struct HUDPosition: Codable {
 private enum HUDPanel: String, CaseIterable {
     case vehicle, map, tyres, suspension, acceleration, timing, delta, pedals, mirror
 
+    var shownInCompactMode: Bool {
+        switch self {
+        case .map, .timing, .delta, .pedals, .mirror: return true
+        case .vehicle, .tyres, .suspension, .acceleration: return false
+        }
+    }
+
     func defaultFrame(in viewport: CGSize) -> CGRect {
         let width = viewport.width, height = viewport.height
         switch self {
@@ -28,8 +35,8 @@ private enum HUDPanel: String, CaseIterable {
         case .tyres: return CGRect(x:width-286,y:18,width:270,height:240)
         case .suspension: return CGRect(x:width-286,y:266,width:270,height:120)
         case .acceleration: return CGRect(x:width-286,y:394,width:270,height:150)
-        case .timing: return CGRect(x:width-238,y:height-151,width:222,height:132)
-        case .delta: return CGRect(x:(width-340)/2,y:18,width:340,height:126)
+        case .timing: return CGRect(x:width-214,y:height-123,width:196,height:105)
+        case .delta: return CGRect(x:(width-340)/2,y:18,width:340,height:84)
         case .pedals: return CGRect(x:18,y:height-162,width:414,height:144)
         case .mirror: return CGRect(x:(width-356)/2,y:18,width:356,height:96)
         }
@@ -115,6 +122,7 @@ final class HUDView: NSView {
     private func drawDrivingPanels(_ game: RacingGame) {
         panelFrames.removeAll(keepingCapacity: true)
         for item in HUDPanel.allCases {
+            if game.compactHUD && !game.editingHUD && !item.shownInCompactMode { continue }
             if item == .delta && game.serviceRemaining > 0 && !game.editingHUD { continue }
             if item == .mirror && !game.showMirror && !game.editingHUD { continue }
             var frame = item.defaultFrame(in: bounds.size)
@@ -145,12 +153,12 @@ final class HUDView: NSView {
     }
 
     private func drawMirror(_ game: RacingGame, frame: NSRect) {
-        panel(frame, color: NSColor(rgb:0x151617), radius: 7)
+        panel(frame, color: NSColor(rgb:0x15181B), radius: 8)
         guard let image = game.mirrorImage, !game.editingHUD else {
             text("虚拟后视镜",x:frame.minX+8,y:frame.midY-9,size:12,width:frame.width-16,align:.center)
             return
         }
-        let glass = frame.insetBy(dx:4,dy:4)
+        let glass = frame.insetBy(dx:3,dy:3)
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(roundedRect:glass,xRadius:4,yRadius:4).addClip()
         let reflection = AffineTransform(m11:-1,m12:0,m21:0,m22:1,tX:2*glass.midX,tY:0)
@@ -160,8 +168,10 @@ final class HUDView: NSView {
 
         let traffic = game.sideTraffic
         let alert = NSColor(rgb:0xFFC15E)
-        if traffic.left { line(CGPoint(x:glass.minX+2,y:glass.minY+4),CGPoint(x:glass.minX+2,y:glass.maxY-4),color:alert,width:5) }
-        if traffic.right { line(CGPoint(x:glass.maxX-2,y:glass.minY+4),CGPoint(x:glass.maxX-2,y:glass.maxY-4),color:alert,width:5) }
+        alert.setFill()
+        for (active, x) in [(traffic.left,glass.minX+3),(traffic.right,glass.maxX-6)] where active {
+            NSBezierPath(roundedRect:NSRect(x:x,y:glass.midY-19,width:3,height:38),xRadius:1.5,yRadius:1.5).fill()
+        }
     }
 
     private func drawLayoutToolbar() {
@@ -225,9 +235,12 @@ final class HUDView: NSView {
                 return
             }
             if game.noticeRemaining > 0 {
-                let rect = NSRect(x: (w - 460) / 2, y: game.showMirror ? 260 : 155, width: 460, height: 30)
-                panel(rect)
-                text(game.notice, x: rect.minX + 14, y: rect.minY + 6, size: 11, color: lime, weight: .semibold, width: 432, align: .center)
+                let font = NSFont.systemFont(ofSize:11,weight:.semibold)
+                let width = clamp(ceil((game.notice as NSString).size(withAttributes:[.font:font]).width)+36, 118, 440)
+                let top: CGFloat = game.showHUD ? (game.showMirror ? 216 : 111) : 18
+                let rect = NSRect(x:(w-width)/2,y:top,width:width,height:27)
+                panel(rect,radius:6)
+                text(game.notice,x:rect.minX+12,y:rect.minY+5,size:11,color:lime,weight:.semibold,width:width-24,align:.center)
             }
             if !game.session.validLap && !game.isPaused {
                 text(game.session.status, x: (w - 440) / 2, y: h - 266, size: 13,
@@ -282,7 +295,11 @@ final class HUDView: NSView {
         }
         let path = NSBezierPath(); path.move(to:project(points[0]))
         for p in points.dropFirst() { path.line(to:project(p)) }
-        path.close(); path.lineWidth = 4; NSColor(white:0.5,alpha:0.8).setStroke(); path.stroke()
+        path.close()
+        path.lineJoinStyle = .round
+        path.lineWidth = 3.2
+        NSColor(white:0.58,alpha:0.78).setStroke()
+        path.stroke()
         for sector in 1...2 {
             let p=project(game.circuit.sample(at:game.circuit.length*Double(sector)/3).point)
             NSColor(rgb:0x78B8C8).setFill();NSRect(x:p.x-2.5,y:p.y-2.5,width:5,height:5).fill()
@@ -308,7 +325,7 @@ final class HUDView: NSView {
         let p = project(game.vehicle.position)
         lime.setFill(); NSBezierPath(ovalIn:NSRect(x:p.x-4,y:p.y-4,width:8,height:8)).fill()
         line(p,CGPoint(x:p.x+CGFloat(sin(game.vehicle.heading))*10,y:p.y+CGFloat(cos(game.vehicle.heading))*10),color:lime,width:2)
-        text(game.circuit.kind.detail,x:x+12,y:y+171,size:9,color:muted,width:214)
+        text("起终点  ▪   ·   青线  维修道",x:x+12,y:y+171,size:9,color:muted,width:214)
     }
 
     private func drawCondition(_ game: RacingGame, x: CGFloat, y: CGFloat) {
@@ -375,7 +392,8 @@ final class HUDView: NSView {
             for step in 1...8 { spring.line(to:CGPoint(x:cx+(step==8 ? 0 : (step%2==0 ? -7 : 7)),y:top+(bottom-top)*CGFloat(step)/8)) }
             tone.setStroke(); spring.lineWidth = 1.5; spring.stroke()
             tone.setFill(); NSBezierPath(ovalIn:NSRect(x:cx-4,y:bottom-3,width:8,height:6)).fill()
-            text(String(format:"%+.0f",wheel.suspensionTravel*1000),x:cx-29,y:y+92,size:11,color:tone,mono:true,width:58,align:.center)
+            let travelMM = (wheel.suspensionTravel*1000).rounded()
+            text(travelMM == 0 ? "0" : String(format:"%+.0f",travelMM),x:cx-29,y:y+92,size:11,color:tone,mono:true,width:58,align:.center)
             text(String(format:"%.1f kN",wheel.normalLoad/1000),x:cx-29,y:y+107,size:8,color:muted,mono:true,width:58,align:.center)
         }
     }
@@ -417,40 +435,41 @@ final class HUDView: NSView {
     }
 
     private func drawCompactTiming(_ game: RacingGame, x: CGFloat, y: CGFloat) {
-        panel(NSRect(x:x,y:y,width:222,height:132), color:NSColor(white:0.04,alpha:0.76),radius:1)
-        text("LAP TIMING",x:x+10,y:y+8,size:10,color:muted,weight:.semibold)
-        text(String(format:"LAP %02d",game.session.lap),x:x+140,y:y+8,size:10,color:white,mono:true,width:70,align:.right)
-        line(CGPoint(x:x+10,y:y+27),CGPoint(x:x+211,y:y+27),color:.white.withAlphaComponent(0.2))
-        for (i,item) in [("Current",lapTime(game.session.elapsed)),("Last lap",lapTime(game.session.last)),("Best lap",lapTime(game.session.best))].enumerated() {
-            let row = y+34+CGFloat(i)*23
-            text(item.0,x:x+10,y:row,size:11,color:muted)
-            text(item.1,x:x+90,y:row,size:13,color:(i==0 && !game.session.validLap) || (i==1 && game.session.last != nil && !game.session.lastValid) ? NSColor(rgb:0xE69B69) : white,mono:true,width:120,align:.right)
+        panel(NSRect(x:x,y:y,width:196,height:105),color:NSColor(rgb:0x12161A,alpha:0.84),radius:6)
+        text("圈时",x:x+11,y:y+8,size:10,color:muted,weight:.semibold,width:42)
+        text(String(format:"第 %02d 圈",game.session.lap),x:x+93,y:y+8,size:10,color:white,mono:true,width:92,align:.right)
+        line(CGPoint(x:x+11,y:y+26),CGPoint(x:x+185,y:y+26),color:white.withAlphaComponent(0.12))
+        let rows = [("当前",lapTime(game.session.elapsed)),("上圈",lapTime(game.session.last)),("最佳",lapTime(game.session.best))]
+        for (i,item) in rows.enumerated() {
+            let row = y+32+CGFloat(i)*22
+            let invalid = (i==0 && !game.session.validLap) || (i==1 && game.session.last != nil && !game.session.lastValid)
+            text(item.0,x:x+11,y:row+1,size:10,color:muted,width:42)
+            text(item.1,x:x+56,y:row,size:13,color:invalid ? NSColor(rgb:0xE69B69) : white,mono:true,width:129,align:.right)
         }
-        text("Y / Tab 六种视角  ·  V 隐藏仪表",x:x+10,y:y+109,size:9,color:muted)
     }
 
     private func drawLapDelta(_ game:RacingGame,x:CGFloat,y:CGFloat) {
-        let session=game.session
-        let green=NSColor(rgb:0x78D947), red=NSColor(rgb:0xED696C)
-        panel(NSRect(x:x,y:y,width:340,height:126),color:NSColor(white:0.035,alpha:0.86),radius:5)
-        text("个人最佳圈速差",x:x+12,y:y+9,size:10,color:muted,width:160)
-        text("DELTA / PB",x:x+220,y:y+9,size:9,color:muted,mono:true,width:108,align:.right)
-        let delta=session.delta
-        text(delta.map {String(format:"%+.3f",$0)} ?? "—.——",x:x+12,y:y+27,size:30,
-             color:delta.map {$0<=0 ? green : red} ?? muted,weight:.semibold,mono:true,width:165)
-        text(session.status,x:x+184,y:y+31,size:10,color:session.validLap ? muted : red,width:145)
-        text(session.best == nil ? "完成有效圈建立参考" : "负值领先 · 正值落后",x:x+184,y:y+49,size:9,color:muted,width:145)
-        let previous=session.sectors.isEmpty && session.last != nil
-        let values=previous ? session.lastSectors : session.sectors
-        text(previous ? "上圈分段" : "本圈分段",x:x+12,y:y+72,size:9,color:muted,width:120)
+        let session = game.session
+        let green = NSColor(rgb:0x89C98A), red = NSColor(rgb:0xEA8079)
+        panel(NSRect(x:x,y:y,width:340,height:84),color:NSColor(rgb:0x12161A,alpha:0.84),radius:6)
+        let delta = session.delta
+        text("圈速差",x:x+12,y:y+8,size:9,color:muted,width:100)
+        text(delta.map {String(format:"%+.3f",$0)} ?? "—.——",x:x+12,y:y+19,size:21,
+             color:delta.map {$0<=0 ? green : red} ?? muted,weight:.semibold,mono:true,width:135)
+        text(session.status,x:x+134,y:y+12,size:10,color:session.validLap ? white : red,width:194,align:.right)
+        let previous = session.sectors.isEmpty && session.last != nil
+        let values = previous ? session.lastSectors : session.sectors
+        text(previous ? "上圈分段" : "本圈分段",x:x+134,y:y+29,size:9,color:muted,width:194,align:.right)
+        line(CGPoint(x:x+12,y:y+49),CGPoint(x:x+328,y:y+49),color:white.withAlphaComponent(0.12))
         for i in 0..<3 {
-            let sx=x+12+CGFloat(i)*108
-            let value=i<values.count ? values[i] : nil
-            let valid=previous ? session.lastValid : session.validLap
-            let reference=i<session.bestSectors.count ? session.bestSectors[i] : nil
-            let color: NSColor = !valid ? red : (value != nil && reference != nil && value!<=reference!+0.001 ? green : white)
-            text("S\(i+1)",x:sx,y:y+96,size:10,color:muted,width:22)
-            text(value.map {String(format:"%.3f",$0)} ?? "—.——",x:sx+22,y:y+93,size:13,color:color,mono:true,width:74,align:.right)
+            let sx = x+12+CGFloat(i)*108
+            let value = i<values.count ? values[i] : nil
+            let valid = previous ? session.lastValid : session.validLap
+            let reference = i<session.bestSectors.count ? session.bestSectors[i] : nil
+            let personalBest = value.map { time in reference.map { time <= $0+0.001 } ?? false } ?? false
+            let color: NSColor = !valid ? red : (personalBest ? green : white)
+            text("S\(i+1)",x:sx,y:y+59,size:10,color:muted,width:22)
+            text(value.map {String(format:"%.3f",$0)} ?? "—.——",x:sx+22,y:y+57,size:12,color:color,mono:true,width:77,align:.right)
         }
     }
 
@@ -477,11 +496,12 @@ final class HUDView: NSView {
             let target=game.world.racingLine.sample(at:game.location.progress).targetSpeed*3.6
             text(String(format:"参考 %.0f km/h",target),x:x+259,y:y-28,size:10,color:muted,mono:true,width:145,align:.right)
         }
-        let green = NSColor(rgb:0x78D947), red = NSColor(rgb:0xDF404A), yellow = NSColor(rgb:0xFFD644)
+        let green = NSColor(rgb:0x85C86A), red = NSColor(rgb:0xE96162), yellow = NSColor(rgb:0xF3CF61)
         let rect = NSRect(x:x,y:y,width:414,height:82)
-        panel(rect,color:NSColor(rgb:0x23242A,alpha:0.94),radius:10)
+        panel(rect,color:NSColor(rgb:0x171A1E,alpha:0.94),radius:8)
         let plot = NSRect(x:x+7,y:y+10,width:185,height:62)
-        NSColor(white:0.18,alpha:1).setFill();plot.fill()
+        NSColor(rgb:0x24282D).setFill()
+        NSBezierPath(roundedRect:plot,xRadius:3,yRadius:3).fill()
         for tick in 0...10 {
             let gx=plot.minX+plot.width*CGFloat(tick)/10
             line(CGPoint(x:gx,y:plot.minY),CGPoint(x:gx,y:plot.maxY),color:white.withAlphaComponent(tick%2==0 ? 0.07 : 0.025))
@@ -564,7 +584,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.11", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.12", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -630,6 +650,8 @@ final class HUDView: NSView {
         text("操作", x: x + 29, y: y + 148, size: 10, color: muted)
         text("XBOX", x: x + 169, y: y + 148, size: 10, color: lime, weight: .bold)
         text("键盘", x: x + 352, y: y + 148, size: 10, color: muted)
+        button(game.compactHUD ? "仪表 精简 [ F7 ]" : "仪表 完整 [ F7 ]",
+               NSRect(x:x+407,y:y+141,width:115,height:24),action:"compactHUD",active:game.compactHUD)
         for (index, row) in rows.enumerated() {
             let rowY = y + 174 + CGFloat(index) * 24
             text(row.0, x: x + 29, y: rowY, size: 12)

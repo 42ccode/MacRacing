@@ -30,6 +30,7 @@ struct SavedPractice: Codable {
     var brakeBiasByVehicle: [String:Double]? = nil
     var pitLimiterEnabled: Bool? = nil
     var mirrorEnabled: Bool? = nil
+    var compactHUD: Bool? = nil
 }
 
 final class RacingGame {
@@ -56,6 +57,7 @@ final class RacingGame {
     var cockpit: Bool { drivingView.isInterior }
     var ghostEnabled = true
     var showHUD = true
+    private(set) var compactHUD = false
     private(set) var mirrorEnabled = true
     private(set) var mirrorImage: NSImage?
     private var mirrorRenderer: SCNRenderer?
@@ -402,6 +404,9 @@ final class RacingGame {
             racingLineEnabled.toggle();world.showRacingLine=racingLineEnabled;savePractice()
             announce(racingLineEnabled ? "理想线路开启 · 绿加速 / 黄收油 / 红制动" : "理想线路关闭",duration:3)
         case "hud": showHUD.toggle()
+        case "compactHUD":
+            compactHUD.toggle()
+            savePractice()
         case "statistics": sceneView.showsStatistics.toggle()
         case "fovDown": world.cockpitFOV = max(42,world.cockpitFOV-2)
         case "fovUp": world.cockpitFOV = min(84,world.cockpitFOV+2)
@@ -581,6 +586,7 @@ final class RacingGame {
         if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
         pitLimiterEnabled = saved.pitLimiterEnabled ?? true
         mirrorEnabled = saved.mirrorEnabled ?? true
+        compactHUD = saved.compactHUD ?? false
         opponentCount = clamp(saved.opponentCount ?? 3, 0, 3)
         hudPositions = (saved.hudPositions ?? [:]).filter { $0.value.x.isFinite && $0.value.y.isFinite }
         racingLineEnabled=saved.racingLineEnabled ?? true
@@ -599,7 +605,7 @@ final class RacingGame {
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions,brakeBiasByVehicle:brakeBiasByVehicle,pitLimiterEnabled:pitLimiterEnabled,mirrorEnabled:mirrorEnabled)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions,brakeBiasByVehicle:brakeBiasByVehicle,pitLimiterEnabled:pitLimiterEnabled,mirrorEnabled:mirrorEnabled,compactHUD:compactHUD)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             if let legacyPractice {

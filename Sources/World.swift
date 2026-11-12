@@ -61,6 +61,14 @@ final class RacingWorld {
     private var cameraPosition = SIMD3<Float>.zero
     private var cameraReady = false
     private var chaseYaw = 0.0
+    private struct OpponentVisual {
+        let root: SCNNode
+        let body: SCNNode?
+        let steer: [SCNNode]
+        let roll: [SCNNode]
+    }
+    private var opponentTemplate: SCNNode?
+    private var opponentVisuals: [OpponentVisual] = []
     private var wheelPivots: [SCNNode] = []
     private var wheelBaseHeights: [CGFloat] = []
     private var importedSteering: SCNNode?
@@ -127,7 +135,7 @@ final class RacingWorld {
         scene.rootNode.addChildNode(sun)
 
         TrackEnvironment(scene: scene, circuit: circuit, assets: self.assetsDirectory).build()
-        buildCar(); buildContactShadows()
+        buildCar(); buildContactShadows(); prepareOpponentTemplate()
         racingLineNode.name="PracticeRacingLine";scene.rootNode.addChildNode(racingLineNode)
 
         camera.camera = SCNCamera()
@@ -169,7 +177,68 @@ final class RacingWorld {
         gaugeNeedles = []; contactShadows = []
         importedSteering = nil; renderedDamage = .zero; steeringAxis = SIMD3(0,1,0)
         instrumentClock = 1; vehicleKind = kind
-        buildCar(); buildContactShadows(); resetCamera()
+        buildCar(); buildContactShadows(); prepareOpponentTemplate(); resetCamera()
+    }
+
+    private func prepareOpponentTemplate() {
+        opponentVisuals.forEach { $0.root.removeFromParentNode() }
+        opponentVisuals.removeAll()
+        body.name = "TrafficBody"
+        for index in wheelPivots.indices {
+            wheelPivots[index].name = "TrafficSteer\(index)"
+            rollingWheels[index].name = "TrafficRoll\(index)"
+        }
+        let template = car.clone()
+        template.transform = SCNMatrix4Identity
+        template.childNode(withName: "LiveInstrumentDisplay", recursively: true)?.removeFromParentNode()
+        opponentTemplate = template
+    }
+
+    func updateTraffic(_ vehicles: [Vehicle]) {
+        while opponentVisuals.count > vehicles.count {
+            opponentVisuals.removeLast().root.removeFromParentNode()
+        }
+        guard let template = opponentTemplate else { return }
+        let paintColors: [UInt32] = [0x2966A1, 0xDB8E27, 0x438269]
+        let paintNames = ["Body_Color", "paint", "Paint 1 Carmine"]
+        let lightNames = ["Brakelight", "Taillight_Glass"]
+        while opponentVisuals.count < vehicles.count {
+            let index = opponentVisuals.count
+            let root = template.clone()
+            root.name = "ComputerCar\(index+1)"
+            root.enumerateChildNodes { node, _ in
+                guard let geometry = node.geometry,
+                      geometry.materials.contains(where: { paintNames.contains($0.name ?? "") || lightNames.contains($0.name ?? "") }),
+                      let copy = geometry.copy() as? SCNGeometry else { return }
+                copy.materials = geometry.materials.map { original in
+                    let name = original.name ?? ""
+                    guard (paintNames.contains(name) || lightNames.contains(name)),
+                          let material = original.copy() as? SCNMaterial else { return original }
+                    if paintNames.contains(name) {material.diffuse.contents = NSColor(rgb: paintColors[index % paintColors.count])}
+                    else {material.emission.contents = NSColor(rgb: 0x2A0504)}
+                    return material
+                }
+                node.geometry = copy
+            }
+            scene.rootNode.addChildNode(root)
+            let steer = wheelPivots.indices.compactMap { root.childNode(withName: "TrafficSteer\($0)", recursively: false) }
+            let roll = wheelPivots.indices.compactMap { root.childNode(withName: "TrafficRoll\($0)", recursively: true) }
+            opponentVisuals.append(OpponentVisual(root: root, body: root.childNode(withName: "TrafficBody", recursively: false), steer: steer, roll: roll))
+        }
+        for (visual, vehicle) in zip(opponentVisuals, vehicles) {
+            visual.root.position = vector(vehicle.position)
+            visual.root.eulerAngles.y = CGFloat(vehicle.heading)
+            visual.body?.position.y = CGFloat(vehicle.heave)
+            visual.body?.eulerAngles.x = CGFloat(-vehicle.pitch)
+            visual.body?.eulerAngles.z = CGFloat(vehicle.roll)
+            for index in visual.steer.indices {
+                visual.steer[index].eulerAngles.y = CGFloat(vehicle.wheelSteer(index))
+                visual.steer[index].position.y = wheelBaseHeights[index] + CGFloat(vehicle.wheels[index].surfaceHeight)
+            }
+            for index in visual.roll.indices {
+                visual.roll[index].simdOrientation = simd_quatf(angle: Float(vehicle.wheels[index].rotation), axis: SIMD3(1,0,0))
+            }
+        }
     }
 
     private func buildCar() {

@@ -24,6 +24,7 @@ struct SavedPractice: Codable {
     var hapticLevel: Int? = nil
     var records: [String:LapRecord]? = nil
     var racingLineEnabled: Bool? = nil
+    var opponentCount: Int? = nil
 }
 
 final class RacingGame {
@@ -49,6 +50,9 @@ final class RacingGame {
     var ghostEnabled = true
     var showHUD = true
     var racingLineEnabled = true
+    private(set) var opponentCount = 3
+    private(set) var traffic = ComputerTraffic()
+    private(set) var autoDriveEnabled = false
     var tyreSetup = TyreSetup()
     var serviceRemaining = 0.0
     var gTrace: [SIMD2<Double>] = []
@@ -119,6 +123,20 @@ final class RacingGame {
                 announce("维修完成 · 新胎需要暖胎", duration: 5)
             }
         } else if !isPaused && hasStarted {
+            if autoDriveEnabled && ComputerDriver.wantsControl(drivingInput) {
+                autoDriveEnabled = false
+                announce("已接管车辆", duration: 2)
+            }
+            if autoDriveEnabled {
+                if ComputerDriver.canDrive(vehicle, at: location, on: circuit) {
+                    drivingInput = ComputerDriver.input(for: vehicle, at: location, circuit: circuit,
+                        line: world.racingLine, pace: 0.82, traffic: traffic.cars.map(\.vehicle))
+                } else {
+                    autoDriveEnabled = false
+                    drivingInput = DrivingInput(brake: 1)
+                    announce("自动驾驶已退出 · 请对准赛道方向", duration: 3)
+                }
+            }
             accumulator += dt
             while accumulator >= fixedStep {
                 simulate(fixedStep)
@@ -140,6 +158,7 @@ final class RacingGame {
             sceneDirty = true
         }
         if running || sceneDirty {
+            world.updateTraffic(hasStarted ? traffic.cars.map(\.vehicle) : [])
             world.exteriorLook = input.exteriorLook
             world.update(vehicle:vehicle,input:drivingInput,dt:dt,cockpit:cockpit,ghost:ghost,view:drivingView)
             if !running { sceneView.needsDisplay = true }
@@ -163,9 +182,20 @@ final class RacingGame {
             return WheelRoadContact(distance:contact.distance, progress:contact.progress,
                                     kerbsEnabled:circuit.hasKerb(at:contact.progress))
         }
-        vehicle.step(dt, input: drivingInput, assists: assists, roadDistance: location.distance, roadWidth: circuit.width, roadLateral: location.lateral, roadProgress: location.progress, kerbsEnabled: circuit.hasKerb(at: location.progress), roadContacts: contacts)
-        location = circuit.nearest(to: vehicle.position)
+        var activeAssists = assists
+        if autoDriveEnabled {activeAssists.automatic = true}
+        vehicle.step(dt, input: drivingInput, assists: activeAssists, roadDistance: location.distance, roadWidth: circuit.width, roadLateral: location.lateral, roadProgress: location.progress, kerbsEnabled: circuit.hasKerb(at: location.progress), roadContacts: contacts)
         collisionCooldown = max(0, collisionCooldown - dt)
+        if let contact = traffic.step(dt, player: &vehicle, circuit: circuit, line: world.racingLine),
+           contact.closingSpeed > 1.5, collisionCooldown <= 0 {
+            vehicle.impact(normalSpeed: contact.closingSpeed, outwardNormal: contact.normal)
+            let strength = clamp(contact.closingSpeed/12,0,1)
+            let side = simd_dot(contact.normal,vehicle.modelX)
+            impactFeedback = SIMD2(strength*(side < -0.2 ? 0.25 : 1),strength*(side > 0.2 ? 0.25 : 1))
+            collisionCooldown = 0.4
+            announce("与电脑车辆接触", duration: 2)
+        }
+        location = circuit.nearest(to: vehicle.position)
         if location.distance > 15.05 {
             let offset = vehicle.position - location.point
             let normal = simd_normalize(offset)
@@ -184,7 +214,7 @@ final class RacingGame {
                 announce("碰撞损伤 · R 复位保留车损 · P 返回维修", duration: 3)
             }
         }
-        if session.step(dt, vehicle: vehicle, location: location, trackLength: circuit.length, trackWidth: circuit.width) {
+        if session.step(dt, vehicle: vehicle, location: location, trackLength: circuit.length, trackWidth: circuit.width, assisted: autoDriveEnabled) {
             if session.newBest {
                 announce("个人最佳  \(lapTime(session.best))  ·  幽灵车已更新", duration: 6)
                 savePractice()
@@ -232,6 +262,7 @@ final class RacingGame {
             session.resetLap(at: location.progress)
             gTrace.removeAll(keepingCapacity: true)
             inputHistory.reset()
+            autoDriveEnabled = false
             serviceRemaining = 12
             collisionCooldown = 0
             accumulator = 0
@@ -262,6 +293,21 @@ final class RacingGame {
             guard isPaused && serviceRemaining == 0 else { return }
             tyreSetup.coldPressure = clamp(tyreSetup.coldPressure + (action == "pressureUp" ? 0.05 : -0.05), 1.3, 2.1)
             savePractice()
+        case "opponents":
+            guard isPaused else { return }
+            opponentCount = (opponentCount + 1) % 4
+            traffic.reset(count: opponentCount, kind: vehicle.kind, circuit: circuit, from: location.progress)
+            savePractice()
+        case "autoDrive":
+            if autoDriveEnabled {
+                autoDriveEnabled = false
+                announce("已切回手动驾驶", duration: 2)
+            } else if serviceRemaining == 0 && ComputerDriver.canDrive(vehicle, at: location, on: circuit) {
+                autoDriveEnabled = true
+                announce("自动驾驶开启 · 操作油门、刹车或转向可接管", duration: 4)
+            } else {
+                announce("请在维修结束后对准赛道方向", duration: 3)
+            }
         case "racingLine":
             racingLineEnabled.toggle();world.showRacingLine=racingLineEnabled;savePractice()
             announce(racingLineEnabled ? "理想线路开启 · 绿加速 / 黄收油 / 红制动" : "理想线路关闭",duration:3)
@@ -320,8 +366,8 @@ final class RacingGame {
             world.resetCamera()
             if hasStarted { announce(drivingView.label, duration: 1.5) }
             savePractice()
-        case "upshift": if !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(1) }
-        case "downshift": if !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(-1) }
+        case "upshift": if !autoDriveEnabled && !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(1) }
+        case "downshift": if !autoDriveEnabled && !assists.automatic && !isPaused && serviceRemaining == 0 { vehicle.shift(-1) }
         case "abs": assists.absLevel = (assists.absLevel+1)%6; savePractice(); announce("ABS \(assists.absLevel)/5 · 0 关闭，5 强介入",duration:2)
         case "tc": assists.tcLevel = (assists.tcLevel+1)%6; savePractice(); announce("TCS \(assists.tcLevel)/5 · 0 关闭，5 强介入",duration:2)
         case "automatic": assists.automatic.toggle(); savePractice()
@@ -335,6 +381,7 @@ final class RacingGame {
         case "deadzoneDown": assists.steeringDeadzone = max(0.02, assists.steeringDeadzone - 0.02); savePractice()
         case "deadzoneUp": assists.steeringDeadzone = min(0.30, assists.steeringDeadzone + 0.02); savePractice()
         case "controllerDisconnected":
+            autoDriveEnabled = false
             if hasStarted { isPaused = true; input.clear(); announce("手柄连接断开 · 已暂停", duration: 6) }
         default: break
         }
@@ -342,6 +389,7 @@ final class RacingGame {
     }
 
     func loseFocus() {
+        autoDriveEnabled = false
         input.clear()
         if hasStarted { isPaused = true }
         sound.update(rpm: vehicle.rpm, throttle: 0, paused: true)
@@ -364,6 +412,7 @@ final class RacingGame {
         vehicle.reset(at: circuit.start)
         vehicle.service(setup: tyreSetup)
         location = circuit.nearest(to: vehicle.position)
+        traffic.reset(count: opponentCount, kind: vehicle.kind, circuit: circuit, from: location.progress)
         session.resetLap(at: location.progress)
         accumulator = 0
         telemetry = [telemetry[0]]
@@ -410,6 +459,7 @@ final class RacingGame {
         assists.steeringDeadzone = saved.deadzone.isFinite ? clamp(saved.deadzone, 0.02, 0.3) : 0.08
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
         if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
+        opponentCount = clamp(saved.opponentCount ?? 3, 0, 3)
         racingLineEnabled=saved.racingLineEnabled ?? true
         world.showRacingLine=racingLineEnabled
         sound.muted = saved.muted
@@ -426,7 +476,7 @@ final class RacingGame {
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             if let legacyPractice {

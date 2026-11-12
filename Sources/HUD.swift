@@ -168,6 +168,14 @@ final class HUDView: NSView {
         }
         let start = project(game.circuit.start.point)
         white.setFill(); NSRect(x:start.x-3,y:start.y-3,width:6,height:6).fill()
+        if game.hasStarted {
+            let colors: [UInt32] = [0x5AA4E7, 0xDB943B, 0x83AE7F]
+            for (index, opponent) in game.traffic.cars.enumerated() {
+                let dot = project(opponent.vehicle.position)
+                NSColor(rgb: colors[index]).setFill()
+                NSBezierPath(ovalIn: NSRect(x:dot.x-3,y:dot.y-3,width:6,height:6)).fill()
+            }
+        }
         let p = project(game.vehicle.position)
         lime.setFill(); NSBezierPath(ovalIn:NSRect(x:p.x-4,y:p.y-4,width:8,height:8)).fill()
         line(p,CGPoint(x:p.x+CGFloat(sin(game.vehicle.heading))*10,y:p.y+CGFloat(cos(game.vehicle.heading))*10),color:lime,width:2)
@@ -323,6 +331,11 @@ final class HUDView: NSView {
 
     private func drawPedals(_ game: RacingGame, height: CGFloat) {
         let x: CGFloat = 18, y = height-100
+        if game.autoDriveEnabled {
+            let top = y - (game.racingLineEnabled ? 62 : 31)
+            panel(NSRect(x:x,y:top,width:282,height:24),color:NSColor(rgb:0x162C33,alpha:0.92),radius:4)
+            text("自动驾驶 · 操作油门、刹车或转向接管",x:x+10,y:top+4,size:10,color:NSColor(rgb:0x9EE7F2),width:262)
+        }
         if game.racingLineEnabled {
             panel(NSRect(x:x,y:y-34,width:414,height:27),color:NSColor(white:0.03,alpha:0.8),radius:3)
             text("绿 加速 · 黄 收油 · 红 制动",x:x+10,y:y-28,size:10,color:muted,width:245)
@@ -416,7 +429,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.6.1", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.7", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -444,6 +457,8 @@ final class HUDView: NSView {
         button("›",NSRect(x:x+357,y:y+210,width:34,height:30),action:"vehicleNext")
         line(CGPoint(x: x + 29, y: y + 247), CGPoint(x: x + 400, y: y + 247), color: white.withAlphaComponent(0.12))
         text(game.input.controller != nil ? "手柄已就绪 · RT 油门 / LT 刹车 / 左摇杆转向" : "Xbox 手柄或 W A S D 驾驶 · 回车进入赛道", x: x + 29, y: y + 266, size: 12, color: white)
+        button("电脑对手 \(game.opponentCount)  [ O ]",NSRect(x:x+28,y:y+286,width:178,height:22),action:"opponents",active:game.opponentCount>0)
+        button("自动驾驶 \(game.autoDriveEnabled ? "开" : "关")  [ U ]",NSRect(x:x+216,y:y+286,width:186,height:22),action:"autoDrive",active:game.autoDriveEnabled)
         button("进入赛道    →", NSRect(x: x + 28, y: y + 310, width: 374, height: 49), action: "start", primary: true)
         text("Tab 切视角 · N 换赛道 · I 理想线路", x: x + 29, y: y + 378, size: 10, color: muted)
         panel(NSRect(x: width - 260, y: height - 179, width: 232, height: 125))
@@ -462,6 +477,8 @@ final class HUDView: NSView {
         let y = max(20, (height - 674) / 2)
         panel(NSRect(x: x, y: y, width: 550, height: 674), color: NSColor(rgb: 0x191B1D, alpha: 0.99), radius: 16)
         text("SESSION PAUSED", x: x + 28, y: y + 24, size: 10, color: lime, weight: .bold)
+        button("电脑对手 \(game.opponentCount)  [ O ]",NSRect(x:x+231,y:y+17,width:139,height:28),action:"opponents",active:game.opponentCount>0)
+        button("自动驾驶 \(game.autoDriveEnabled ? "开" : "关")  [ U ]",NSRect(x:x+380,y:y+17,width:142,height:28),action:"autoDrive",active:game.autoDriveEnabled)
         text(game.showHelp ? "驾驶操作" : "练习已暂停", x: x + 27, y: y + 52, size: 26, weight: .bold)
         button(game.drivingView.label + " ›", NSRect(x:x+380,y:y+51,width:142,height:32), action:"camera")
         button("车辆：" + game.vehicle.kind.label + " ›  换车重开 [C / ←→]",NSRect(x:x+28,y:y+86,width:494,height:22),action:"vehicleNext")

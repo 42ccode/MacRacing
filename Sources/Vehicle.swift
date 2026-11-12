@@ -587,7 +587,7 @@ struct RaceSession {
         let a=bestTrace[lo],b=bestTrace[hi]
         return a.time+(b.time-a.time)*(fraction-a.fraction)/(b.fraction-a.fraction)
     }
-    mutating func step(_ dt: Double, vehicle: Vehicle, location: TrackLocation, trackLength: Double, trackWidth: Double) -> Bool {
+    mutating func step(_ dt: Double, vehicle: Vehicle, location: TrackLocation, trackLength: Double, trackWidth: Double, assisted: Bool = false) -> Bool {
         newBest=false
         let fraction=clamp(location.progress/trackLength,0,1)
         let forwardSpeed=simd_dot(vehicle.velocity,location.tangent), movingForward=forwardSpeed>0.5
@@ -599,6 +599,7 @@ struct RaceSession {
         let before=elapsed
         if started {
             elapsed += dt
+            if assisted { invalidate("自动驾驶") }
             if location.distance>trackWidth*0.5+2.5 {invalidate("驶出赛道边界")}
             wrongWayTime=forwardSpeed < -1 ? wrongWayTime+dt : 0
             if wrongWayTime>0.6 {invalidate("逆向行驶")}

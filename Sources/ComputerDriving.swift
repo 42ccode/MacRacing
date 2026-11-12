@@ -82,6 +82,21 @@ struct TrafficContact {
     }
 }
 
+struct SideTraffic {
+    var left = false
+    var right = false
+
+    init(player: Vehicle, opponents: [TrafficCar]) {
+        for opponent in opponents {
+            let offset = opponent.vehicle.position - player.position
+            let longitudinal = simd_dot(offset, player.forward)
+            let lateral = -simd_dot(offset, player.modelX)
+            guard (-6.0...3.5).contains(longitudinal), (1.1...4.5).contains(abs(lateral)) else { continue }
+            if lateral < 0 { left = true } else { right = true }
+        }
+    }
+}
+
 struct ComputerTraffic {
     private(set) var cars: [TrafficCar] = []
     private var stepClock = 0.0

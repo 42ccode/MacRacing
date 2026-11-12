@@ -1,5 +1,6 @@
 import AppKit
 import SceneKit
+import Metal
 import simd
 
 struct SavedPractice: Codable {
@@ -28,6 +29,7 @@ struct SavedPractice: Codable {
     var hudPositions: [String:HUDPosition]? = nil
     var brakeBiasByVehicle: [String:Double]? = nil
     var pitLimiterEnabled: Bool? = nil
+    var mirrorEnabled: Bool? = nil
 }
 
 final class RacingGame {
@@ -54,6 +56,12 @@ final class RacingGame {
     var cockpit: Bool { drivingView.isInterior }
     var ghostEnabled = true
     var showHUD = true
+    private(set) var mirrorEnabled = true
+    private(set) var mirrorImage: NSImage?
+    private var mirrorRenderer: SCNRenderer?
+    private var nextMirrorFrame = 0.0
+    var showMirror: Bool { hasStarted && !isPaused && showHUD && cockpit && mirrorEnabled && serviceRemaining == 0 }
+    var sideTraffic: SideTraffic { SideTraffic(player: vehicle, opponents: traffic.cars) }
     var hudPositions: [String:HUDPosition] = [:]
     private(set) var editingHUD = false
     private var resumeAfterHUDEdit = false
@@ -173,11 +181,12 @@ final class RacingGame {
         }
         if running || sceneDirty {
             world.updateTraffic(hasStarted ? traffic.cars.map(\.vehicle) : [])
-            world.exteriorLook = input.exteriorLook
+            world.sideLook = input.sideLook
             world.update(vehicle:vehicle,input:drivingInput,dt:dt,cockpit:cockpit,ghost:ghost,view:drivingView)
             if !running { sceneView.needsDisplay = true }
             sceneDirty = false
         }
+        updateMirror(at: now)
         renderClock += dt
         if renderClock >= 1.0 / 30 {
             renderClock = 0
@@ -187,6 +196,24 @@ final class RacingGame {
             }
             hud.needsDisplay = true
         }
+    }
+
+    private func updateMirror(at now: Double) {
+        guard showMirror else {
+            mirrorImage = nil
+            nextMirrorFrame = 0
+            return
+        }
+        guard now >= nextMirrorFrame else { return }
+        if mirrorRenderer == nil {
+            guard let device = sceneView.device ?? MTLCreateSystemDefaultDevice() else { return }
+            let renderer = SCNRenderer(device: device, options: nil)
+            renderer.scene = world.scene
+            renderer.pointOfView = world.mirrorCamera
+            mirrorRenderer = renderer
+        }
+        mirrorImage = mirrorRenderer?.snapshot(atTime: now, with: CGSize(width: 360, height: 96), antialiasingMode: .none)
+        nextMirrorFrame = ProcessInfo.processInfo.systemUptime + 1.0 / 15
     }
 
     private func simulate(_ dt: Double) {
@@ -309,6 +336,9 @@ final class RacingGame {
             showHelp = false
             input.clear()
             world.resetCamera()
+        case "mirror":
+            mirrorEnabled.toggle()
+            savePractice()
         case "pitLimiter":
             pitLimiterEnabled.toggle()
             savePractice()
@@ -509,6 +539,8 @@ final class RacingGame {
     private func changeCircuit(_ kind: CircuitKind) {
         let fov = world.cockpitFOV, eye = world.seatHeight
         circuit = Circuit(kind:kind)
+        mirrorRenderer = nil
+        mirrorImage = nil
         world = RacingWorld(circuit:circuit)
         world.showRacingLine=racingLineEnabled
         world.cockpitFOV = fov; world.seatHeight = eye
@@ -548,6 +580,7 @@ final class RacingGame {
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
         if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
         pitLimiterEnabled = saved.pitLimiterEnabled ?? true
+        mirrorEnabled = saved.mirrorEnabled ?? true
         opponentCount = clamp(saved.opponentCount ?? 3, 0, 3)
         hudPositions = (saved.hudPositions ?? [:]).filter { $0.value.x.isFinite && $0.value.y.isFinite }
         racingLineEnabled=saved.racingLineEnabled ?? true
@@ -566,7 +599,7 @@ final class RacingGame {
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions,brakeBiasByVehicle:brakeBiasByVehicle,pitLimiterEnabled:pitLimiterEnabled)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions,brakeBiasByVehicle:brakeBiasByVehicle,pitLimiterEnabled:pitLimiterEnabled,mirrorEnabled:mirrorEnabled)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             if let legacyPractice {

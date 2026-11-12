@@ -128,6 +128,26 @@ struct SceneChecks {
         let cameraForward = world.camera.simdWorldFront
         let desiredForward = SIMD3<Float>(Float(vehicle.forward.x), 0, Float(vehicle.forward.y))
         check(simd_dot(cameraForward, desiredForward) > 0.99, "Cockpit camera faces the vehicle's forward direction")
+        let rearCamera = world.mirrorCamera
+        check(simd_dot(rearCamera.simdWorldFront, desiredForward) < -0.99 && rearCamera.simdWorldUp.y > 0.99,
+              "Mirror faces rearward with a level horizon after vehicle rotation")
+        var carMeshCount = 0
+        var visibleInMirror = 0
+        world.car.enumerateChildNodes { node, _ in
+            guard node.geometry != nil else { return }
+            carMeshCount += 1
+            if (node.categoryBitMask & rearCamera.camera!.categoryBitMask) != 0 { visibleInMirror += 1 }
+        }
+        check(carMeshCount > 0 && visibleInMirror == 0, "Mirror excludes every player vehicle mesh")
+        let driverRight = SIMD3<Float>(-Float(vehicle.modelX.x), 0, -Float(vehicle.modelX.y))
+        for side in [-1.0, 1.0] {
+            world.sideLook = side
+            world.update(vehicle: vehicle, input: DrivingInput(), dt: 1/60, cockpit: true, ghost: nil)
+            check(simd_dot(world.camera.simdWorldFront, driverRight) * Float(side) > 0.60,
+                  "Cockpit glance points toward the requested driver side: \(side)")
+        }
+        world.sideLook = 0
+
         check(world.frontWheels.count == 2 && world.rollingWheels.count == 4,
               "All four imported wheels are attached to animation pivots")
         let steering = world.car.childNode(withName: "InteriorSteeringCylinder", recursively: true)!

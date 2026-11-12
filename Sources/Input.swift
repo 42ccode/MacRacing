@@ -191,6 +191,7 @@ final class InputManager {
         case 32: action = "autoDrive"   // U
         case 31: action = "opponents"   // O, in menus
         case 34: action = "racingLine"  // I
+        case 11: action = "mirror"      // B
         case 9: action = "hud"           // V
         case 33: action = "fovDown"      // [
         case 30: action = "fovUp"        // ]
@@ -251,7 +252,7 @@ final class InputManager {
         return acceptDriving ? input : DrivingInput()
     }
 
-    var exteriorLook: Double {
+    var sideLook: Double {
         if keys.contains(38) { return -1 } // J
         if keys.contains(37) { return 1 }  // L
         let x = Double(controller?.extendedGamepad?.rightThumbstick.xAxis.value ?? 0)

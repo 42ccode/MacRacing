@@ -42,6 +42,8 @@ enum DrivingView: Int, CaseIterable, Codable {
 final class RacingWorld {
     let scene = SCNScene()
     let camera = SCNNode()
+    let mirrorCamera = SCNNode()
+    private static let hiddenFromMirror = 1 << 1
     let car = SCNNode()
     let ghostCar = SCNNode()
     let body = SCNNode()
@@ -80,7 +82,7 @@ final class RacingWorld {
     private var instrumentClock = 1.0
     var cockpitFOV: CGFloat = 62
     var seatHeight: Double = 1.00
-    var exteriorLook = 0.0
+    var sideLook = 0.0
     private(set) var vehicleKind = VehicleKind.concept
     private var gaugeNeedles: [SCNNode] = []
     private var contactShadows: [SCNNode] = []
@@ -137,6 +139,7 @@ final class RacingWorld {
         TrackEnvironment(scene: scene, circuit: circuit, assets: self.assetsDirectory).build()
         buildCar(); buildContactShadows(); prepareOpponentTemplate()
         racingLineNode.name="PracticeRacingLine";scene.rootNode.addChildNode(racingLineNode)
+        racingLineNode.categoryBitMask = Self.hiddenFromMirror
 
         camera.camera = SCNCamera()
         camera.camera!.fieldOfView = 62
@@ -154,6 +157,14 @@ final class RacingWorld {
         camera.camera!.bloomIntensity = 0
         camera.camera!.bloomThreshold = 1.3
         scene.rootNode.addChildNode(camera)
+
+        let rearView = SCNCamera()
+        rearView.fieldOfView = 25
+        rearView.zNear = 0.14
+        rearView.zFar = 440
+        rearView.categoryBitMask = ~Self.hiddenFromMirror
+        mirrorCamera.camera = rearView
+        scene.rootNode.addChildNode(mirrorCamera)
     }
 
     private func box(_ width: CGFloat, _ height: CGFloat, _ length: CGFloat, at position: SCNVector3,
@@ -191,7 +202,13 @@ final class RacingWorld {
         let template = car.clone()
         template.transform = SCNMatrix4Identity
         template.childNode(withName: "LiveInstrumentDisplay", recursively: true)?.removeFromParentNode()
+        template.categoryBitMask = 1
+        template.enumerateChildNodes { node, _ in node.categoryBitMask = 1 }
         opponentTemplate = template
+        for root in [car, ghostCar] {
+            root.categoryBitMask = Self.hiddenFromMirror
+            root.enumerateChildNodes { node, _ in node.categoryBitMask = Self.hiddenFromMirror }
+        }
     }
 
     func updateTraffic(_ vehicles: [Vehicle]) {
@@ -668,6 +685,10 @@ final class RacingWorld {
         importedSteering?.simdTransform = steeringBase * simd_float4x4(simd_quatf(angle: Float(vehicle.steeringAngle * 9), axis: steeringAxis))
         brakeLights.forEach { $0.emission.contents = NSColor(rgb: input.brake > 0.05 ? 0xFF3328 : 0x2A0504) }
         let f = vehicle.forward
+        let mirrorHeight = 1.36 + vehicle.heave
+        mirrorCamera.position = vector(vehicle.position, y: mirrorHeight)
+        mirrorCamera.look(at: vector(vehicle.position - f * 60, y: mirrorHeight - 1.9),
+                          up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
         let desired: SIMD3<Float>
         let target: SCNVector3
         if mode.isInterior || mode == .bonnet || mode == .bumper {
@@ -683,10 +704,12 @@ final class RacingWorld {
             if mode == .bumper { longitudinal = 2.6; lateral = 0; height = 0.42 }
             let p = vehicle.position + f * longitudinal + vehicle.modelX * lateral
             desired = SIMD3(Float(p.x), Float(height + vehicle.heave), Float(p.y))
-            target = vector(p + f * 80, y: height + vehicle.heave - (mode == .bumper ? 0.5 : 2.0))
+            let glance = mode.isInterior ? sideLook * 0.73 : 0
+            let direction = f * cos(glance) - vehicle.modelX * sin(glance)
+            target = vector(p + direction * 80, y: height + vehicle.heave - (mode == .bumper ? 0.5 : 2.0))
             camera.camera!.fieldOfView = mode.isInterior ? cockpitFOV : 65
         } else {
-            let targetYaw = vehicle.heading + exteriorLook * 1.65
+            let targetYaw = vehicle.heading + sideLook * 1.65
             let yawError = atan2(sin(targetYaw-chaseYaw),cos(targetYaw-chaseYaw))
             chaseYaw = cameraReady ? chaseYaw + yawError*(1-exp(-dt*8)) : targetYaw
             let behind = SIMD2(sin(chaseYaw),cos(chaseYaw))
@@ -696,7 +719,7 @@ final class RacingWorld {
             if loc.distance > 15 { p = loc.point + simd_normalize(p-loc.point)*15 }
             let height = (mode == .chaseFar ? 3.5 : 2.15) + max(0,distance-simd_distance(p,vehicle.position))*0.48
             desired = SIMD3(Float(p.x),Float(height),Float(p.y))
-            target = vector(vehicle.position + f * (3.4-abs(exteriorLook)*2.5), y: 0.75)
+            target = vector(vehicle.position + f * (3.4-abs(sideLook)*2.5), y: 0.75)
             camera.camera!.fieldOfView = 58
         }
         cameraPosition = desired

@@ -51,6 +51,27 @@ import simd
 
     static func main() {
         for kind in CircuitKind.allCases { checkPack(on: kind) }
+        var player = Vehicle()
+        player.heading = 2.14
+        player.position = SIMD2(150,-78)
+        func opponent(ahead: Double, right: Double) -> TrafficCar {
+            var vehicle = player
+            vehicle.position += player.forward*ahead - player.modelX*right
+            return TrafficCar(vehicle:vehicle,pace:0.8,lane:0)
+        }
+        let nearLeft = opponent(ahead: -4, right: -2.5)
+        let nearRight = opponent(ahead: 1, right: 2.5)
+        let distant = [opponent(ahead: -9, right: 2.5), opponent(ahead: 8, right: -2.5),
+                       opponent(ahead: -4, right: 0), opponent(ahead: -2, right: -5.5)]
+        let left = SideTraffic(player: player, opponents: [nearLeft] + distant)
+        let right = SideTraffic(player: player, opponents: [nearRight] + distant)
+        let both = SideTraffic(player: player, opponents: [nearLeft, nearRight])
+        let clear = SideTraffic(player: player, opponents: distant)
+        check(left.left && !left.right, "Side warning follows the driver's left at a rotated heading")
+        check(right.right && !right.left, "Side warning follows the driver's right at a rotated heading")
+        check(both.left && both.right, "Side warnings can light independently on both sides")
+        check(!clear.left && !clear.right, "Distant and directly trailing cars do not trigger side warnings")
+
         check(!ComputerDriver.wantsControl(DrivingInput(throttle: 0.03, brake: 0.02, steering: 0.06)), "Small controller drift keeps auto drive engaged")
         check(ComputerDriver.wantsControl(DrivingInput(throttle: 1)) &&
               ComputerDriver.wantsControl(DrivingInput(brake: 1)) &&

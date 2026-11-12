@@ -18,7 +18,7 @@ struct HUDPosition: Codable {
 }
 
 private enum HUDPanel: String, CaseIterable {
-    case vehicle, map, tyres, suspension, acceleration, timing, delta, pedals
+    case vehicle, map, tyres, suspension, acceleration, timing, delta, pedals, mirror
 
     func defaultFrame(in viewport: CGSize) -> CGRect {
         let width = viewport.width, height = viewport.height
@@ -31,6 +31,7 @@ private enum HUDPanel: String, CaseIterable {
         case .timing: return CGRect(x:width-238,y:height-151,width:222,height:132)
         case .delta: return CGRect(x:(width-340)/2,y:18,width:340,height:126)
         case .pedals: return CGRect(x:18,y:height-162,width:414,height:144)
+        case .mirror: return CGRect(x:(width-356)/2,y:18,width:356,height:96)
         }
     }
 }
@@ -115,7 +116,9 @@ final class HUDView: NSView {
         panelFrames.removeAll(keepingCapacity: true)
         for item in HUDPanel.allCases {
             if item == .delta && game.serviceRemaining > 0 && !game.editingHUD { continue }
+            if item == .mirror && !game.showMirror && !game.editingHUD { continue }
             var frame = item.defaultFrame(in: bounds.size)
+            if item == .delta && (game.showMirror || game.editingHUD) { frame.origin.y = 123 }
             if let origin = game.hudPositions[item.rawValue]?.origin(size:frame.size,viewport:bounds.size) {
                 frame.origin = origin
             }
@@ -129,6 +132,7 @@ final class HUDView: NSView {
             case .timing: drawCompactTiming(game,x:x,y:y)
             case .delta: drawLapDelta(game,x:x,y:y)
             case .pedals: drawPedals(game,x:x,y:y+62)
+            case .mirror: drawMirror(game, frame: frame)
             }
             panelFrames.append((item, frame))
             if game.editingHUD {
@@ -138,6 +142,26 @@ final class HUDView: NSView {
                 border.stroke()
             }
         }
+    }
+
+    private func drawMirror(_ game: RacingGame, frame: NSRect) {
+        panel(frame, color: NSColor(rgb:0x151617), radius: 7)
+        guard let image = game.mirrorImage, !game.editingHUD else {
+            text("虚拟后视镜",x:frame.minX+8,y:frame.midY-9,size:12,width:frame.width-16,align:.center)
+            return
+        }
+        let glass = frame.insetBy(dx:4,dy:4)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect:glass,xRadius:4,yRadius:4).addClip()
+        let reflection = AffineTransform(m11:-1,m12:0,m21:0,m22:1,tX:2*glass.midX,tY:0)
+        (reflection as NSAffineTransform).concat()
+        image.draw(in:glass,from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
+        NSGraphicsContext.restoreGraphicsState()
+
+        let traffic = game.sideTraffic
+        let alert = NSColor(rgb:0xFFC15E)
+        if traffic.left { line(CGPoint(x:glass.minX+2,y:glass.minY+4),CGPoint(x:glass.minX+2,y:glass.maxY-4),color:alert,width:5) }
+        if traffic.right { line(CGPoint(x:glass.maxX-2,y:glass.minY+4),CGPoint(x:glass.maxX-2,y:glass.maxY-4),color:alert,width:5) }
     }
 
     private func drawLayoutToolbar() {
@@ -201,7 +225,7 @@ final class HUDView: NSView {
                 return
             }
             if game.noticeRemaining > 0 {
-                let rect = NSRect(x: (w - 460) / 2, y: 155, width: 460, height: 30)
+                let rect = NSRect(x: (w - 460) / 2, y: game.showMirror ? 260 : 155, width: 460, height: 30)
                 panel(rect)
                 text(game.notice, x: rect.minX + 14, y: rect.minY + 6, size: 11, color: lime, weight: .semibold, width: 432, align: .center)
             }
@@ -540,7 +564,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.10", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.11", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -591,6 +615,7 @@ final class HUDView: NSView {
         button("电脑对手 \(game.opponentCount)  [ O ]",NSRect(x:x+231,y:y+17,width:139,height:28),action:"opponents",active:game.opponentCount>0)
         button("自动驾驶 \(game.autoDriveEnabled ? "开" : "关")  [ U ]",NSRect(x:x+380,y:y+17,width:142,height:28),action:"autoDrive",active:game.autoDriveEnabled)
         text(game.showHelp ? "驾驶操作" : "练习已暂停", x: x + 27, y: y + 52, size: 26, weight: .bold)
+        button("后视镜 \(game.mirrorEnabled ? "开" : "关")  [ B ]", NSRect(x:x+231,y:y+51,width:139,height:32), action:"mirror", active:game.mirrorEnabled)
         button(game.drivingView.label + " ›", NSRect(x:x+380,y:y+51,width:142,height:32), action:"camera")
         button("车辆：" + game.vehicle.kind.label + " ›  换车重开 [C / ←→]",NSRect(x:x+28,y:y+86,width:494,height:22),action:"vehicleNext")
         button("赛道：" + game.circuit.kind.label + " ›  换图重开 [N / ↑]",NSRect(x:x+28,y:y+115,width:494,height:24),action:"trackNext")

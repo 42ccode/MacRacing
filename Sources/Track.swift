@@ -154,3 +154,88 @@ func kerbElevation(progress: Double, distanceFromEdge: Double) -> Double {
     let outer = clamp((0.85-distanceFromEdge)/0.15,0,1)
     return (0.030 + 0.012*sin(progress*7))*inner*outer
 }
+
+/// Authored-track practice guide: outside / apex / outside offsets with a
+/// conservative curvature speed envelope. This is not a lap-time optimizer.
+struct RacingLine {
+    struct Point {
+        let progress: Double
+        let position: SIMD2<Double>
+        let targetSpeed: Double // m/s
+    }
+    enum Cue { case accelerate, lift, brake }
+    let points: [Point]
+    let length: Double
+    let spacing: Double
+
+    init(circuit: Circuit) {
+        length=circuit.length
+        let count=Int(ceil(circuit.length/4))
+        let step = circuit.length / Double(count)
+        spacing = step
+        let samples = (0..<count).map { circuit.sample(at: Double($0) * step) }
+        let bends=samples.map { s -> Double in
+            let a=circuit.sample(at:s.distance-10).tangent, b=circuit.sample(at:s.distance+10).tangent
+            return atan2(a.x*b.y-a.y*b.x,simd_dot(a,b))/20
+        }
+        func circular(_ value:Double) -> Double {
+            var d=value
+            if d>circuit.length/2 {d -= circuit.length}
+            if d < -circuit.length/2 {d += circuit.length}
+            return d
+        }
+        var corners:[Int]=[]
+        for i in bends.indices.sorted(by:{abs(bends[$0])>abs(bends[$1])}) where abs(bends[i])>0.004 {
+            if corners.allSatisfy({abs(circular(samples[i].distance-samples[$0].distance))>90}) {corners.append(i)}
+        }
+        let margin=circuit.width/2-2.2
+        var offsets=samples.map { s -> Double in
+            var offset=0.0, weight=0.0
+            for i in corners {
+                let d=circular(s.distance-samples[i].distance)
+                guard abs(d)<115 else {continue}
+                let influence=exp(-pow(d/85,4))
+                let sign=bends[i]>0 ? 1.0 : -1.0
+                let curve=2.8*exp(-pow((d+57)/30,2))+2.8*exp(-pow((d-57)/30,2))-4.2*exp(-pow(d/25,2))
+                offset += sign*curve*influence;weight += influence
+            }
+            return clamp(offset/max(1,weight),-margin,margin)
+        }
+        for _ in 0..<12 {
+            let old=offsets
+            for i in 0..<count {offsets[i]=old[i]*0.6+(old[(i+count-1)%count]+old[(i+1)%count])*0.2}
+        }
+        let positions=samples.indices.map {samples[$0].point+samples[$0].right*offsets[$0]}
+        var speeds=(0..<count).map { i -> Double in
+            let a=positions[(i+count-1)%count], b=positions[i], c=positions[(i+1)%count]
+            let ab=b-a, bc=c-b, ac=c-a
+            let curvature=2*abs(ab.x*bc.y-ab.y*bc.x)/max(0.001,simd_length(ab)*simd_length(bc)*simd_length(ac))
+            return min(72,sqrt(6.5/max(curvature,0.0001)))
+        }
+        // Closed-loop passes propagate braking upstream, including past the
+        // finish line. Distance uses the offset path, not just centreline spacing.
+        for _ in 0..<3 {
+            for i in (0..<count).reversed() {
+                let j=(i+1)%count, ds=simd_distance(positions[i],positions[j])
+                speeds[i]=min(speeds[i],sqrt(speeds[j]*speeds[j]+2*6*ds))
+            }
+            for i in 0..<count {
+                let j=(i+1)%count, ds=simd_distance(positions[i],positions[j])
+                speeds[j]=min(speeds[j],sqrt(speeds[i]*speeds[i]+2*3*ds))
+            }
+        }
+        points=samples.indices.map {Point(progress:samples[$0].distance,position:positions[$0],targetSpeed:speeds[$0])}
+    }
+    func sample(at progress:Double) -> Point {
+        let d=(progress.truncatingRemainder(dividingBy:length)+length).truncatingRemainder(dividingBy:length)
+        let index=min(points.count-1,Int(d/spacing)), next=(index+1)%points.count
+        let t=clamp((d-points[index].progress)/spacing,0,1), a=points[index], b=points[next]
+        return Point(progress:d,position:a.position+(b.position-a.position)*t,targetSpeed:a.targetSpeed+(b.targetSpeed-a.targetSpeed)*t)
+    }
+    func cue(at progress:Double,speed:Double) -> Cue {
+        let target=sample(at:progress).targetSpeed
+        if speed>target+2 {return .brake}
+        if speed>target*0.88 {return .lift}
+        return .accelerate
+    }
+}

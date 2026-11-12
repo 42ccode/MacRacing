@@ -84,8 +84,15 @@ final class RacingWorld {
     }
 
     private let circuit: Circuit
+    let racingLine: RacingLine
+    private let racingLineNode = SCNNode()
+    private var lineClock = 1.0
+    var showRacingLine = true {
+        didSet {racingLineNode.isHidden = !showRacingLine;lineClock=1}
+    }
     init(circuit: Circuit, assetsDirectory: URL? = nil) {
         self.circuit = circuit
+        self.racingLine = RacingLine(circuit:circuit)
         self.assetsDirectory = assetsDirectory ?? Bundle.main.resourceURL!.appendingPathComponent("Assets")
         if let sky = assetURL("Environment/Daylight/kloofendal_48d_partly_cloudy_4k.hdr") {
             scene.background.contents = sky
@@ -121,6 +128,7 @@ final class RacingWorld {
 
         TrackEnvironment(scene: scene, circuit: circuit, assets: self.assetsDirectory).build()
         buildCar(); buildContactShadows()
+        racingLineNode.name="PracticeRacingLine";scene.rootNode.addChildNode(racingLineNode)
 
         camera.camera = SCNCamera()
         camera.camera!.fieldOfView = 62
@@ -449,7 +457,7 @@ final class RacingWorld {
         }
     }
 
-    func resetCamera() { cameraReady = false }
+    func resetCamera() { cameraReady = false; lineClock = 1 }
 
     private func buildRearWing() {
         // Inverted airfoil section, twin brackets fixed to the rear deck.
@@ -471,6 +479,42 @@ final class RacingWorld {
         for x: CGFloat in [-0.945,0.945] {
             _ = box(0.011,0.14,0.33,at:SCNVector3(x,1.02,-1.935),material:composite,parent:wing,chamfer:0.009)
         }
+    }
+
+    private func updateRacingLine(_ vehicle:Vehicle,dt:Double) {
+        guard showRacingLine else {return}
+        lineClock += dt
+        guard lineClock>=0.1 else {return}
+        lineClock=0
+        let progress=circuit.nearest(to:vehicle.position).progress
+        let backwards=simd_dot(vehicle.velocity,circuit.sample(at:progress).tangent)<(-1)
+        racingLineNode.isHidden=backwards
+        guard !backwards else {return}
+        var vertices:[SCNVector3]=[]
+        var groups=[[Int32](),[Int32](),[Int32]()]
+        // World-anchored dashes: no sliding texture or screen-space floating line.
+        let base=floor(progress/racingLine.spacing)*racingLine.spacing
+        for step in -2..<55 {
+            let d=base+Double(step)*racingLine.spacing
+            let a=racingLine.sample(at:d), b=racingLine.sample(at:d+racingLine.spacing*0.76)
+            let direction=simd_normalize(b.position-a.position), side=SIMD2(direction.y,-direction.x)*0.34
+            let index=Int32(vertices.count)
+            vertices += [vector(a.position-side,y:0.045),vector(a.position+side,y:0.045),
+                         vector(b.position-side,y:0.045),vector(b.position+side,y:0.045)]
+            let cue=racingLine.cue(at:d,speed:vehicle.speed)
+            let group=cue == .brake ? 2 : (cue == .lift ? 1 : 0)
+            groups[group] += [index,index+2,index+1,index+1,index+2,index+3]
+        }
+        let materials=[0x68D640,0xFFD34A,0xF14B45].map { rgb -> SCNMaterial in
+            let m=SCNMaterial();m.lightingModel = .constant
+            m.diffuse.contents=NSColor(rgb:UInt32(rgb),alpha:0.72);m.isDoubleSided=true
+            m.writesToDepthBuffer=false;m.readsFromDepthBuffer=true
+            return m
+        }
+        let active = groups.indices.filter { !groups[$0].isEmpty }
+        let elements=active.map {SCNGeometryElement(indices:groups[$0],primitiveType:.triangles)}
+        let mesh=SCNGeometry(sources:[SCNGeometrySource(vertices:vertices)],elements:elements)
+        mesh.materials=active.map { materials[$0] };racingLineNode.geometry=mesh;racingLineNode.castsShadow=false
     }
 
     private func updateInstrument(_ vehicle: Vehicle) {
@@ -499,6 +543,7 @@ final class RacingWorld {
 
     func update(vehicle: Vehicle, input: DrivingInput, dt: Double, cockpit: Bool, ghost: GhostFrame?, view: DrivingView? = nil) {
         let mode = view ?? (cockpit ? .cockpit : .chase)
+        updateRacingLine(vehicle,dt:dt)
         updateDamage(vehicle.damage)
         car.position = vector(vehicle.position)
         sunlight.position = vector(vehicle.position, y: 60)

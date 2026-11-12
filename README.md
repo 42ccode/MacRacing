@@ -1,4 +1,4 @@
-# APEX Lab — Circuit Test 1.6
+# APEX Lab — Circuit Test 1.6.1
 
 面向 Apple Silicon Mac 的原生赛车驾驶原型。使用 Swift、SceneKit / Metal、Game Controller、Core Haptics 和 AVFoundation，无需 Unity 或下载第三方依赖。
 
@@ -17,6 +17,12 @@
 ```sh
 ./build.sh --run
 ```
+
+## 1.6.1 理想线路
+
+四张赛道默认显示练习参考线，按入弯外侧、弯心内侧、出弯外侧生成，颜色随车速变化。绿色提示可以加速，黄色提示收油，红色提示制动。左下角显示当前位置的参考速度。按 **I**、Xbox **左摇杆按下**或暂停菜单「理想线路」切换，开关随设置保存。
+
+参考速度采用赛道曲率和统一干地参数估算。请结合车辆状态和实际抓地调整。
 
 ## 1.6 计时训练
 

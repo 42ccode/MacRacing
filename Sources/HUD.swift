@@ -323,6 +323,12 @@ final class HUDView: NSView {
 
     private func drawPedals(_ game: RacingGame, height: CGFloat) {
         let x: CGFloat = 18, y = height-100
+        if game.racingLineEnabled {
+            panel(NSRect(x:x,y:y-34,width:414,height:27),color:NSColor(white:0.03,alpha:0.8),radius:3)
+            text("绿 加速 · 黄 收油 · 红 制动",x:x+10,y:y-28,size:10,color:muted,width:245)
+            let target=game.world.racingLine.sample(at:game.location.progress).targetSpeed*3.6
+            text(String(format:"参考 %.0f km/h",target),x:x+259,y:y-28,size:10,color:muted,mono:true,width:145,align:.right)
+        }
         let green = NSColor(rgb:0x78D947), red = NSColor(rgb:0xDF404A), yellow = NSColor(rgb:0xFFD644)
         let rect = NSRect(x:x,y:y,width:414,height:82)
         panel(rect,color:NSColor(rgb:0x23242A,alpha:0.94),radius:10)
@@ -410,7 +416,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.6", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.6.1", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -439,7 +445,7 @@ final class HUDView: NSView {
         line(CGPoint(x: x + 29, y: y + 247), CGPoint(x: x + 400, y: y + 247), color: white.withAlphaComponent(0.12))
         text(game.input.controller != nil ? "手柄已就绪 · RT 油门 / LT 刹车 / 左摇杆转向" : "Xbox 手柄或 W A S D 驾驶 · 回车进入赛道", x: x + 29, y: y + 266, size: 12, color: white)
         button("进入赛道    →", NSRect(x: x + 28, y: y + 310, width: 374, height: 49), action: "start", primary: true)
-        text("Y / Tab 切视角 · N / 十字键↑ 换赛道", x: x + 29, y: y + 378, size: 10, color: muted)
+        text("Tab 切视角 · N 换赛道 · I 理想线路", x: x + 29, y: y + 378, size: 10, color: muted)
         panel(NSRect(x: width - 260, y: height - 179, width: 232, height: 125))
         text("BUILT FOR MAC", x: width - 243, y: height - 160, size: 10, color: lime, weight: .bold)
         text(game.vehicle.kind.label, x: width - 244, y: height - 138, size: 20, weight: .bold, width:215)
@@ -493,6 +499,7 @@ final class HUDView: NSView {
         text("配方 / 冷压在维修换胎或重新开始时生效",x:x+29,y:y+475,size:10,color:muted,width:490)
         button("震动强度 \(game.input.hapticLevel * 25)%",NSRect(x:x+28,y:y+500,width:150,height:30),action:"hapticLevel",active:game.input.hapticLevel>0)
         button("测试手柄震动",NSRect(x:x+193,y:y+500,width:150,height:30),action:"hapticTest")
+        button("理想线路 \(game.racingLineEnabled ? "开" : "关")  [ I ]",NSRect(x:x+358,y:y+500,width:164,height:30),action:"racingLine",active:game.racingLineEnabled)
         text(game.input.hapticStatus,x:x+29,y:y+537,size:10,color:muted,width:494)
         button(game.serviceRemaining > 0 ? "正在维修 · 继续后完成" : "拖回维修区 · 修车换胎 12 秒  [ P / 十字键↓ ]",
                NSRect(x:x+28,y:y+558,width:494,height:32),action:"service")

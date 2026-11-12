@@ -25,3 +25,6 @@ xcrun swiftc -O -module-cache-path "$module_cache" \
 xcrun swiftc -O -module-cache-path "$module_cache" \
   Sources/Track.swift Sources/Vehicle.swift Tests/TrainingChecks.swift -o .build/training-checks
 .build/training-checks
+
+xcrun swiftc -O -module-cache-path "$module_cache" Sources/Track.swift Tests/RacingLineChecks.swift -o .build/racing-line-checks
+.build/racing-line-checks

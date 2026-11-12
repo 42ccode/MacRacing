@@ -184,6 +184,7 @@ final class InputManager {
         case 20: action = "automatic"    // 3
         case 4: action = "help"          // H
         case 46: action = "mute"         // M
+        case 34: action = "racingLine"  // I
         case 9: action = "hud"           // V
         case 33: action = "fovDown"      // [
         case 30: action = "fovUp"        // ]
@@ -215,6 +216,7 @@ final class InputManager {
             press("b", pad.buttonB.isPressed, "upshift")
             press("x", pad.buttonX.isPressed, "downshift")
             press("y", pad.buttonY.isPressed, "camera")
+            press("leftStick", pad.leftThumbstickButton?.isPressed ?? false, "racingLine")
             press("lb", pad.leftShoulder.isPressed, "downshift")
             press("rb", pad.rightShoulder.isPressed, "upshift")
             press("service", pad.dpad.down.isPressed, "service")

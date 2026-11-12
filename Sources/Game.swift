@@ -23,6 +23,7 @@ struct SavedPractice: Codable {
     var tcLevel: Int? = nil
     var hapticLevel: Int? = nil
     var records: [String:LapRecord]? = nil
+    var racingLineEnabled: Bool? = nil
 }
 
 final class RacingGame {
@@ -47,6 +48,7 @@ final class RacingGame {
     var cockpit: Bool { drivingView.isInterior }
     var ghostEnabled = true
     var showHUD = true
+    var racingLineEnabled = true
     var tyreSetup = TyreSetup()
     var serviceRemaining = 0.0
     var gTrace: [SIMD2<Double>] = []
@@ -260,6 +262,9 @@ final class RacingGame {
             guard isPaused && serviceRemaining == 0 else { return }
             tyreSetup.coldPressure = clamp(tyreSetup.coldPressure + (action == "pressureUp" ? 0.05 : -0.05), 1.3, 2.1)
             savePractice()
+        case "racingLine":
+            racingLineEnabled.toggle();world.showRacingLine=racingLineEnabled;savePractice()
+            announce(racingLineEnabled ? "理想线路开启 · 绿加速 / 黄收油 / 红制动" : "理想线路关闭",duration:3)
         case "hud": showHUD.toggle()
         case "statistics": sceneView.showsStatistics.toggle()
         case "fovDown": world.cockpitFOV = max(42,world.cockpitFOV-2)
@@ -375,6 +380,7 @@ final class RacingGame {
         let fov = world.cockpitFOV, eye = world.seatHeight
         circuit = Circuit(kind:kind)
         world = RacingWorld(circuit:circuit)
+        world.showRacingLine=racingLineEnabled
         world.cockpitFOV = fov; world.seatHeight = eye
         world.selectVehicle(vehicle.kind)
         sceneView.scene = world.scene; sceneView.pointOfView = world.camera
@@ -404,6 +410,8 @@ final class RacingGame {
         assists.steeringDeadzone = saved.deadzone.isFinite ? clamp(saved.deadzone, 0.02, 0.3) : 0.08
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
         if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
+        racingLineEnabled=saved.racingLineEnabled ?? true
+        world.showRacingLine=racingLineEnabled
         sound.muted = saved.muted
         drivingView = saved.drivingView.flatMap(DrivingView.init(rawValue:)) ?? ((saved.cockpit ?? false) ? .cockpit : .chase)
         if let v = saved.verticalFOV, v.isFinite { world.cockpitFOV = CGFloat(clamp(v,42,84)) }
@@ -418,7 +426,7 @@ final class RacingGame {
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             if let legacyPractice {

@@ -213,7 +213,7 @@ final class HUDView: NSView {
                 panel(NSRect(x: (w-400)/2, y: 76, width: 400, height: 62))
                 text(String(format: "维修与换胎 · 剩余 %.1f 秒", game.serviceRemaining),
                      x: (w-380)/2, y: 85, size: 17, weight: .semibold, width: 380, align: .center)
-                text("已拖回发车区 · 暂停时维修也暂停", x: (w-380)/2, y: 113,
+                text("维修位停车中 · 暂停时计时冻结", x: (w-380)/2, y: 113,
                      size: 11, color: muted, width: 380, align: .center)
             }
             if game.isPaused { drawPause(game, width: w, height: h) }
@@ -264,6 +264,13 @@ final class HUDView: NSView {
             NSColor(rgb:0x78B8C8).setFill();NSRect(x:p.x-2.5,y:p.y-2.5,width:5,height:5).fill()
             text("S\(sector)",x:p.x+5,y:p.y-8,size:8,color:white,width:20)
         }
+        let lanePath = NSBezierPath()
+        for (i, distance) in stride(from:PitLane.entry,through:PitLane.exit,by:4).enumerated() {
+            let sample = game.circuit.sample(at:distance)
+            let point = project(sample.point + sample.right*game.circuit.pitLane.lateral(at:distance))
+            if i==0 {lanePath.move(to:point)} else {lanePath.line(to:point)}
+        }
+        NSColor(rgb:0x73C7D2).setStroke(); lanePath.lineWidth=1.6; lanePath.stroke()
         let start = project(game.circuit.start.point)
         white.setFill(); NSRect(x:start.x-3,y:start.y-3,width:6,height:6).fill()
         if game.hasStarted {
@@ -425,11 +432,22 @@ final class HUDView: NSView {
 
     private func drawPedals(_ game: RacingGame, x: CGFloat, y: CGFloat) {
         if game.autoDriveEnabled {
-            let top = y - (game.racingLineEnabled ? 62 : 31)
+            let top = y - (game.racingLineEnabled || game.inPitLane ? 62 : 31)
             panel(NSRect(x:x,y:top,width:282,height:24),color:NSColor(rgb:0x162C33,alpha:0.92),radius:4)
             text("自动驾驶 · 操作油门、刹车或转向接管",x:x+10,y:top+4,size:10,color:NSColor(rgb:0x9EE7F2),width:262)
         }
-        if game.racingLineEnabled {
+        if game.inPitLane {
+            let box = game.circuit.pitLane.inServiceBox(game.location)
+            panel(NSRect(x:x,y:y-34,width:414,height:27),color:NSColor(rgb:0x162C33,alpha:0.94),radius:3)
+            let status: String
+            if game.serviceRemaining > 0 { status = "维修进行中" }
+            else if game.pitOverspeed { status = "维修道超速 · 请减速" }
+            else if box { status = "黄框内停车后按 P 维修" }
+            else if game.inPitSpeedZone { status = "维修道 · 限速 60 km/h" }
+            else { status = "维修道 · 注意并线" }
+            text(status,x:x+10,y:y-28,size:10,color:game.pitOverspeed ? NSColor(rgb:0xFF8669) : white,width:233)
+            button("限速 \(game.pitLimiterEnabled ? "开" : "关")  [ K ]",NSRect(x:x+258,y:y-33,width:148,height:25),action:"pitLimiter",active:game.pitLimiterEnabled)
+        } else if game.racingLineEnabled {
             panel(NSRect(x:x,y:y-34,width:414,height:27),color:NSColor(white:0.03,alpha:0.8),radius:3)
             text("绿 加速 · 黄 收油 · 红 制动",x:x+10,y:y-28,size:10,color:muted,width:245)
             let target=game.world.racingLine.sample(at:game.location.progress).targetSpeed*3.6
@@ -522,7 +540,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.9", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.10", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -612,8 +630,12 @@ final class HUDView: NSView {
         button("测试手柄震动",NSRect(x:x+193,y:y+500,width:150,height:30),action:"hapticTest")
         button("理想线路 \(game.racingLineEnabled ? "开" : "关")  [ I ]",NSRect(x:x+358,y:y+500,width:164,height:30),action:"racingLine",active:game.racingLineEnabled)
         text(game.input.hapticStatus,x:x+29,y:y+537,size:10,color:muted,width:494)
-        button(game.serviceRemaining > 0 ? "正在维修 · 继续后完成" : "拖回维修区 · 修车换胎 12 秒  [ P / 十字键↓ ]",
-               NSRect(x:x+28,y:y+558,width:494,height:32),action:"service")
+        if game.serviceRemaining > 0 {
+            text("正在维修 · 继续后完成",x:x+29,y:y+563,size:11,color:muted,width:494)
+        } else {
+            button("黄框停车维修  [ P / ↓ ]",NSRect(x:x+28,y:y+558,width:242,height:32),action:"service")
+            button("拖车维修  [ Shift+P ]",NSRect(x:x+282,y:y+558,width:240,height:32),action:"tow")
+        }
         button("重新开始", NSRect(x: x + 28, y: y + 606, width: 150, height: 42), action: "restart")
         button("继续驾驶    →", NSRect(x: x + 190, y: y + 606, width: 332, height: 42), action: "resume", primary: true)
     }

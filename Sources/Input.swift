@@ -174,7 +174,8 @@ final class InputManager {
         case 45: action = "trackNext" // N, only while paused
         case 8: action = "vehicleNext" // C, only while paused
         case 48: action = "camera"       // Tab
-        case 35: action = "service"      // P
+        case 35: action = event.modifierFlags.contains(.shift) ? "tow" : "service" // P
+        case 40: action = "pitLimiter"  // K
         case 15: action = "reset"        // R
         case 53: action = "pause"        // Escape
         case 14: action = "upshift"      // E

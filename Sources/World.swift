@@ -570,10 +570,11 @@ final class RacingWorld {
         lineClock += dt
         guard lineClock>=0.1 else {return}
         lineClock=0
-        let progress=circuit.nearest(to:vehicle.position).progress
+        let location=circuit.nearest(to:vehicle.position)
+        let progress=location.progress
         let backwards=simd_dot(vehicle.velocity,circuit.sample(at:progress).tangent)<(-1)
-        racingLineNode.isHidden=backwards
-        guard !backwards else {return}
+        racingLineNode.isHidden=backwards || circuit.pitLane.contains(location)
+        guard !racingLineNode.isHidden else {return}
         var vertices:[SCNVector3]=[]
         var groups=[[Int32](),[Int32](),[Int32]()]
         // World-anchored dashes: no sliding texture or screen-space floating line.

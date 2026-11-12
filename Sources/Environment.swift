@@ -17,7 +17,7 @@ final class TrackEnvironment {
         scene.rootNode.addChildNode(root)
     }
     func build() {
-        ground(); road(); barriers(); pits(); circuitDetails()
+        ground(); road(); pitLane(); barriers(); pits(); circuitDetails()
         // Posts, rails, garages and paint never move. Submit them by material
         // rather than submitting every small part separately on every frame.
         let fixed = root.flattenedClone()
@@ -294,6 +294,52 @@ final class TrackEnvironment {
         path.move(to:.init(x:0,y:128)); path.line(to:.init(x:128,y:0))
         NSColor(rgb:0x707672).setStroke(); path.stroke(); image.unlockFocus(); return image
     }
+    private func pitLane() {
+        let lane = circuit.pitLane
+        let asphalt = scanMaterial("asphalt_track",tint:0xA7ADB0)
+        let blue = material(NSColor(rgb:0x3F8898),roughness:0.93)
+        let yellow = material(NSColor(rgb:0xCFAC4D),roughness:0.92)
+        func ribbon(from start:Double,to end:Double,left:Double,right:Double,height:Double,
+                    material:SCNMaterial,name:String) {
+            let steps = max(1,Int(ceil((end-start)/2)))
+            var vertices:[SCNVector3]=[], uv:[CGPoint]=[], indices:[Int32]=[]
+            for i in 0...steps {
+                let distance = start+(end-start)*Double(i)/Double(steps), sample = circuit.sample(at:distance)
+                let offset = lane.lateral(at:distance)
+                vertices += [vector(sample.point+sample.right*(offset+left),y:height),
+                             vector(sample.point+sample.right*(offset+right),y:height)]
+                uv += [CGPoint(x:0,y:distance/3),CGPoint(x:(right-left)/3,y:distance/3)]
+                if i<steps {let n=Int32(i*2);indices += [n,n+2,n+1,n+1,n+2,n+3]}
+            }
+            material.isDoubleSided=true
+            mesh(vertices,uv,indices,material,name:name)
+        }
+        ribbon(from:PitLane.entry,to:PitLane.exit,left:-PitLane.halfWidth,right:PitLane.halfWidth,height:0.029,material:asphalt,name:"PitLaneAsphalt")
+        for edge in [-PitLane.halfWidth+0.10,PitLane.halfWidth-0.10] {
+            ribbon(from:PitLane.entry,to:PitLane.exit,left:edge-0.055,right:edge+0.055,height:0.036,material:blue,name:"PitLaneEdge")
+        }
+        for gate in [PitLane.limitEntry,PitLane.limitExit] {
+            ribbon(from:gate-0.14,to:gate+0.14,left:-2.05,right:2.05,height:0.037,material:paint,name:"PitSpeedGate")
+        }
+        let bay = PitLane.boxProgress
+        for side in [-1.15,1.15] {
+            ribbon(from:bay-3.3,to:bay+3.3,left:side-0.06,right:side+0.06,height:0.039,material:yellow,name:"PitBoxLine")
+        }
+        for end in [bay-3.3,bay+3.3] {
+            ribbon(from:end-0.06,to:end+0.06,left:-1.15,right:1.15,height:0.039,material:yellow,name:"PitBoxEnd")
+        }
+        let backing = material(NSColor(rgb:0x1F343B),roughness:0.8)
+        for (distance,title) in [(PitLane.entry+5,"PIT IN"),(PitLane.limitEntry,"60"),(bay,"BOX"),(PitLane.limitExit,"PIT OUT")] {
+            let sample = circuit.sample(at:distance)
+            let position = sample.point + sample.right * (lane.lateral(at:distance)-3.0)
+            let sign = SCNNode(); sign.position=vector(position);sign.eulerAngles.y=CGFloat(atan2(sample.tangent.x,sample.tangent.y));root.addChildNode(sign)
+            box(1.25,0.66,0.08,SCNVector3(0,1.18,0),backing,parent:sign)
+            tube(SCNVector3(0,0,0),SCNVector3(0,0.87,0),0.035,backing,parent:sign)
+            let face = SCNNode(); face.eulerAngles.y = .pi; sign.addChildNode(face)
+            label(title,size:0.28,at:SCNVector3(0,1.18,0.05),parent:face,color:paint)
+        }
+    }
+
     private func pits() {
         let concrete = material(NSColor.white,roughness:0.9)
         texture("Environment/concrete_wall_006_diff_2k.jpg",concrete.diffuse)

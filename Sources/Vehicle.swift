@@ -608,6 +608,11 @@ struct RaceSession {
         previousProgress=progress;currentGhost=[];currentTrace=[];sectors=[];sectorSplits=[]
         recordingClock=0;wrongWayTime=0;started=false;waitingForStart=progress>20
     }
+    mutating func beginOutLap(at progress: Double) {
+        resetLap(at: progress)
+        waitingForStart = true
+    }
+
     private mutating func beginFlyingLap(progress:Double,remainder:Double,vehicle:Vehicle) {
         resetLap(at:0);waitingForStart=false;started=true;elapsed=remainder;previousProgress=progress
         currentTrace=[LapProgress(fraction:0,time:0)]
@@ -642,7 +647,7 @@ struct RaceSession {
             let crossed=previous>trackLength*0.90 && location.progress<trackLength*0.10 && movingForward
             let distance=crossed ? trackLength-previous+location.progress : location.progress-previous
             if started && abs(distance)>trackLength*0.03 {invalidate("跳过赛道检查点")}
-            if crossed && waitingForStart {
+            if crossed && waitingForStart && location.distance <= trackWidth/2 {
                 let share=(trackLength-previous)/max(distance,0.001)
                 beginFlyingLap(progress:location.progress,remainder:dt*(1-share),vehicle:vehicle)
                 return false
@@ -710,4 +715,12 @@ struct RaceSession {
         let angleDelta = atan2(sin(b.heading - a.heading), cos(b.heading - a.heading))
         return GhostFrame(time: time, x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t, heading: a.heading + angleDelta * t)
     }
+}
+
+/// Smooth intervention over the last few km/h. Existing braking demand wins.
+func pitLimitedInput(_ input: DrivingInput, speed: Double) -> DrivingInput {
+    var result = input
+    result.throttle = min(input.throttle, clamp((PitLane.speedLimit-speed)/1.8, 0, 1))
+    result.brake = max(input.brake, clamp((speed-PitLane.speedLimit)*0.28, 0, 1))
+    return result
 }

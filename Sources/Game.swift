@@ -27,6 +27,7 @@ struct SavedPractice: Codable {
     var opponentCount: Int? = nil
     var hudPositions: [String:HUDPosition]? = nil
     var brakeBiasByVehicle: [String:Double]? = nil
+    var pitLimiterEnabled: Bool? = nil
 }
 
 final class RacingGame {
@@ -62,6 +63,10 @@ final class RacingGame {
     private(set) var autoDriveEnabled = false
     var tyreSetup = TyreSetup()
     var serviceRemaining = 0.0
+    private(set) var inPitLane = false
+    var pitLimiterEnabled = true
+    var inPitSpeedZone: Bool { circuit.pitLane.isLimited(location) }
+    var pitOverspeed: Bool { inPitSpeedZone && vehicle.speed > PitLane.speedLimit + 0.28 }
     var gTrace: [SIMD2<Double>] = []
     var inputHistory = InputHistory()
     var notice = ""
@@ -123,11 +128,13 @@ final class RacingGame {
         if !isPaused && hasStarted && serviceRemaining > 0 {
             drivingInput = DrivingInput()
             accumulator = 0
+            var parked = vehicle
+            _ = traffic.step(dt, player: &parked, circuit: circuit, line: world.racingLine)
             serviceRemaining = max(0, serviceRemaining - dt)
             if serviceRemaining == 0 {
                 vehicle.service(setup: tyreSetup)
                 world.resetCamera()
-                announce("维修完成 · 新胎需要暖胎", duration: 5)
+                announce("维修完成 · 挂入 1 挡驶出维修道", duration: 5)
             }
         } else if !isPaused && hasStarted {
             if autoDriveEnabled && ComputerDriver.wantsControl(drivingInput) {
@@ -186,12 +193,16 @@ final class RacingGame {
         location = circuit.nearest(to: vehicle.position)
         let contacts = vehicle.contactPoints.map { point -> WheelRoadContact in
             let contact = circuit.nearest(to: point)
+            if circuit.pitLane.hasAsphalt(at: contact) {
+                return WheelRoadContact(distance:0,progress:contact.progress,kerbsEnabled:false)
+            }
             return WheelRoadContact(distance:contact.distance, progress:contact.progress,
                                     kerbsEnabled:circuit.hasKerb(at:contact.progress))
         }
         var activeAssists = assists
         if autoDriveEnabled {activeAssists.automatic = true}
-        vehicle.step(dt, input: drivingInput, assists: activeAssists, roadDistance: location.distance, roadWidth: circuit.width, roadLateral: location.lateral, roadProgress: location.progress, kerbsEnabled: circuit.hasKerb(at: location.progress), roadContacts: contacts)
+        let command = pitLimiterEnabled && inPitSpeedZone ? pitLimitedInput(drivingInput,speed:vehicle.speed) : drivingInput
+        vehicle.step(dt, input: command, assists: activeAssists, roadDistance: location.distance, roadWidth: circuit.width, roadLateral: location.lateral, roadProgress: location.progress, kerbsEnabled: circuit.hasKerb(at: location.progress), roadContacts: contacts)
         collisionCooldown = max(0, collisionCooldown - dt)
         if let contact = traffic.step(dt, player: &vehicle, circuit: circuit, line: world.racingLine),
            contact.closingSpeed > 1.5, collisionCooldown <= 0 {
@@ -218,10 +229,17 @@ final class RacingGame {
                 vehicle.velocity *= 0.62
                 vehicle.yawRate *= 0.5
                 collisionCooldown = 0.4
-                announce("碰撞损伤 · R 复位保留车损 · P 返回维修", duration: 3)
+                announce("碰撞损伤 · R 复位保留车损 · Shift+P 拖车", duration: 3)
             }
         }
-        if session.step(dt, vehicle: vehicle, location: location, trackLength: circuit.length, trackWidth: circuit.width, assisted: autoDriveEnabled) {
+        let onLane = circuit.pitLane.contains(location)
+        if onLane != inPitLane {
+            inPitLane = onLane
+            session.beginOutLap(at: location.progress)
+            if onLane { autoDriveEnabled = false }
+            announce(onLane ? "维修道 · 限速 60 km/h · 黄框停车后按 P" : "驶出维修道 · 出场圈", duration: 3)
+        }
+        if !inPitLane && session.step(dt, vehicle: vehicle, location: location, trackLength: circuit.length, trackWidth: circuit.width, assisted: autoDriveEnabled) {
             if session.newBest {
                 announce("个人最佳  \(lapTime(session.best))  ·  幽灵车已更新", duration: 6)
                 savePractice()
@@ -262,22 +280,39 @@ final class RacingGame {
         if editingHUD && !["hudLayout", "hudLayoutReset", "pause", "controllerDisconnected"].contains(action) { return }
         sceneDirty = true
         switch action {
-        case "service":
+        case "service", "tow":
             guard hasStarted && serviceRemaining == 0 else { return }
+            let lane = circuit.pitLane
+            let contact = circuit.nearest(to:vehicle.position)
+            if action == "service" {
+                guard lane.inServiceBox(contact) && vehicle.speed < 0.55 else {
+                    announce("请在维修黄框内停稳 · Shift+P 拖车",duration:3)
+                    return
+                }
+            }
             saveTelemetry()
-            vehicle.reset(at: circuit.start, preservingCondition: true)
-            location = circuit.nearest(to: vehicle.position)
-            session.resetLap(at: location.progress)
-            gTrace.removeAll(keepingCapacity: true)
+            let sample = action == "tow" ? lane.serviceSample(on:circuit) :
+                TrackSample(point:vehicle.position,tangent:vehicle.forward,distance:contact.progress)
+            vehicle.reset(at:sample,preservingCondition:true)
+            vehicle.gear = 0
+            location = circuit.nearest(to:vehicle.position)
+            inPitLane = true
+            session.beginOutLap(at:location.progress)
+            gTrace.removeAll(keepingCapacity:true)
             inputHistory.reset()
             autoDriveEnabled = false
             serviceRemaining = 12
+            noticeRemaining = 0
             collisionCooldown = 0
             accumulator = 0
             isPaused = false
             showHelp = false
             input.clear()
             world.resetCamera()
+        case "pitLimiter":
+            pitLimiterEnabled.toggle()
+            savePractice()
+            announce(pitLimiterEnabled ? "维修道限速开启 · 60 km/h" : "维修道限速关闭",duration:2)
         case "vehicleNext", "vehiclePrevious":
             guard isPaused && serviceRemaining == 0 else { return }
             saveTelemetry(); savePractice()
@@ -327,7 +362,7 @@ final class RacingGame {
             if autoDriveEnabled {
                 autoDriveEnabled = false
                 announce("已切回手动驾驶", duration: 2)
-            } else if serviceRemaining == 0 && ComputerDriver.canDrive(vehicle, at: location, on: circuit) {
+            } else if serviceRemaining == 0 && !inPitLane && ComputerDriver.canDrive(vehicle, at: location, on: circuit) {
                 autoDriveEnabled = true
                 announce("自动驾驶开启 · 操作油门、刹车或转向可接管", duration: 4)
             } else {
@@ -379,14 +414,16 @@ final class RacingGame {
         case "reset":
             guard hasStarted else { self.action("start"); return }
             guard serviceRemaining == 0 else { return }
+            let outLap = inPitLane || session.waitingForStart
             let sample = circuit.sample(at: location.progress)
             vehicle.reset(at: sample, preservingCondition: true)
             gTrace.removeAll(keepingCapacity: true)
             inputHistory.reset()
             location = circuit.nearest(to: vehicle.position)
-            session.resetLap(at: location.progress)
+            inPitLane = false
+            if outLap {session.beginOutLap(at:location.progress)} else {session.resetLap(at:location.progress)}
             world.resetCamera()
-            announce(location.progress > 20 ? "已复位，保留车损 · 通过起点后计时" : "已复位，保留车损 · 本圈重新开始", duration: 4)
+            announce(session.waitingForStart ? "已复位，保留车损 · 通过起点后计时" : "已复位，保留车损 · 本圈重新开始", duration: 4)
         case "camera", "cameraPrevious", "viewCabin", "viewChase":
             drivingView = action == "viewCabin" ? .cockpit : (action == "viewChase" ? .chase : drivingView.next(action == "cameraPrevious" ? -1 : 1))
             world.resetCamera()
@@ -452,6 +489,7 @@ final class RacingGame {
         feedback.reset(); impactFeedback = .zero; input.stopHaptics()
         collisionCooldown = 0
         serviceRemaining = 0
+        inPitLane = false
         vehicle.reset(at: circuit.start)
         vehicle.service(setup: tyreSetup)
         location = circuit.nearest(to: vehicle.position)
@@ -509,6 +547,7 @@ final class RacingGame {
         assists.steeringDeadzone = saved.deadzone.isFinite ? clamp(saved.deadzone, 0.02, 0.3) : 0.08
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
         if let pressure = saved.coldPressure, pressure.isFinite { tyreSetup.coldPressure = clamp(pressure, 1.3, 2.1) }
+        pitLimiterEnabled = saved.pitLimiterEnabled ?? true
         opponentCount = clamp(saved.opponentCount ?? 3, 0, 3)
         hudPositions = (saved.hudPositions ?? [:]).filter { $0.value.x.isFinite && $0.value.y.isFinite }
         racingLineEnabled=saved.racingLineEnabled ?? true
@@ -527,7 +566,7 @@ final class RacingGame {
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions,brakeBiasByVehicle:brakeBiasByVehicle)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel,records:records,racingLineEnabled:racingLineEnabled,opponentCount:opponentCount,hudPositions:hudPositions,brakeBiasByVehicle:brakeBiasByVehicle,pitLimiterEnabled:pitLimiterEnabled)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             if let legacyPractice {

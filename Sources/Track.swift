@@ -154,6 +154,7 @@ final class Circuit {
     }
 
     var start: TrackSample { sample(at: 8) }
+    var pitLane: PitLane { PitLane(trackLength:length) }
 }
 
 /// Shared by the contact solver and the visible kerb mesh (metres above asphalt).
@@ -245,5 +246,56 @@ struct RacingLine {
         if speed>target+2 {return .brake}
         if speed>target*0.88 {return .lift}
         return .accelerate
+    }
+}
+
+/// Offset lane inside the barrier beside the garages. The same coordinates are used
+/// for the pavement, wheel contacts, speed zone and service box.
+struct PitLane {
+    static let entry = -108.0
+    static let limitEntry = -55.0
+    static let boxProgress = 43.0
+    static let limitExit = 104.0
+    static let exit = 154.0
+    static let halfWidth = 2.2
+    static let speedLimit = 60.0 / 3.6
+    let trackLength: Double
+
+    func localProgress(_ progress: Double) -> Double {
+        let wrapped = progress.truncatingRemainder(dividingBy: trackLength)
+        if wrapped > trackLength/2 { return wrapped-trackLength }
+        if wrapped < -trackLength/2 { return wrapped+trackLength }
+        return wrapped
+    }
+
+    func lateral(at progress: Double) -> Double {
+        let p = localProgress(progress)
+        let fraction = clamp(min((p-Self.entry)/(Self.limitEntry-Self.entry),
+                                 (Self.exit-p)/(Self.exit-Self.limitExit)), 0, 1)
+        return -4.1 - 6.5 * fraction*fraction*(3-2*fraction)
+    }
+
+    func hasAsphalt(at location: TrackLocation) -> Bool {
+        let p = localProgress(location.progress)
+        return (Self.entry...Self.exit).contains(p) && abs(location.lateral-lateral(at:p)) <= Self.halfWidth
+    }
+
+    func contains(_ location: TrackLocation) -> Bool {
+        location.lateral < -6.2 && hasAsphalt(at: location)
+    }
+
+    func isLimited(_ location: TrackLocation) -> Bool {
+        contains(location) && (Self.limitEntry...Self.limitExit).contains(localProgress(location.progress))
+    }
+
+    func inServiceBox(_ location: TrackLocation) -> Bool {
+        abs(localProgress(location.progress)-Self.boxProgress) < 3.2 &&
+            abs(location.lateral-lateral(at:Self.boxProgress)) < 1.05
+    }
+
+    func serviceSample(on circuit: Circuit) -> TrackSample {
+        let sample = circuit.sample(at:Self.boxProgress)
+        return TrackSample(point:sample.point+sample.right*lateral(at:Self.boxProgress),
+                           tangent:sample.tangent,distance:sample.distance)
     }
 }

@@ -74,6 +74,8 @@ final class RacingWorld {
     var seatHeight: Double = 1.00
     var exteriorLook = 0.0
     private(set) var vehicleKind = VehicleKind.concept
+    private var gaugeNeedles: [SCNNode] = []
+    private var contactShadows: [SCNNode] = []
     private var steeringAxis = SIMD3<Float>(0,1,0)
 
     private func assetURL(_ path: String) -> URL? {
@@ -118,7 +120,7 @@ final class RacingWorld {
         scene.rootNode.addChildNode(sun)
 
         TrackEnvironment(scene: scene, circuit: circuit, assets: self.assetsDirectory).build()
-        buildCar()
+        buildCar(); buildContactShadows()
 
         camera.camera = SCNCamera()
         camera.camera!.fieldOfView = 62
@@ -156,9 +158,10 @@ final class RacingWorld {
         body.transform = SCNMatrix4Identity
         frontWheels = []; rollingWheels = []; wheelPivots = []; wheelBaseHeights = []
         damageMeshes = []; glassNodes = []; seatNodes = []; brakeLights = []
+        gaugeNeedles = []; contactShadows = []
         importedSteering = nil; renderedDamage = .zero; steeringAxis = SIMD3(0,1,0)
         instrumentClock = 1; vehicleKind = kind
-        buildCar(); resetCamera()
+        buildCar(); buildContactShadows(); resetCamera()
     }
 
     private func buildCar() {
@@ -289,7 +292,7 @@ final class RacingWorld {
                     m.clearCoat.contents = 0.55; m.clearCoatRoughness.contents = 0.18
                 case "Tires", "rubber":
                     m.diffuse.contents = NSColor(rgb:0x1A1B1C); m.metalness.contents = 0
-                    m.roughness.contents = 0.9
+                    m.roughness.contents = 0.96
                 case "Glass_Gray", "window":
                     m.diffuse.contents = NSColor(rgb:0x243137); m.metalness.contents = 0.0
                     m.roughness.contents = 0.16; m.transparency = 0.45
@@ -343,7 +346,7 @@ final class RacingWorld {
         let display = SCNPlane(width:0.19,height:0.07)
         instrumentMaterial.lightingModel = .constant; display.materials = [instrumentMaterial]
         let instrument = SCNNode(geometry:display); instrument.name = "LiveInstrumentDisplay"
-        instrument.position = SCNVector3(0.345,0.84,vehicleKind == .ferrari ? 0.69 : 0.70)
+        instrument.position = vehicleKind == .ferrari ? SCNVector3(0.345,0.84,0.69) : SCNVector3(-0.25,0.73,0.65)
         instrument.eulerAngles.y = .pi; body.addChildNode(instrument)
         model.enumerateChildNodes { node, _ in
             guard let geometry = node.geometry,
@@ -384,6 +387,41 @@ final class RacingWorld {
         _ = box(0.035,0.14,0.02,at:SCNVector3(0,-0.06,0),material:spoke,parent:wheel,chamfer:0.008)
         _ = box(0.08,0.065,0.035,at:SCNVector3(0,0,-0.008),material:trim,parent:wheel,chamfer:0.016)
         body.addChildNode(wheel); importedSteering = wheel
+        // Five recessed instruments in the generic Porsche cockpit.
+        let bezel=material(NSColor(rgb:0x41474A),metal:0.7,roughness:0.4)
+        let dial=material(NSColor(rgb:0x070A0B),roughness:0.9)
+        let markings=material(NSColor(rgb:0xC8D1D3),roughness:0.8)
+        let needlePaint=material(NSColor(rgb:0xCF5E36),roughness:0.75)
+        for i in 0..<5 {
+            let r:CGFloat=i==2 ? 0.065 : 0.052
+            let gauge=SCNNode();gauge.name="AnalogGauge\(i)";gauge.position=SCNVector3(0.345+CGFloat(i-2)*0.118,0.84,0.79);body.addChildNode(gauge)
+            let face=SCNCylinder(radius:r,height:0.014);face.radialSegmentCount=48;face.materials=[dial]
+            let plate=SCNNode(geometry:face);plate.eulerAngles.x = .pi/2;gauge.addChildNode(plate)
+            let ring=SCNTorus(ringRadius:r,pipeRadius:0.003);ring.materials=[bezel]
+            let edge=SCNNode(geometry:ring);edge.eulerAngles.x = .pi/2;edge.position.z = -0.009;gauge.addChildNode(edge)
+            for tick in 0..<11 {
+                let angle=CGFloat(-2.35+Double(tick)*0.47),mark=SCNNode()
+                mark.position=SCNVector3(sin(angle)*r*0.8,cos(angle)*r*0.8,-0.012)
+                mark.eulerAngles.z = -angle;gauge.addChildNode(mark)
+                _ = box(0.002,0.008,0.002,at:SCNVector3Zero,material:markings,parent:mark)
+            }
+            let pivot=SCNNode();gauge.addChildNode(pivot);gaugeNeedles.append(pivot)
+            _ = box(0.003,r*0.68,0.002,at:SCNVector3(0,r*0.30,-0.016),material:needlePaint,parent:pivot)
+        }
+    }
+
+    private func buildContactShadows() {
+        let image=NSImage(size:NSSize(width:128,height:128));image.lockFocus()
+        NSColor.clear.setFill();NSRect(x:0,y:0,width:128,height:128).fill()
+        let gradient=NSGradient(colorsAndLocations:(NSColor.black.withAlphaComponent(0.42),0),(NSColor.black.withAlphaComponent(0.15),0.55),(NSColor.clear,1))
+        gradient?.draw(in:NSRect(x:0,y:0,width:128,height:128),relativeCenterPosition:.zero);image.unlockFocus()
+        let shadow=SCNMaterial();shadow.lightingModel = .constant;shadow.diffuse.contents=image
+        shadow.isDoubleSided=true;shadow.writesToDepthBuffer=false
+        for pivot in wheelPivots {
+            let plane=SCNPlane(width:0.50,height:0.72);plane.materials=[shadow]
+            let node=SCNNode(geometry:plane);node.name="TyreContactShadow";node.eulerAngles.x = -.pi/2
+            node.position=SCNVector3(pivot.position.x,0.031,pivot.position.z);car.addChildNode(node);contactShadows.append(node)
+        }
     }
 
     private func updateDamage(_ damage: VehicleDamage) {
@@ -490,6 +528,13 @@ final class RacingWorld {
             wheel.simdOrientation = simd_quatf(angle:Float(vehicle.wheels[index].rotation),axis:SIMD3(1,0,0))
             wheelPivots[index].position.y = wheelBaseHeights[index] + CGFloat(vehicle.wheels[index].surfaceHeight)
         }
+        for (i,node) in contactShadows.enumerated() {
+            node.position.y = 0.031+CGFloat(max(0,vehicle.wheels[i].surfaceHeight))
+            node.opacity = CGFloat(clamp(vehicle.wheels[i].normalLoad/3000,0,1))
+        }
+        let gauges=[vehicle.coolantTemperature/140,vehicle.speedKPH/300,vehicle.rpm/8000,
+                    (vehicle.wheels.map(\.brakeTemperature).max() ?? 40)/900,vehicle.powerFactor]
+        for (i,needle) in gaugeNeedles.enumerated() { needle.eulerAngles.z = CGFloat(2.35-clamp(gauges[i],0,1)*4.7) }
         importedSteering?.simdTransform = steeringBase * simd_float4x4(simd_quatf(angle: Float(vehicle.steeringAngle * 9), axis: steeringAxis))
         brakeLights.forEach { $0.emission.contents = NSColor(rgb: input.brake > 0.05 ? 0xFF3328 : 0x2A0504) }
         let f = vehicle.forward

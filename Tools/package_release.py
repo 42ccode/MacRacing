@@ -17,6 +17,9 @@ with ZipFile(archive, 'w', compression=ZIP_DEFLATED, compresslevel=5) as out:
     out.write(base/'Docs'/f'VALIDATION-{release}.md',f'{root}/VALIDATION.md')
     for sample in sorted((base/'Docs'/f'Audio-{release}').glob('*.wav')):
         out.write(sample,f'{root}/{sample.name}')
+    credits = base/'Docs'/f'Driving-{release}'/'README.md'
+    if credits.exists():
+        out.write(credits,f'{root}/实机截图/README.md')
     for f in sorted((base/'Docs'/f'Driving-{release}').glob('*.jpg')):
         out.write(f,f'{root}/实机截图/{f.name}')
 with ZipFile(archive) as out:

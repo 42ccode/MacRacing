@@ -133,5 +133,24 @@ final class Circuit {
         return abs(a.x * b.y - a.y * b.x) > 0.085
     }
 
+    var cornerDistances: [Double] {
+        let candidates = stride(from:0.0,to:length,by:10).map { d -> (Double,Double) in
+            let a = sample(at:d-12).tangent, b = sample(at:d+12).tangent
+            return (d,abs(atan2(a.x*b.y-a.y*b.x,simd_dot(a,b))))
+        }.filter { $0.1>0.18 }.sorted { $0.1>$1.1 }
+        var selected: [Double] = []
+        for (distance,_) in candidates {
+            if selected.allSatisfy({ let delta=abs($0-distance); return min(delta,length-delta)>160 }) { selected.append(distance) }
+        }
+        return selected.sorted()
+    }
+
     var start: TrackSample { sample(at: 8) }
+}
+
+/// Shared by the contact solver and the visible kerb mesh (metres above asphalt).
+func kerbElevation(progress: Double, distanceFromEdge: Double) -> Double {
+    let inner = clamp(distanceFromEdge/0.12,0,1)
+    let outer = clamp((0.85-distanceFromEdge)/0.15,0,1)
+    return (0.030 + 0.012*sin(progress*7))*inner*outer
 }

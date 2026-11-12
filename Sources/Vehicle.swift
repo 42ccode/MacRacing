@@ -97,6 +97,10 @@ struct WheelState {
         if wear >= 1 || flatSpot >= 1 { punctured = true }
         if punctured { airRetention = max(0, airRetention - dt * 0.6) }
     }
+    var brakeTemperature = 40.0
+    var brakeFadeFactor: Double { clamp(1-max(0,brakeTemperature-650)/700,0.55,1) }
+    var antiRollForce = 0.0
+    var bumpStopForce = 0.0
     var brakePressure = 1.0
     var surfaceHeight = 0.0
     var suspensionTravel = 0.0 // metres from static ride height; positive = compression
@@ -227,6 +231,7 @@ struct Vehicle {
                 wheels[i].flatSpot = oldWheels[i].flatSpot
                 wheels[i].punctured = oldWheels[i].punctured
                 wheels[i].airRetention = oldWheels[i].airRetention
+                wheels[i].brakeTemperature = oldWheels[i].brakeTemperature
             }
         }
         position = sample.point
@@ -302,18 +307,25 @@ struct Vehicle {
         let steeringRate = returning ? 2.8 : 1.9 / (1 + abs(vf) * 0.012)
         steeringAngle += clamp(target - steeringAngle, -steeringRate * dt, steeringRate * dt)
 
+        // Sample all four heights before solving loads, so the anti-roll coupling
+        // is symmetric and cannot depend on left/right iteration order.
+        let contactRoads = (0..<4).map { i in
+            roadContacts?.count == 4 ? roadContacts![i] : WheelRoadContact(distance:abs(lateral+xs[i]),progress:progress+zs[i],kerbsEnabled:kerbsEnabled)
+        }
+        let surfaceHeights = (0..<4).map { i -> Double in
+            let road=contactRoads[i], wheel=wheels[i]
+            let kerb = road.kerbsEnabled ? kerbElevation(progress:road.progress,distanceFromEdge:road.distance-roadWidth/2) : 0
+            return kerb-wheelRadius*(1-wheel.radiusScale)+wheel.flatSpot*0.003*cos(wheel.rotation)*min(abs(vf)/5,1)
+        }
         for i in 0..<4 {
             var wheel = wheels[i]
             let x = xs[i]
             let z = zs[i]
-            let road = roadContacts?.count == 4 ? roadContacts![i] : WheelRoadContact(
-                distance: abs(lateral + x), progress: progress + z, kerbsEnabled: kerbsEnabled)
+            let road = contactRoads[i]
             let onGrass = road.distance > roadWidth / 2 + (road.kerbsEnabled ? 0.85 : 0.35)
             let onKerb = road.kerbsEnabled && road.distance > roadWidth / 2 && !onGrass
             wheel.surface = onGrass ? .grass : (onKerb ? .kerb : .asphalt)
-            let vibration = wheel.flatSpot * 0.003 * cos(wheel.rotation) * min(abs(vf) / 5, 1)
-            let surfaceHeight = (onKerb ? 0.030 + 0.012 * sin(road.progress * 7) : 0.0)
-                - wheelRadius * (1 - wheel.radiusScale) + vibration
+            let surfaceHeight = surfaceHeights[i]
             let roadVerticalSpeed = clamp((surfaceHeight - wheel.surfaceHeight) / dt, -0.7, 0.7)
             wheel.surfaceHeight = surfaceHeight
             let staticLoad = weight * (i < 2 ? lr : lf) / wheelbase / 2
@@ -321,7 +333,13 @@ struct Vehicle {
             let damper = (i < 2 ? 2900.0 : 3100.0) * (1 - damage.suspension[i] * 0.60)
             let deflection = heave + pitch * z + roll * x - surfaceHeight
             let deflectionRate = heaveRate + pitchRate * z + rollRate * x - roadVerticalSpeed
-            let load = clamp(staticLoad - springRate * deflection - damper * deflectionRate, 0, staticLoad * 4)
+            let other = i ^ 1
+            let otherDeflection = heave+pitch*zs[other]+roll*xs[other]-surfaceHeights[other]
+            wheel.antiRollForce = -(i < 2 ? 9000.0 : 6500.0)*(deflection-otherDeflection)
+            let bump = max(0,-deflection-0.075)
+            wheel.bumpStopForce = min(18000,180000*bump*bump/0.04)
+            let droop = max(0,deflection-0.09)*90000
+            let load = clamp(staticLoad-springRate*deflection-damper*deflectionRate+wheel.antiRollForce+wheel.bumpStopForce-droop,0,staticLoad*4)
             wheel.normalLoad = load
             wheel.suspensionTravel = -deflection
             wheel.suspensionVelocity = -deflectionRate
@@ -385,7 +403,7 @@ struct Vehicle {
                 absRelease = max(absRelease,1-wheel.brakePressure)
                 if locking { absActive = true }
             }
-            let brakeTorque = brake * (i < 2 ? 2500 : 1550) * (assists.abs ? wheel.brakePressure : 1)
+            let brakeTorque = brake * (i < 2 ? 2500 : 1550) * wheel.brakeFadeFactor * (assists.abs ? wheel.brakePressure : 1)
             let inertia = 1.7
             let previousOmega = wheel.angularVelocity
             func balance(_ omega: Double) -> Double {
@@ -409,6 +427,9 @@ struct Vehicle {
                 omega = (lo + hi) / 2
             }
             let contact = forces(omega)
+            let brakeWork = brakeTorque * abs((previousOmega+omega)/2)
+            wheel.brakeTemperature += (brakeWork/14500-(wheel.brakeTemperature-26)*(0.004+abs(u)*0.00025))*dt
+            wheel.brakeTemperature = clamp(wheel.brakeTemperature,26,1100)
             wheel.angularVelocity = omega
             wheel.rotation = (wheel.rotation + omega * dt).truncatingRemainder(dividingBy: 2 * .pi)
             wheel.slipRatio = contact.ratio

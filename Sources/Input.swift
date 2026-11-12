@@ -10,10 +10,19 @@ final class InputManager {
     private var resetHold = 0.0
     private var resetFired = false
     private var observers: [NSObjectProtocol] = []
-    private var hapticEngine: CHHapticEngine?
-    private var hapticPlayer: CHHapticAdvancedPatternPlayer?
+    private struct HapticChannel {
+        let locality: GCHapticsLocality
+        let engine: CHHapticEngine
+        let player: CHHapticAdvancedPatternPlayer
+    }
+    private var hapticChannels: [HapticChannel] = []
     private var hapticClock = 0.0
-    var hapticsAvailable: Bool { controller?.haptics != nil }
+    private var hapticRetry = 0.0
+    private var hapticGeneration = 0
+    private var testTime: Double? = nil
+    var hapticLevel = 3
+    var hapticsAvailable: Bool { !hapticChannels.isEmpty }
+    private(set) var hapticStatus = "未连接手柄"
     var controllerName: String? { controller?.vendorName ?? controller?.productCategory }
 
     init() {
@@ -29,6 +38,7 @@ final class InputManager {
 
     deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
+        stopHaptics()
         GCController.stopWirelessControllerDiscovery()
     }
 
@@ -41,9 +51,8 @@ final class InputManager {
         heldButtons = []
         resetHold = 0
         resetFired = false
-        hapticEngine?.stop(completionHandler: nil)
-        hapticEngine = nil
-        hapticPlayer = nil
+        releaseHaptics()
+        hapticStatus = selected == nil ? "未连接手柄" : "正在检测震动"
         if let controller {
             controller.playerIndex = .index1
             controller.extendedGamepad?.buttonMenu.pressedChangedHandler = { [weak self] _, _, pressed in
@@ -54,31 +63,106 @@ final class InputManager {
         if lostController { onAction?("controllerDisconnected") }
     }
 
-    private func prepareHaptics(_ controller: GCController) {
-        guard let engine = controller.haptics?.createEngine(withLocality: .default) else { return }
-        do {
-            try engine.start()
-            let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [
-                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.65),
-                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.3)
-            ], relativeTime: 0, duration: 1)
-            let pattern = try CHHapticPattern(events: [event], parameters: [])
-            let player = try engine.makeAdvancedPlayer(with: pattern)
-            player.loopEnabled = true
-            try player.sendParameters([CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: 0, relativeTime: 0)], atTime: CHHapticTimeImmediate)
-            try player.start(atTime: CHHapticTimeImmediate)
-            hapticEngine = engine
-            hapticPlayer = player
-            engine.resetHandler = { [weak self, weak controller] in
-                DispatchQueue.main.async {
-                    if let controller { self?.prepareHaptics(controller) }
-                }
-            }
-        } catch {
-            // Unsupported haptics must never prevent driving.
-            hapticEngine = nil
-            hapticPlayer = nil
+    private func releaseHaptics() {
+        hapticGeneration += 1
+        stopHaptics()
+        for channel in hapticChannels {
+            channel.engine.resetHandler = {}; channel.engine.stoppedHandler = { _ in }
+            channel.engine.stop(completionHandler:nil)
         }
+        hapticChannels = []
+    }
+
+    private func prepareHaptics(_ controller: GCController) {
+        releaseHaptics()
+        guard let haptics = controller.haptics else { hapticStatus = "macOS 未提供此手柄的震动"; return }
+        let supported = haptics.supportedLocalities
+        var localities: [GCHapticsLocality] = [.default]
+        if supported.contains(.leftHandle) && supported.contains(.rightHandle) {
+            localities = [.leftHandle,.rightHandle]
+            if supported.contains(.leftTrigger) { localities.append(.leftTrigger) }
+            if supported.contains(.rightTrigger) { localities.append(.rightTrigger) }
+        }
+        let generation = hapticGeneration
+        do {
+            for locality in localities {
+                guard let engine = haptics.createEngine(withLocality:locality) else { throw NSError(domain:"Haptics",code:1) }
+                try engine.start()
+                do {
+                    // Finite heartbeat: a stalled frame loop cannot leave motors
+                    // running indefinitely. Each update restarts this short pulse.
+                    let event = CHHapticEvent(eventType:.hapticContinuous,parameters:[
+                        CHHapticEventParameter(parameterID:.hapticIntensity,value:1),
+                        CHHapticEventParameter(parameterID:.hapticSharpness,value:0.3)
+                    ],relativeTime:0,duration:0.12)
+                    let player = try engine.makeAdvancedPlayer(with:CHHapticPattern(events:[event],parameters:[]))
+                    hapticChannels.append(HapticChannel(locality:locality,engine:engine,player:player))
+                    let recover: () -> Void = { [weak self] in
+                        DispatchQueue.main.async {
+                            guard let self, self.hapticGeneration == generation else { return }
+                            self.releaseHaptics(); self.hapticRetry = 1
+                            self.hapticStatus = "震动中断 · 等待恢复"
+                        }
+                    }
+                    engine.resetHandler = recover
+                    engine.stoppedHandler = { _ in recover() }
+                } catch { engine.stop(completionHandler:nil); throw error }
+            }
+            let triggers = localities.contains(.leftTrigger) && localities.contains(.rightTrigger)
+            hapticStatus = localities == [.default] ? "合并震动" : (triggers ? "左右马达 + LT / RT" : "左右马达 · 扳机按可用能力")
+        } catch {
+            releaseHaptics(); hapticRetry = 2; hapticStatus = "震动启动失败 · 将重试"
+        }
+    }
+
+    func stopHaptics() {
+        testTime = nil; hapticClock = 0
+        for channel in hapticChannels { try? channel.player.stop(atTime:CHHapticTimeImmediate) }
+    }
+
+    @discardableResult func testHaptics() -> Bool {
+        if let controller, hapticChannels.isEmpty { prepareHaptics(controller) }
+        guard hapticsAvailable && hapticLevel > 0 else { return false }
+        testTime = 0; return true
+    }
+
+    func updateHaptics(_ feedback: HapticOutput, dt: Double, driving: Bool) {
+        hapticRetry = max(0,hapticRetry-dt)
+        if hapticChannels.isEmpty, hapticRetry == 0, let controller, controller.haptics != nil {
+            prepareHaptics(controller)
+        }
+        let signal: HapticOutput
+        if let time = testTime {
+            signal = HapticOutput.test(at:time)
+            testTime = time+dt < 1.4 ? time+dt : nil
+        } else { signal = driving ? feedback : .zero }
+        let output = signal.scaled(Double(clamp(hapticLevel,0,4))/4)
+        if output.peak < 0.001 {
+            for channel in hapticChannels { try? channel.player.stop(atTime:CHHapticTimeImmediate) }
+            hapticClock = 0; return
+        }
+        hapticClock += dt
+        guard hapticClock >= 1.0/30 else { return }
+        hapticClock = 0
+        do {
+            for channel in hapticChannels {
+                var value: Double
+                switch channel.locality {
+                case .leftHandle: value = output.left + (hapticChannels.contains { $0.locality == .leftTrigger } ? 0 : output.brake*0.45)
+                case .rightHandle: value = output.right + (hapticChannels.contains { $0.locality == .rightTrigger } ? 0 : output.throttle*0.45)
+                case .leftTrigger: value = output.brake
+                case .rightTrigger: value = output.throttle
+                default: value = max(output.left,output.right,output.brake*0.45,output.throttle*0.45)
+                }
+                try channel.player.stop(atTime:CHHapticTimeImmediate)
+                guard value > 0.001 else { continue }
+                try channel.player.sendParameters([
+                    CHHapticDynamicParameter(parameterID:.hapticIntensityControl,value:Float(clamp(value,0,0.8)),relativeTime:0),
+                    CHHapticDynamicParameter(parameterID:.hapticSharpnessControl,value:Float(output.sharpness),relativeTime:0)
+                ],atTime:CHHapticTimeImmediate)
+                try channel.player.start(atTime:CHHapticTimeImmediate)
+            }
+        } catch { releaseHaptics(); hapticRetry = 2; hapticStatus = "震动中断 · 将重试" }
     }
 
     func keyDown(_ event: NSEvent) {
@@ -117,7 +201,7 @@ final class InputManager {
         keys = []
         resetHold = 0
         resetFired = false
-        rumble(0, dt: 1)
+        stopHaptics()
     }
 
     func read(dt: Double, deadzone: Double, acceptDriving: Bool = true) -> DrivingInput {
@@ -162,12 +246,4 @@ final class InputManager {
         return abs(x) <= 0.16 ? 0 : copysign((abs(x)-0.16)/0.84,x)
     }
 
-    func rumble(_ intensity: Double, dt: Double) {
-        hapticClock += dt
-        guard hapticClock >= 1.0 / 30 else { return }
-        hapticClock = 0
-        try? hapticPlayer?.sendParameters([
-            CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: Float(clamp(intensity, 0, 0.7)), relativeTime: 0)
-        ], atTime: CHHapticTimeImmediate)
-    }
 }

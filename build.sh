@@ -12,7 +12,7 @@ xcrun swiftc -swift-version 5 -O -whole-module-optimization \
   -framework AppKit -framework SceneKit -framework GameController \
   -framework CoreHaptics -framework AVFoundation \
   Sources/Track.swift Sources/Vehicle.swift Sources/GLTF.swift Sources/Environment.swift Sources/World.swift \
-  Sources/Input.swift Sources/EngineSound.swift Sources/HUD.swift Sources/Game.swift Sources/main.swift \
+  Sources/HapticFeedback.swift Sources/Input.swift Sources/EngineSound.swift Sources/HUD.swift Sources/Game.swift Sources/main.swift \
   -o "$app_path/Contents/MacOS/APEXLab"
 
 cat > "$app_path/Contents/Info.plist" <<'PLIST'
@@ -24,8 +24,8 @@ cat > "$app_path/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>APEX Lab</string>
   <key>CFBundleDisplayName</key><string>APEX Lab</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.4.0</string>
-  <key>CFBundleVersion</key><string>14</string>
+  <key>CFBundleShortVersionString</key><string>1.5.0</string>
+  <key>CFBundleVersion</key><string>15</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>

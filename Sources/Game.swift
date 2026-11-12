@@ -21,6 +21,7 @@ struct SavedPractice: Codable {
     var circuitKind: Int? = nil
     var absLevel: Int? = nil
     var tcLevel: Int? = nil
+    var hapticLevel: Int? = nil
 }
 
 final class RacingGame {
@@ -53,6 +54,8 @@ final class RacingGame {
     private var renderClock = 0.0
     private var sceneDirty = true
     private var collisionCooldown = 0.0
+    private var impactFeedback = SIMD2<Double>.zero
+    private var feedback = HapticFeedback()
     private var telemetryClock = 0.0
     private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c,fr_travel_mm,fl_travel_mm,rr_travel_mm,rl_travel_mm,fr_load_n,fl_load_n,rr_load_n,rl_load_n,fr_kerb,fl_kerb,rr_kerb,rl_kerb,car_id,track_id,abs_level,tc_level,abs_release,tc_reduction"]
     private let fixedStep = 1.0 / 240
@@ -116,8 +119,10 @@ final class RacingGame {
             }
         } else { accumulator = 0 }
         if noticeRemaining > 0 { noticeRemaining -= dt }
-        let rumble = isPaused || serviceRemaining > 0 ? 0 : (vehicle.kerbFeedback * 0.52 + vehicle.tyreSlip * min(vehicle.speed / 12, 1) * 0.3 + (collisionCooldown > 0.2 ? 0.4 : 0))
-        input.rumble(rumble, dt: dt)
+        let driving = hasStarted && !isPaused && serviceRemaining == 0
+        impactFeedback *= exp(-dt*12)
+        let signal = feedback.update(vehicle:vehicle,input:drivingInput,impact:impactFeedback,dt:dt,active:driving)
+        input.updateHaptics(signal,dt:dt,driving:driving)
         sound.update(rpm: vehicle.rpm, throttle: drivingInput.throttle, ignition: vehicle.ignitionFraction, cockpit: cockpit, kerb: vehicle.kerbFeedback, roadSpeed: vehicle.speed, paused: isPaused || !hasStarted || serviceRemaining > 0)
         let ghost = ghostEnabled && hasStarted ? session.ghost(at: session.elapsed) : nil
         let running = hasStarted && !isPaused
@@ -161,6 +166,8 @@ final class RacingGame {
             if impact > 0 {
                 if collisionCooldown <= 0 {
                     vehicle.impact(normalSpeed: impact, outwardNormal: normal)
+                    let side = simd_dot(normal,vehicle.modelX), strength = clamp(impact/12,0,1)
+                    impactFeedback = SIMD2(strength*(side < -0.2 ? 0.25 : 1),strength*(side > 0.2 ? 0.25 : 1))
                 }
                 vehicle.velocity -= normal * impact * 1.20
                 vehicle.velocity *= 0.62
@@ -305,6 +312,11 @@ final class RacingGame {
         case "abs": assists.absLevel = (assists.absLevel+1)%6; savePractice(); announce("ABS \(assists.absLevel)/5 · 0 关闭，5 强介入",duration:2)
         case "tc": assists.tcLevel = (assists.tcLevel+1)%6; savePractice(); announce("TCS \(assists.tcLevel)/5 · 0 关闭，5 强介入",duration:2)
         case "automatic": assists.automatic.toggle(); savePractice()
+        case "hapticLevel":
+            input.hapticLevel = (input.hapticLevel+1)%5; input.stopHaptics(); savePractice()
+        case "hapticTest":
+            guard isPaused else { return }
+            announce(input.testHaptics() ? "震动测试：左 → 右 → 刹车 → 油门" : "震动不可用或强度为 0 · " + input.hapticStatus,duration:3)
         case "mute": sound.muted.toggle(); savePractice()
         case "ghost": ghostEnabled.toggle()
         case "deadzoneDown": assists.steeringDeadzone = max(0.02, assists.steeringDeadzone - 0.02); savePractice()
@@ -332,6 +344,7 @@ final class RacingGame {
 
     private func resetAtStart() {
         gTrace.removeAll(keepingCapacity: true)
+        feedback.reset(); impactFeedback = .zero; input.stopHaptics()
         collisionCooldown = 0
         serviceRemaining = 0
         vehicle.reset(at: circuit.start)
@@ -362,10 +375,10 @@ final class RacingGame {
 
     private func loadPractice() {
         let url = dataDirectory.appendingPathComponent("practice.json")
-        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4, 5, 6, 7].contains(saved.version) else { return }
+        guard let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode(SavedPractice.self, from: data), [1, 2, 3, 4, 5, 6, 7, 8].contains(saved.version) else { return }
         if let raw = saved.vehicleKind, let kind = VehicleKind(rawValue:raw) { vehicle.kind = kind }
         if let raw = saved.circuitKind, let kind = CircuitKind(rawValue:raw), kind != circuit.kind { changeCircuit(kind) }
-        if saved.version == 7, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
+        if saved.version == 8, let best = saved.best, best.isFinite, best > 15, saved.ghost.count <= 100000,
            saved.ghost.allSatisfy({ $0.time.isFinite && $0.x.isFinite && $0.z.isFinite && $0.heading.isFinite }) {
             session.best = best
             session.bestGhost = saved.ghost
@@ -374,6 +387,7 @@ final class RacingGame {
         assists.tractionControl = saved.tractionControl
         if let level = saved.absLevel { assists.absLevel = clamp(level,0,5) }
         if let level = saved.tcLevel { assists.tcLevel = clamp(level,0,5) }
+        input.hapticLevel = clamp(saved.hapticLevel ?? 3,0,4)
         assists.automatic = saved.automatic
         assists.steeringDeadzone = saved.deadzone.isFinite ? clamp(saved.deadzone, 0.02, 0.3) : 0.08
         if let compound = saved.compound, let value = TyreCompound(rawValue: compound) { tyreSetup.compound = value }
@@ -385,13 +399,13 @@ final class RacingGame {
     }
 
     private func savePractice() {
-        let saved = SavedPractice(version: 7, best: session.best, ghost: session.bestGhost,
+        let saved = SavedPractice(version: 8, best: session.best, ghost: session.bestGhost,
             abs: assists.abs, tractionControl: assists.tractionControl, automatic: assists.automatic,
             deadzone: assists.steeringDeadzone, muted: sound.muted, cockpit: cockpit,
             verticalFOV: Double(world.cockpitFOV), eyeHeight: world.seatHeight,
             compound: tyreSetup.compound.rawValue, coldPressure: tyreSetup.coldPressure,
             drivingView: drivingView.rawValue, vehicleKind: vehicle.kind.rawValue,
-            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel)
+            circuitKind:circuit.kind.rawValue, absLevel:assists.absLevel, tcLevel:assists.tcLevel,hapticLevel:input.hapticLevel)
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(saved)

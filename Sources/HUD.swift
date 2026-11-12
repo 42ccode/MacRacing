@@ -128,7 +128,7 @@ final class HUDView: NSView {
 
     private func drawVehicleInfo(_ game: RacingGame) {
         let x: CGFloat = 18, y: CGFloat = 18, car = game.vehicle
-        panel(NSRect(x:x,y:y,width:238,height:242),color:NSColor(white:0.035,alpha:0.86),radius:5)
+        panel(NSRect(x:x,y:y,width:238,height:262),color:NSColor(white:0.035,alpha:0.86),radius:5)
         text(car.kind.label,x:x+12,y:y+10,size:14,weight:.semibold,width:214)
         text(String(format:"实验预设 · %.0f kg · 后驱 / 6 挡",car.mass),x:x+12,y:y+34,size:10,color:muted,width:214)
         button("ABS \(game.assists.absLevel)/5",NSRect(x:x+12,y:y+57,width:100,height:28),action:"abs",active:car.absActive)
@@ -141,9 +141,10 @@ final class HUDView: NSView {
         text(String(format:"水温 %.0f°C   可用动力 %.0f%%",car.coolantTemperature,car.powerFactor*100),x:x+12,y:y+142,size:11,width:214)
         text(String(format:"车头损伤 %.0f%%   车尾 %.0f%%",car.damage.front*100,car.damage.rear*100),x:x+12,y:y+164,size:10,color:muted,width:214)
         text(String(format:"引擎损伤 %.0f%%   悬架 %.0f%%",car.damage.engine*100,(car.damage.suspension.max() ?? 0)*100),x:x+12,y:y+184,size:10,color:muted,width:214)
-        text(String(format:"滑移 %.0f%%   复位后 %.2f km",car.tyreSlip*100,car.distanceTravelled/1000),x:x+12,y:y+205,size:10,color:muted,width:214)
-        text("损伤 0% 完好 · 1 / 2 调节辅助",x:x+12,y:y+224,size:8,color:muted,width:214)
-        drawTrackMap(game,x:x,y:y+252)
+        text(String(format:"刹车 %.0f°C   制动力 %.0f%%",car.wheels.map(\.brakeTemperature).max() ?? 40,(car.wheels.map(\.brakeFadeFactor).min() ?? 1)*100),x:x+12,y:y+205,size:10,color:muted,width:214)
+        text(String(format:"滑移 %.0f%%   复位后 %.2f km",car.tyreSlip*100,car.distanceTravelled/1000),x:x+12,y:y+225,size:10,color:muted,width:214)
+        text("损伤 0% 完好 · 1 / 2 调节辅助",x:x+12,y:y+244,size:8,color:muted,width:214)
+        drawTrackMap(game,x:x,y:y+272)
     }
 
     private func drawTrackMap(_ game: RacingGame, x: CGFloat, y: CGFloat) {
@@ -316,7 +317,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.4", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.5", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"
@@ -367,8 +368,8 @@ final class HUDView: NSView {
         // Clear obscured click targets: only this modal can receive clicks.
         actions = []
         let x = (width - 550) / 2
-        let y = max(20, (height - 626) / 2)
-        panel(NSRect(x: x, y: y, width: 550, height: 626), color: NSColor(rgb: 0x191B1D, alpha: 0.99), radius: 16)
+        let y = max(20, (height - 674) / 2)
+        panel(NSRect(x: x, y: y, width: 550, height: 674), color: NSColor(rgb: 0x191B1D, alpha: 0.99), radius: 16)
         text("SESSION PAUSED", x: x + 28, y: y + 24, size: 10, color: lime, weight: .bold)
         text(game.showHelp ? "驾驶操作" : "练习已暂停", x: x + 27, y: y + 52, size: 26, weight: .bold)
         button(game.drivingView.label + " ›", NSRect(x:x+380,y:y+51,width:142,height:32), action:"camera")
@@ -405,9 +406,12 @@ final class HUDView: NSView {
         button("−",NSRect(x:x+373,y:y+435,width:65,height:28),action:"pressureDown")
         button("+",NSRect(x:x+450,y:y+435,width:72,height:28),action:"pressureUp")
         text("配方 / 冷压在维修换胎或重新开始时生效",x:x+29,y:y+475,size:10,color:muted,width:490)
+        button("震动强度 \(game.input.hapticLevel * 25)%",NSRect(x:x+28,y:y+500,width:150,height:30),action:"hapticLevel",active:game.input.hapticLevel>0)
+        button("测试手柄震动",NSRect(x:x+193,y:y+500,width:150,height:30),action:"hapticTest")
+        text(game.input.hapticStatus,x:x+29,y:y+537,size:10,color:muted,width:494)
         button(game.serviceRemaining > 0 ? "正在维修 · 继续后完成" : "拖回维修区 · 修车换胎 12 秒  [ P / 十字键↓ ]",
-               NSRect(x:x+28,y:y+500,width:494,height:32),action:"service")
-        button("重新开始", NSRect(x: x + 28, y: y + 555, width: 150, height: 42), action: "restart")
-        button("继续驾驶    →", NSRect(x: x + 190, y: y + 555, width: 332, height: 42), action: "resume", primary: true)
+               NSRect(x:x+28,y:y+558,width:494,height:32),action:"service")
+        button("重新开始", NSRect(x: x + 28, y: y + 606, width: 150, height: 42), action: "restart")
+        button("继续驾驶    →", NSRect(x: x + 190, y: y + 606, width: 332, height: 42), action: "resume", primary: true)
     }
 }

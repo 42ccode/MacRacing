@@ -17,7 +17,7 @@ final class TrackEnvironment {
         scene.rootNode.addChildNode(root)
     }
     func build() {
-        ground(); road(); barriers(); pits()
+        ground(); road(); barriers(); pits(); circuitDetails()
         // Posts, rails, garages and paint never move. Submit them by material
         // rather than submitting every small part separately on every frame.
         let fixed = root.flattenedClone()
@@ -131,18 +131,11 @@ final class TrackEnvironment {
         let wornPaint = scanMaterial("asphalt_02",tint:0xEFEBDB)
         wornPaint.diffuse.intensity = 1.4
         strip(-5.88,-5.75,0.033,wornPaint); strip(5.75,5.88,0.033,wornPaint)
-        // Kerbs are restricted to bends, with worn paint at metre-scale spacing.
-        let red = scanMaterial("asphalt_02",tint:0x9B3C34)
-        for side in [-1.0,1.0] {
-            for stripe in 0...1 {
-                strip(min(side*6,side*6.85),max(side*6,side*6.85),0.045,stripe==0 ? red : wornPaint,
-                      filter: { self.circuit.hasKerb(at:self.circuit.samples[$0].distance) && Int(self.circuit.samples[$0].distance/2.5)%2==stripe })
-            }
-        }
+        raisedKerbs(red:scanMaterial("asphalt_02",tint:0x9B3C34),white:wornPaint)
         let rubber = material(NSColor(rgb:0x272624),roughness:0.96)
         rubber.transparency = 0.08; rubber.writesToDepthBuffer = false
         // Short braking streaks, grid boxes and a measured start line.
-        for target in [230.0,470,715,920,1160] {
+        for target in circuit.cornerDistances {
             for lane in [-0.9,0.9] {
                 strip(lane-0.10,lane+0.10,0.038,rubber,filter: { let d = self.circuit.samples[$0].distance; return d>target-65 && d<target-15 })
             }
@@ -173,6 +166,85 @@ final class TrackEnvironment {
         label(circuit.name,size:0.38,at:SCNVector3(0,5.82,0.46),parent:front,color:paint)
         for i in 0..<5 { box(0.26,0.48,0.18,SCNVector3(CGFloat(i-2)*0.34,5.35,0),dark,parent:n,bevel:0.05) }
     }
+    private func raisedKerbs(red: SCNMaterial, white: SCNMaterial) {
+        let edges = [0.0,0.12,0.70,0.85]
+        let count = Int(ceil(circuit.length/0.25))
+        for side in [-1.0,1.0] { for stripe in 0...1 {
+            var vertices:[SCNVector3]=[],uv:[CGPoint]=[],normals:[SCNVector3]=[],indices:[Int32]=[]
+            for i in 0..<count {
+                let d=Double(i)*circuit.length/Double(count), next=Double(i+1)*circuit.length/Double(count)
+                guard circuit.hasKerb(at:(d+next)/2),Int(d/2.5)%2==stripe else { continue }
+                let start=Int32(vertices.count)
+                for distance in [d,next] {
+                    let sample=circuit.sample(at:distance)
+                    for edge in edges {
+                        let h=kerbElevation(progress:distance,distanceFromEdge:edge)
+                        vertices.append(vector(sample.point+sample.right*side*(6+edge),y:0.025+h))
+                        uv.append(CGPoint(x:edge/3,y:distance/3))
+                        let across=(kerbElevation(progress:distance,distanceFromEdge:edge+0.001)-kerbElevation(progress:distance,distanceFromEdge:edge-0.001))/0.002
+                        let along=(kerbElevation(progress:distance+0.001,distanceFromEdge:edge)-kerbElevation(progress:distance-0.001,distanceFromEdge:edge))/0.002
+                        let gradient=sample.right*side*across+sample.tangent*along
+                        let n=simd_normalize(SIMD3<Float>(Float(-gradient.x),1,Float(-gradient.y)))
+                        normals.append(SCNVector3(n))
+                    }
+                }
+                for j in 0..<3 {
+                    let a=start+Int32(j), b=a+4
+                    indices += side>0 ? [a,b,a+1,a+1,b,b+1] : [a,a+1,b,a+1,b+1,b]
+                }
+            }
+            let paint=stripe==0 ? red : white; paint.isDoubleSided=true
+            if !indices.isEmpty { mesh(vertices,uv,indices,paint,normals:normals,name:"ProfiledKerbs") }
+        }}
+    }
+
+    private func circuitDetails() {
+        let steel=material(NSColor(rgb:0x727A7D),metal:0.65,roughness:0.6)
+        let concrete=material(NSColor(rgb:0xA7AAA4),roughness:0.94)
+        let seat=material(NSColor(rgb:0x344853),roughness:0.82)
+        // Furniture stays outside the physical barrier and away from nearby bends.
+        let sample=circuit.sample(at:120), centre=sample.point+sample.right*34
+        let corners=[SIMD2(-12.0,-7),SIMD2(12.0,-7),SIMD2(-12.0,7),SIMD2(12.0,7)]
+        if corners.allSatisfy({ circuit.nearest(to:centre+sample.right*$0.x+sample.tangent*$0.y).distance>17 }) {
+            let stand=SCNNode(); stand.name="SpectatorStand";stand.position=vector(centre);stand.eulerAngles.y=CGFloat(atan2(sample.tangent.x,sample.tangent.y));root.addChildNode(stand)
+            for row in 0..<6 {
+                let x=CGFloat(row)*1.1-3, h=CGFloat(row)*0.42+0.3
+                box(1.1,h,20,SCNVector3(x,h/2,0),concrete,parent:stand)
+                for place in 0..<28 {
+                    box(0.45,0.10,0.52,SCNVector3(x,h+0.22,CGFloat(place)*0.67-9),seat,parent:stand,bevel:0.025)
+                    box(0.10,0.38,0.52,SCNVector3(x+0.2,h+0.43,CGFloat(place)*0.67-9),seat,parent:stand,bevel:0.025)
+                }
+            }
+            for z:CGFloat in [-10,10] {
+                tube(SCNVector3(-3.5,1.25,z),SCNVector3(3,3.7,z),0.045,steel,parent:stand)
+                for row in 0..<6 {
+                    let x=CGFloat(row)*1.1-3, h=CGFloat(row)*0.42+0.3
+                    tube(SCNVector3(x,h,z),SCNVector3(x,1.25+(x+3.5)*2.45/6.5,z),0.035,steel,parent:stand)
+                }
+            }
+        }
+        for distance in stride(from:0.0,to:circuit.length,by:60) {
+            let s=circuit.sample(at:distance)
+            for side in [-1.0,1.0] {
+                let point=s.point+s.right*(17.3*side)
+                guard circuit.nearest(to:point).distance>16.8 else {continue}
+                let n=SCNNode();n.position=vector(point);n.eulerAngles.y=CGFloat(atan2(s.tangent.x,s.tangent.y));root.addChildNode(n)
+                box(0.12,0.8,0.12,SCNVector3(0,0.4,0),paint,parent:n)
+                box(0.13,0.13,0.025,SCNVector3(0,0.67,-0.07),side>0 ? seat : dark,parent:n)
+            }
+        }
+        // Pit-lane service objects behind the barrier, never invisible obstacles.
+        for distance in [12.0,45,78] {
+            let s=circuit.sample(at:distance), p=s.point+s.right*(-19)
+            guard circuit.nearest(to:p).distance>17 else {continue}
+            let n=SCNNode();n.position=vector(p);root.addChildNode(n)
+            for i in 0..<3 {
+                let tyre=SCNTorus(ringRadius:0.24,pipeRadius:0.085);tyre.ringSegmentCount=24;tyre.pipeSegmentCount=8;tyre.materials=[dark]
+                let ring=SCNNode(geometry:tyre);ring.position=SCNVector3(0,CGFloat(i)*0.16+0.09,0);n.addChildNode(ring)
+            }
+        }
+    }
+
     private func barriers() {
         let metal = material(NSColor(rgb:0xA2A4A1),metal:0.7,roughness:0.64)
         texture("Environment/metal_plate_diff_2k.jpg",metal.diffuse)

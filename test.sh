@@ -13,3 +13,7 @@ xcrun swiftc -O -swift-version 5 -module-cache-path "$module_cache" \
 xcrun swiftc -O -swift-version 5 -module-cache-path "$module_cache" -framework AVFoundation \
   Sources/Track.swift Sources/Vehicle.swift Sources/EngineSound.swift Tests/AudioChecks.swift -o .build/audio-checks
 .build/audio-checks "$PWD/Assets/Audio/engine-recording.wav"
+
+xcrun swiftc -O -module-cache-path "$module_cache" \
+  Sources/Track.swift Sources/Vehicle.swift Sources/HapticFeedback.swift Tests/FeedbackChecks.swift -o .build/feedback-checks
+.build/feedback-checks

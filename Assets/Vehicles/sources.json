@@ -32,5 +32,14 @@
     "author": "Black Snow",
     "original": "https://sketchfab.com/3d-models/mazda-miata-mx-5-e074e29ccc3847dca74ed5e9cb92d3e7",
     "license": "CC-BY-4.0"
+  },
+  {
+    "file": "Centenario.glb",
+    "source": "https://huggingface.co/datasets/allenai/objaverse/resolve/main/glbs/000-131/d679af35b5694301a185c7454a700c73.glb",
+    "source_sha256": "f9ea8fe321511d1a92f1b777d00bf9c22a64e5efdccbdab40546a964dec9d793",
+    "sha256": "14de38326f323c40bb25cc3d95e062d08a7e88516e71bfbe7f038fe85e46ff83",
+    "author": "SDC PERFORMANCE",
+    "original": "https://sketchfab.com/3d-models/lamborghini-centenario-lp-770-interior-sdc-d679af35b5694301a185c7454a700c73",
+    "license": "CC-BY-4.0"
   }
 ]

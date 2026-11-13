@@ -120,18 +120,18 @@ struct WheelState {
 /// Four contact patches, rotating wheels and sprung heave/roll/pitch states.
 /// Brush-style combined-slip tyres use explicit prototype parameters, not iRacing data.
 enum VehicleKind: Int, CaseIterable, Codable {
-    case concept, ferrari, porsche, bmw, mazda
-    var label: String { ["Concept GT", "Ferrari 458", "Porsche 911 4S", "BMW M3 E30", "Mazda MX-5"][rawValue] }
-    var assetName: String { ["CarConcept", "Ferrari458", "Porsche911", "BMWM3E30", "MazdaMX5"][rawValue] }
+    case concept, ferrari, porsche, bmw, mazda, centenario
+    var label: String { ["Concept GT", "Ferrari 458", "Porsche 911 4S", "BMW M3 E30", "Mazda MX-5", "Lamborghini Centenario"][rawValue] }
+    var assetName: String { ["CarConcept", "Ferrari458", "Porsche911", "BMWM3E30", "MazdaMX5", "Centenario"][rawValue] }
     var hasSimpleCabin: Bool { self == .porsche || self == .bmw }
     // Experimental driving presets, not manufacturer-calibrated specifications.
-    var mass: Double { [1260, 1485, 1420, 1210, 1025][rawValue] }
-    var wheelbase: Double { [2.80, 2.65, 2.44, 2.5911, 2.2597][rawValue] }
-    var frontAxle: Double { [1.485, 1.325, 1.22, 1.2956, 1.1299][rawValue] }
-    var track: Double { [1.96, 1.66, 1.50, 1.4067, 1.4066][rawValue] }
-    var radius: Double { [0.384, 0.359, 0.328, 0.3116, 0.3007][rawValue] }
-    var torqueScale: Double { [1, 1.55, 1.28, 0.86, 0.64][rawValue] }
-    var credit: String { ["Eric Chadwick / DGG · CC BY 4.0", "vicent091036 · CC BY 4.0", "Lionsharp Studios · CC BY-SA 4.0", "Martin Trafas · CC BY 4.0", "Black Snow · CC BY 4.0"][rawValue] }
+    var mass: Double { [1260, 1485, 1420, 1210, 1025, 1520][rawValue] }
+    var wheelbase: Double { [2.80, 2.65, 2.44, 2.5911, 2.2597, 2.69175][rawValue] }
+    var frontAxle: Double { [1.485, 1.325, 1.22, 1.2956, 1.1299, 1.345875][rawValue] }
+    var track: Double { [1.96, 1.66, 1.50, 1.4067, 1.4066, 1.697][rawValue] }
+    var radius: Double { [0.384, 0.359, 0.328, 0.3116, 0.3007, 0.37][rawValue] }
+    var torqueScale: Double { [1, 1.55, 1.28, 0.86, 0.64, 1.82][rawValue] }
+    var credit: String { ["Eric Chadwick / DGG · CC BY 4.0", "vicent091036 · CC BY 4.0", "Lionsharp Studios · CC BY-SA 4.0", "Martin Trafas · CC BY 4.0", "Black Snow · CC BY 4.0", "SDC PERFORMANCE · CC BY 4.0"][rawValue] }
 }
 
 struct Vehicle {

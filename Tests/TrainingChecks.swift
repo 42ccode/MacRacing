@@ -57,7 +57,7 @@ import simd
         var badGhost=record.ghost;badGhost[1]=badGhost[0]
         check(!LapRecord(time:record.time,sectors:record.sectors,trace:record.trace,ghost:badGhost).isValid,"Duplicate ghost timestamps are rejected")
         let keys=VehicleKind.allCases.flatMap { car in CircuitKind.allCases.map {LapRecord.key(vehicle:car,circuit:$0)} }
-        check(Set(keys).count==30,"All thirty vehicle and circuit record keys are distinct")
+        check(Set(keys).count==keys.count,"All vehicle and circuit record keys are distinct")
         check(reference.ghost(at:30) != nil && reference.ghost(at:61)==nil,"Restored ghost interpolation stays within recorded lap duration")
         if failures>0 {exit(1)}
     }

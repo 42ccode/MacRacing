@@ -35,3 +35,11 @@ The downloaded assets were obtained from the `carros` distribution. Its catalog 
 APEX Lab decoded Meshopt and quantized attributes, baked the original transforms, centered and aligned the four wheels, neutralized the BMW front steering and Mazda tire camber, separated rolling meshes from calipers, and adapted materials, instruments and body deformation. The BMW uses the prototype's simplified cabin. The Mazda retains its modelled interior and steering wheel. Both use experimental rear-wheel-drive presets. Source and output SHA-256 values are listed in `sources.json`.
 
 To reproduce these adaptations, place `Tools/prepare_club_cars.mjs` in the offline asset tool directory with the glTF Transform packages listed above and `meshoptimizer` 1.3.0. Run `node prepare_club_cars.mjs input.glb output.glb bmw` or use `mazda` for the MX-5.
+
+## Lamborghini Centenario LP-770 (1.13)
+
+**Lamborghini Centenario LP-770 Interior SDC** by **SDC PERFORMANCE™️**, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). [Author's original model](https://sketchfab.com/3d-models/lamborghini-centenario-lp-770-interior-sdc-d679af35b5694301a185c7454a700c73) · [Full-resolution archived GLB](https://huggingface.co/datasets/allenai/objaverse/resolve/main/glbs/000-131/d679af35b5694301a185c7454a700c73.glb).
+
+APEX Lab retains the 325,733 source triangles, original materials, and all seven embedded texture images byte for byte. The conversion bakes transforms, centers the origin, splits the wheel and brake meshes, neutralizes the display steering angle, and binds the original steering wheel. It uses the static closed-door model in the racing scene and omits the showcase animation. The app hides the original window tint in interior driving views and binds the original brake-light mesh. The author describes the interior as their interpretation of the Centenario. The driving preset uses the project's experimental rear-wheel-drive six-speed and shared audio.
+
+To reproduce the conversion, run `node prepare_centenario.mjs input.glb Centenario.glb` with the glTF Transform 4.5.1 packages and Meshoptimizer 1.3.0 in the offline tool directory. Both hashes are in `sources.json`.

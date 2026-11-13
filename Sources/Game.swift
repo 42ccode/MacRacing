@@ -116,7 +116,7 @@ final class RacingGame {
         hud.autoresizingMask = [.width, .height]
         hud.game = self
         input.onAction = { [weak self] action in self?.action(action) }
-        vehicle.kind = .ferrari
+        vehicle.kind = .centenario
         loadPractice()
         world.selectVehicle(vehicle.kind)
         vehicle.reset(at: self.circuit.start)

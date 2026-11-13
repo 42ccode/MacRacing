@@ -1,4 +1,4 @@
-# APEX Lab — Circuit Test 1.12
+# APEX Lab — Circuit Test 1.13
 
 面向 Apple Silicon Mac 的原生赛车驾驶原型。使用 Swift、SceneKit / Metal、Game Controller、Core Haptics 和 AVFoundation，无需 Unity 或下载第三方依赖。
 
@@ -17,6 +17,12 @@
 ```sh
 ./build.sh --run
 ```
+
+## 1.13 授权原模 · Lamborghini Centenario
+
+外观和内饰来自 SDC PERFORMANCE 的完整模型，保留原模型的 325,733 个三角面、材质和 7 张贴图。车辆支持六种视角、原方向盘动画、前轮转向、四轮滚动、独立刹车卡钳。新安装默认选中 Centenario，已有配置可在开始或暂停菜单切换。六车六图共 36 组独立练习记录。
+
+[原作者作品](https://sketchfab.com/3d-models/lamborghini-centenario-lp-770-interior-sdc-d679af35b5694301a185c7454a700c73) · [原生渲染](Docs/Driving-1.13/README.md) · [验证记录](Docs/VALIDATION-1.13.md)
 
 ## 1.12 赛道与座舱细节
 
@@ -103,7 +109,7 @@
 ## 当前内容
 
 - 六条原创闭环赛道，包含路肩、缓冲区、护栏、制动参考牌和维修区建筑；开始 / 暂停界面可切换，附实时位置小地图。
-- 五款可选车辆：Concept GT、Ferrari 458、Porsche 911 Carrera 4S、BMW M3 E30、Mazda MX-5。Porsche 和 BMW 使用简化座舱，Mazda 保留原模型座舱。
+- 六款可选车辆：Concept GT、Ferrari 458、Porsche 911 Carrera 4S、BMW M3 E30、Mazda MX-5、Lamborghini Centenario。Porsche 和 BMW 使用简化座舱，Mazda 保留原模型座舱。
 - 各车采用独立质量、轴距、轮距、轮径和扭矩预设；均为实验后驱、六速动力传动，不是相应实车的完整还原，4S 外观也未模拟四驱。
 - Khronos Car Concept 授权模型、Poly Haven 实拍 PBR 沥青/草地材质与 HDR 天空，详见 `Assets/THIRD-PARTY-NOTICES.md`。
 - 240 Hz 主物理步长、720 Hz 内部子步：四轮独立轮速/联合滑移接地力、四角弹簧阻尼、车身升沉/侧倾/俯仰、载荷敏感性、胎面/胎体双温度、热态胎压、磨损、平斑与爆胎、限滑差速器、动力传动和空气阻力。
@@ -180,10 +186,10 @@
 
 应用旁会创建 `APEX Lab Data` 文件夹：
 
-- `practice.json`：车辆、赛道、辅助等级、视角、轮胎设置，以及 HUD 位置和 30 个车辆 / 赛道组合各自的最佳圈、分段、距离时间参考及幽灵车。
+- `practice.json`：车辆、赛道、辅助等级、视角、轮胎设置，以及 HUD 位置和 36 个车辆 / 赛道组合各自的最佳圈、分段、距离时间参考及幽灵车。
 - `latest-session.csv`：当前练习的 10 Hz 遥测，暂停或退出时保存，最多保留一小时。每次重新开始会覆盖本次练习缓存。
 
-遥测字段包括位置、速度、挡位、转速、油门、刹车、转向、纵横向加速度、圈速有效性、四轮温度/压力/磨损和前后车身/引擎损伤、水温，以及四轮悬挂行程、轮载和路肩反馈；时间列是本圈经过时间。1.3 在原字段末尾追加 `car_id,track_id,abs_level,tc_level,abs_release,tc_reduction`，最后两项为 0–1 比例；车型 ID 0–4 对应 Concept/Ferrari/Porsche/BMW/Mazda，赛道 ID 0–5 对应上表顺序。CSV 保留原始模型坐标的 lateral_g（正值向左），界面 G 表转换为驾驶员坐标（正值向右）；纵向正值均为加速。
+遥测字段包括位置、速度、挡位、转速、油门、刹车、转向、纵横向加速度、圈速有效性、四轮温度/压力/磨损和前后车身/引擎损伤、水温，以及四轮悬挂行程、轮载和路肩反馈；时间列是本圈经过时间。1.3 在原字段末尾追加 `car_id,track_id,abs_level,tc_level,abs_release,tc_reduction`，最后两项为 0–1 比例；车型 ID 0–5 对应 Concept/Ferrari/Porsche/BMW/Mazda/Centenario，赛道 ID 0–5 对应上表顺序。CSV 保留原始模型坐标的 lateral_g（正值向左），界面 G 表转换为驾驶员坐标（正值向右）；纵向正值均为加速。
 
 ## 轮胎与维修
 
@@ -199,7 +205,7 @@
 ./test.sh
 ```
 
-1.12 在最小窗口渲染前后对比，并验证了精简仪表切换、布局与旧设置兼容。详见 [1.12 验证记录](Docs/VALIDATION-1.12.md)。
+1.13 检查了原模型完整度、车轮绑定、六种视角和车内前方视线。详见 [1.13 验证记录](Docs/VALIDATION-1.13.md)。
 
 ## 当前边界
 

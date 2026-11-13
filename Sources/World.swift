@@ -376,12 +376,18 @@ final class RacingWorld {
         guard let url = assetURL("Vehicles/\(file).glb"), let asset = try? GLTFAsset(url:url),
               let model = try? asset.makeScene() else { fatalError("Missing bundled vehicle: \(file)") }
         body.addChildNode(model)
-        let paint = NSColor(rgb: ([0x566875, 0x951B16, 0x66777E, 0xB4B7BD, 0x244E69] as [UInt32])[vehicleKind.rawValue])
+        let paint = ([1: 0x951B16, 2: 0x66777E, 3: 0xB4B7BD, 4: 0x244E69] as [Int: UInt32])[vehicleKind.rawValue]
         model.enumerateChildNodes { node, _ in
             for m in node.geometry?.materials ?? [] {
+                if self.vehicleKind == .centenario {
+                    if m.name == "material_31" { self.glassNodes.append(node) }
+                    if m.name == "LIGT_RED" { self.brakeLights.append(m) }
+                    continue
+                }
                 switch m.name ?? "" {
                 case "Body_Color", "paint":
-                    m.diffuse.contents = paint; m.multiply.contents = NSColor.white
+                    if let paint { m.diffuse.contents = NSColor(rgb: paint) }
+                    m.multiply.contents = NSColor.white
                     m.metalness.contents = 0.12; m.roughness.contents = 0.32
                     m.clearCoat.contents = 0.55; m.clearCoatRoughness.contents = 0.18
                 case "Tires", "rubber":
@@ -422,13 +428,14 @@ final class RacingWorld {
             mesh.removeFromParentNode(); mesh.simdPosition = .zero
             let pivot = SCNNode(); pivot.simdPosition = position
             let roll = SCNNode(); roll.addChildNode(mesh); pivot.addChildNode(roll); car.addChildNode(pivot)
-            if vehicleKind == .porsche || vehicleKind == .bmw || vehicleKind == .mazda {
+            if vehicleKind == .porsche || vehicleKind == .bmw || vehicleKind == .mazda || vehicleKind == .centenario {
                 // Calipers belong to the upright: steer with the wheel,
                 // but never spin with the tyre/rim and brake disc.
                 var calipers: [SCNNode] = []
                 mesh.enumerateChildNodes { node, _ in
                     if (vehicleKind == .porsche && node.geometry?.materials.contains(where: { $0.name == "Material.001" }) == true) ||
-                        (node.geometry != nil && node.parent?.name == "BrakeCaliperMesh") { calipers.append(node) }
+                        (node.geometry != nil && (node.parent?.name == "BrakeCaliperMesh" ||
+                            (vehicleKind == .centenario && ["Object_7","Object_18"].contains(node.parent?.name ?? "")))) { calipers.append(node) }
                 }
                 for node in calipers {
                     let local = simd_inverse(pivot.simdWorldTransform) * node.simdWorldTransform
@@ -440,26 +447,34 @@ final class RacingWorld {
             if index < 2 { frontWheels.append(pivot) }
         }
         importedSteering = model.childNode(withName:"Steering",recursively:true)
-        steeringAxis = SIMD3(0,0,-1)
+        steeringAxis = vehicleKind == .centenario ? simd_normalize(SIMD3(0,0.31,-0.95)) : SIMD3(0,0,-1)
         if vehicleKind.hasSimpleCabin { buildSimpleCabin() }
         steeringBase = importedSteering?.simdTransform ?? matrix_identity_float4x4
-        // Functional display sits on the dashboard; the exterior model stays intact.
-        let display = SCNPlane(width:0.19,height:0.07)
-        instrumentMaterial.lightingModel = .constant; display.materials = [instrumentMaterial]
-        let instrument = SCNNode(geometry:display); instrument.name = "LiveInstrumentDisplay"
-        switch vehicleKind {
-        case .ferrari: instrument.position = SCNVector3(0.345,0.84,0.69)
-        case .mazda:
-            instrument.position = SCNVector3(0.345,0.815,0.380)
-            let housing = box(0.205,0.082,0.025,at:SCNVector3(0.345,0.815,0.394),
-                              material:material(NSColor(rgb:0x202326)),parent:body,chamfer:0.003)
-            housing.name = "InstrumentHousing"
-        default: instrument.position = SCNVector3(-0.25,0.73,0.65)
+        if vehicleKind != .centenario {
+            // Functional display sits on the dashboard; the exterior model stays intact.
+            let display = SCNPlane(width:0.19,height:0.07)
+            instrumentMaterial.lightingModel = .constant; display.materials = [instrumentMaterial]
+            let instrument = SCNNode(geometry:display); instrument.name = "LiveInstrumentDisplay"
+            switch vehicleKind {
+            case .ferrari: instrument.position = SCNVector3(0.345,0.84,0.69)
+            case .mazda:
+                instrument.position = SCNVector3(0.345,0.815,0.380)
+                let housing = box(0.205,0.082,0.025,at:SCNVector3(0.345,0.815,0.394),
+                                  material:material(NSColor(rgb:0x202326)),parent:body,chamfer:0.003)
+                housing.name = "InstrumentHousing"
+            default: instrument.position = SCNVector3(-0.25,0.73,0.65)
+            }
+            instrument.eulerAngles.y = .pi; body.addChildNode(instrument)
         }
-        instrument.eulerAngles.y = .pi; body.addChildNode(instrument)
         model.enumerateChildNodes { node, _ in
             guard let geometry = node.geometry,
-                  geometry.materials.contains(where:{ ["Body_Color","paint"].contains($0.name ?? "") }),
+                  geometry.materials.contains(where: {
+                    let name = $0.name ?? ""
+                    if self.vehicleKind == .centenario {
+                        return ["Object_64","Object_76","Object_92","Object_93","Object_95"].contains(node.parent?.name ?? "")
+                    }
+                    return ["Body_Color","paint"].contains(name)
+                  }),
                   let source = geometry.sources(for:.vertex).first, source.bytesPerComponent == 4 else { return }
             let vertices = source.data.withUnsafeBytes { data in
                 (0..<source.vectorCount).map { i -> SIMD3<Float> in
@@ -655,7 +670,7 @@ final class RacingWorld {
         seatNodes.forEach { $0.isHidden = mode.isInterior }
         importedSteering?.isHidden = mode == .dashboard
         instrumentClock += dt
-        if instrumentClock > 0.08 { instrumentClock = 0; updateInstrument(vehicle) }
+        if instrumentClock > 0.08 && vehicleKind != .centenario { instrumentClock = 0; updateInstrument(vehicle) }
         car.eulerAngles.y = CGFloat(vehicle.heading)
         body.position.y = CGFloat(vehicle.heave)
         body.eulerAngles.z = CGFloat(vehicle.roll)
@@ -699,6 +714,11 @@ final class RacingWorld {
             if mode == .cockpit && vehicleKind == .mazda {
                 longitudinal = -0.24
                 height = seatHeight - 0.06
+            }
+            if vehicleKind == .centenario && mode.isInterior {
+                lateral = 0.355
+                height = seatHeight - 0.065
+                longitudinal = mode == .cockpit ? -0.15 : 0.20
             }
             if mode == .bonnet { longitudinal = 1.25; lateral = 0; height = 1.10 }
             if mode == .bumper { longitudinal = 2.6; lateral = 0; height = 0.42 }

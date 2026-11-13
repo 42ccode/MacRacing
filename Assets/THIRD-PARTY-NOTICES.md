@@ -53,3 +53,7 @@ Both models are decoded and adapted for the native renderer, with normalized tra
 ## Additional vehicles (1.8)
 
 BMW M3 E30 by Martin Trafas and Mazda Miata MX-5 by Black Snow, each under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Original model links, distribution sources, hashes and modifications are in [Vehicles/README.md](Vehicles/README.md).
+
+## Lamborghini Centenario LP-770
+
+Model and textures by **SDC PERFORMANCE™️**, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). [Original model and author attribution](https://sketchfab.com/3d-models/lamborghini-centenario-lp-770-interior-sdc-d679af35b5694301a185c7454a700c73) · [Archive and adaptation details](Vehicles/README.md).

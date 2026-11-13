@@ -584,7 +584,7 @@ final class HUDView: NSView {
         diamond.fill()
         text("APEX", x: 72, y: 20, size: 29, weight: .black)
         text("/ LAB", x: 162, y: 28, size: 18, color: muted, weight: .light)
-        text("原生驾驶实验室    /    CIRCUIT TEST  1.12", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
+        text("原生驾驶实验室    /    CIRCUIT TEST  1.13", x: 31, y: 63, size: 10, color: white.withAlphaComponent(0.7), weight: .medium)
 
         let connected = game.input.controller != nil
         let status = connected ? "●  XBOX / 手柄已连接" : "○  手柄未连接 · 可用键盘"

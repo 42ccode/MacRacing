@@ -5,9 +5,12 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 base = Path(__file__).resolve().parents[1]
 app = base / 'dist' / 'APEX Lab.app'
-version = plistlib.loads((app/'Contents/Info.plist').read_bytes())['CFBundleShortVersionString']
+metadata = plistlib.loads((app/'Contents/Info.plist').read_bytes())
+version = metadata['CFBundleShortVersionString']
 release = '.'.join(version.split('.')[:2])
 archive_version = version if version.split('.')[-1] != '0' else release
+if stage := metadata.get('APEXReleaseStage'):
+    archive_version = f'{archive_version}-{stage}'
 root = f'APEX-Lab-{archive_version}'
 archive = base/'dist'/f'{root}-arm64.zip'
 with ZipFile(archive, 'w', compression=ZIP_DEFLATED, compresslevel=5) as out:

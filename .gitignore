@@ -54,5 +54,7 @@ secrets.yml
 *.ips
 *.bak
 practice.json
+practice-before-*.json
 latest-session.csv
+latest-sprint.csv
 driving-view.png

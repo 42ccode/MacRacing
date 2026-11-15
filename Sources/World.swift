@@ -37,18 +37,47 @@ enum DrivingView: Int, CaseIterable, Codable {
     var isInterior: Bool { self == .cockpit || self == .dashboard }
     var isChase: Bool { self == .chase || self == .chaseFar }
     func next(_ delta: Int = 1) -> DrivingView { DrivingView(rawValue:(rawValue + delta + Self.allCases.count) % Self.allCases.count)! }
+
+}
+
+enum VehicleMirror: CaseIterable {
+    case centre, left, right
+
+    var size: (width: Int, height: Int) { self == .centre ? (360,96) : (180,100) }
+}
+
+enum GraphicsQuality: Int, CaseIterable {
+    case performance, balanced, quality
+
+    var title: String {
+        switch self {
+        case .performance: return "性能"
+        case .balanced: return "均衡"
+        case .quality: return "画质"
+        }
+    }
 }
 
 final class RacingWorld {
     let scene = SCNScene()
     let camera = SCNNode()
     let mirrorCamera = SCNNode()
+    private let leftMirrorCamera = SCNNode()
+    private let rightMirrorCamera = SCNNode()
+    private struct MirrorSurface {
+        let material: SCNMaterial
+        let original: SCNMaterial
+        let centre: SIMD3<Float>
+    }
+    private var mirrorSurfaces: [VehicleMirror:MirrorSurface] = [:]
     private static let hiddenFromMirror = 1 << 1
     let car = SCNNode()
     let ghostCar = SCNNode()
     let body = SCNNode()
     let steeringWheel = SCNNode()
     private let sunlight = SCNNode()
+    private var appliedGraphicsQuality = GraphicsQuality.quality
+    private let cabinFill = SCNNode()
     var frontWheels: [SCNNode] = []
     var rollingWheels: [SCNNode] = []
     private struct DamageMesh {
@@ -60,17 +89,39 @@ final class RacingWorld {
     private var damageMeshes: [DamageMesh] = []
     private var renderedDamage = SIMD2<Double>.zero
     private var brakeLights: [SCNMaterial] = []
+    private var brakeLampOn: Bool?
+    private var presentedView: DrivingView?
     private var cameraPosition = SIMD3<Float>.zero
     private var cameraReady = false
     private var chaseYaw = 0.0
+    private var gazePitch = 0.0
     private struct OpponentVisual {
         let root: SCNNode
         let body: SCNNode?
         let steer: [SCNNode]
         let roll: [SCNNode]
+        let brakeLights: [SCNMaterial]
+        var brakeLampOn: Bool?
     }
     private var opponentTemplate: SCNNode?
     private var opponentVisuals: [OpponentVisual] = []
+    private let sprayRoot = SCNNode()
+    private struct SprayEmitter {
+        let node: SCNNode
+        let system: SCNParticleSystem
+        var birthRate = 0.0
+        var category = 1
+    }
+    private var sprayEmitters: [SprayEmitter] = []
+    private let tyreMarkNode = SCNNode()
+    private var tyreMarkClock = 0.0
+    private var tyreMarkDirty = false
+    private var previousMarkPoints: [SIMD2<Double>?] = Array(repeating:nil,count:4)
+    private var tyreMarks: [TyreMark] = []
+    private struct TyreMark {
+        let start: SIMD2<Double>
+        let end: SIMD2<Double>
+    }
     private var wheelPivots: [SCNNode] = []
     private var wheelBaseHeights: [CGFloat] = []
     private var importedSteering: SCNNode?
@@ -78,13 +129,11 @@ final class RacingWorld {
     private let assetsDirectory: URL
     private var glassNodes: [SCNNode] = []
     private var seatNodes: [SCNNode] = []
-    private let instrumentMaterial = SCNMaterial()
-    private var instrumentClock = 1.0
+    private var glanceAngle = 0.0
     var cockpitFOV: CGFloat = 62
     var seatHeight: Double = 1.00
     var sideLook = 0.0
     private(set) var vehicleKind = VehicleKind.concept
-    private var gaugeNeedles: [SCNNode] = []
     private var contactShadows: [SCNNode] = []
     private var steeringAxis = SIMD3<Float>(0,1,0)
 
@@ -112,6 +161,11 @@ final class RacingWorld {
         scene.fogStartDistance = 380
         scene.fogEndDistance = 1700
         scene.lightingEnvironment.intensity = 0.85
+        if circuit.condition == .wet {
+            scene.lightingEnvironment.intensity = 0.65
+            scene.fogStartDistance = 180
+            scene.fogEndDistance = 1050
+        }
 
         let ambient = SCNNode()
         ambient.light = SCNLight()
@@ -119,11 +173,18 @@ final class RacingWorld {
         ambient.light!.color = NSColor(rgb: 0xD7E4ED)
         ambient.light!.intensity = 28
         scene.rootNode.addChildNode(ambient)
+        cabinFill.light = SCNLight()
+        cabinFill.light?.type = .ambient
+        cabinFill.light?.color = NSColor(rgb: 0xD1DCE3)
+        cabinFill.light?.intensity = 0
+        cabinFill.light?.categoryBitMask = Self.hiddenFromMirror
+        scene.rootNode.addChildNode(cabinFill)
         let sun = sunlight
+        sun.name = "Sunlight"
         sun.light = SCNLight()
         sun.light!.type = .directional
         sun.light!.color = NSColor(rgb: 0xFFF9F0)
-        sun.light!.intensity = 900
+        sun.light!.intensity = circuit.condition == .wet ? 570 : 900
         sun.light!.castsShadow = true
         sun.light!.shadowMode = .deferred
         sun.light!.shadowColor = NSColor.black.withAlphaComponent(0.50)
@@ -135,9 +196,13 @@ final class RacingWorld {
         sun.light!.shadowCascadeCount = 3
         sun.eulerAngles = SCNVector3(-0.8, -0.6, 0)
         scene.rootNode.addChildNode(sun)
+        if circuit.condition == .wet {
+            sprayRoot.name = "TyreSpray"
+            scene.rootNode.addChildNode(sprayRoot)
+        }
 
         TrackEnvironment(scene: scene, circuit: circuit, assets: self.assetsDirectory).build()
-        buildCar(); buildContactShadows(); prepareOpponentTemplate()
+        buildCar(); bindMirrors(); buildContactShadows(); prepareOpponentTemplate()
         racingLineNode.name="PracticeRacingLine";scene.rootNode.addChildNode(racingLineNode)
         racingLineNode.categoryBitMask = Self.hiddenFromMirror
 
@@ -158,23 +223,42 @@ final class RacingWorld {
         camera.camera!.bloomThreshold = 1.3
         scene.rootNode.addChildNode(camera)
 
-        let rearView = SCNCamera()
-        rearView.fieldOfView = 25
-        rearView.zNear = 0.14
-        rearView.zFar = 440
-        rearView.categoryBitMask = ~Self.hiddenFromMirror
-        mirrorCamera.camera = rearView
-        scene.rootNode.addChildNode(mirrorCamera)
+        for mirror in VehicleMirror.allCases {
+            let node = camera(for:mirror)
+            let rearView = SCNCamera()
+            rearView.fieldOfView = mirror == .centre ? 58 : 34
+            rearView.projectionDirection = .horizontal
+            rearView.zNear = 0.18
+            rearView.zFar = mirror == .centre ? 440 : 170
+            rearView.categoryBitMask = ~Self.hiddenFromMirror
+            node.camera = rearView
+            scene.rootNode.addChildNode(node)
+        }
     }
 
-    private func box(_ width: CGFloat, _ height: CGFloat, _ length: CGFloat, at position: SCNVector3,
-                     material: SCNMaterial, parent: SCNNode? = nil, chamfer: CGFloat = 0) -> SCNNode {
-        let shape = SCNBox(width: width, height: height, length: length, chamferRadius: chamfer)
-        shape.materials = [material]
-        let node = SCNNode(geometry: shape)
-        node.position = position
-        (parent ?? scene.rootNode).addChildNode(node)
-        return node
+    func applyGraphicsQuality(_ quality: GraphicsQuality) {
+        guard quality != appliedGraphicsQuality,let sun = sunlight.light,let view = camera.camera else { return }
+        appliedGraphicsQuality = quality
+        switch quality {
+        case .performance:
+            sun.shadowMapSize = CGSize(width:1024,height:1024)
+            sun.shadowCascadeCount = 1
+            sun.maximumShadowDistance = 65
+            sun.shadowSampleCount = 2
+            view.screenSpaceAmbientOcclusionIntensity = 0
+        case .balanced:
+            sun.shadowMapSize = CGSize(width:2048,height:2048)
+            sun.shadowCascadeCount = 2
+            sun.maximumShadowDistance = 82
+            sun.shadowSampleCount = 4
+            view.screenSpaceAmbientOcclusionIntensity = 0.55
+        case .quality:
+            sun.shadowMapSize = CGSize(width:4096,height:4096)
+            sun.shadowCascadeCount = 3
+            sun.maximumShadowDistance = 100
+            sun.shadowSampleCount = 8
+            view.screenSpaceAmbientOcclusionIntensity = 1
+        }
     }
 
     func selectVehicle(_ kind: VehicleKind) {
@@ -184,11 +268,13 @@ final class RacingWorld {
         ghostCar.childNodes.forEach { $0.removeFromParentNode() }
         body.transform = SCNMatrix4Identity
         frontWheels = []; rollingWheels = []; wheelPivots = []; wheelBaseHeights = []
-        damageMeshes = []; glassNodes = []; seatNodes = []; brakeLights = []
-        gaugeNeedles = []; contactShadows = []
+        damageMeshes = []; glassNodes = []; seatNodes = []; brakeLights = []; mirrorSurfaces = [:]
+        brakeLampOn = nil
+        presentedView = nil
+        contactShadows = []
         importedSteering = nil; renderedDamage = .zero; steeringAxis = SIMD3(0,1,0)
-        instrumentClock = 1; vehicleKind = kind
-        buildCar(); buildContactShadows(); prepareOpponentTemplate(); resetCamera()
+        vehicleKind = kind
+        buildCar(); bindMirrors(); buildContactShadows(); prepareOpponentTemplate(); resetCamera()
     }
 
     private func prepareOpponentTemplate() {
@@ -201,13 +287,130 @@ final class RacingWorld {
         }
         let template = car.clone()
         template.transform = SCNMatrix4Identity
-        template.childNode(withName: "LiveInstrumentDisplay", recursively: true)?.removeFromParentNode()
         template.categoryBitMask = 1
-        template.enumerateChildNodes { node, _ in node.categoryBitMask = 1 }
+        template.enumerateChildNodes { node, _ in
+            node.categoryBitMask = 1
+            guard let surface = self.mirrorSurfaces.values.first(where: { $0.material === node.geometry?.firstMaterial }),
+                  let geometry = node.geometry?.copy() as? SCNGeometry else { return }
+            geometry.firstMaterial = surface.original
+            node.geometry = geometry
+        }
         opponentTemplate = template
         for root in [car, ghostCar] {
             root.categoryBitMask = Self.hiddenFromMirror
             root.enumerateChildNodes { node, _ in node.categoryBitMask = Self.hiddenFromMirror }
+        }
+    }
+
+    func camera(for mirror: VehicleMirror) -> SCNNode {
+        switch mirror {
+        case .centre: return mirrorCamera
+        case .left: return leftMirrorCamera
+        case .right: return rightMirrorCamera
+        }
+    }
+
+    func hasMirror(_ mirror: VehicleMirror) -> Bool { mirrorSurfaces[mirror] != nil }
+    func mirrorHasImage(_ mirror: VehicleMirror) -> Bool {
+        guard let contents = mirrorSurfaces[mirror]?.material.diffuse.contents else { return false }
+        return !(contents is NSColor)
+    }
+
+    func setMirrorImage(_ image: CGImage?, for mirror: VehicleMirror) {
+        guard let surface = mirrorSurfaces[mirror] else { return }
+        surface.material.diffuse.contents = image as Any? ?? NSColor(rgb:0x46505A)
+    }
+
+    private func bindMirrors() {
+        var meshes: [SCNNode] = []
+        body.enumerateChildNodes { node, _ in if node.geometry != nil { meshes.append(node) } }
+        for node in meshes {
+            guard let geometry = node.geometry, let original = geometry.firstMaterial else { continue }
+            let name = node.parent?.name ?? ""
+            let material = original.name ?? ""
+            let region: (SIMD3<Float>) -> Bool
+            switch (vehicleKind,name,material) {
+            case (.concept,_, "Mirror"), (_,_, "AuthoredMirrorGlass"), (.bmw,_, "mirror"),
+                 (.centenario,"Object_65","material_30"), (.centenario,"Object_77","material_30"):
+                region = { _ in true }
+            case (.ferrari,"chrome","metal_chrome"):
+                region = { p in
+                    (abs(p.x) > 0.943 && (0.804...0.919).contains(p.y) && (0.548...0.636).contains(p.z)) ||
+                    (abs(p.x) < 0.13 && (1.061...1.122).contains(p.y) && (0.438...0.475).contains(p.z))
+                }
+            default: continue
+            }
+            bindMirrorFaces(on:node,geometry:geometry,original:original,region:region)
+        }
+    }
+
+    private func bindMirrorFaces(on node: SCNNode,geometry: SCNGeometry,original: SCNMaterial,
+                                 region: (SIMD3<Float>) -> Bool) {
+        guard let source = geometry.sources(for:.vertex).first, source.bytesPerComponent == 4,
+              let element = geometry.elements.first, element.primitiveType == .triangles else { return }
+        let points = source.data.withUnsafeBytes { bytes in
+            (0..<source.vectorCount).map { i -> SIMD3<Float> in
+                let p = source.dataOffset+i*source.dataStride
+                let xyz = SIMD3(bytes.loadUnaligned(fromByteOffset:p,as:Float.self),
+                                bytes.loadUnaligned(fromByteOffset:p+4,as:Float.self),
+                                bytes.loadUnaligned(fromByteOffset:p+8,as:Float.self))
+                return node.simdConvertPosition(xyz,to:body)
+            }
+        }
+        let indices = element.data.withUnsafeBytes { bytes in
+            (0..<element.primitiveCount*3).map { index -> UInt32 in
+                let p = index*element.bytesPerIndex
+                switch element.bytesPerIndex {
+                case 1: return UInt32(bytes[p])
+                case 2: return UInt32(bytes.loadUnaligned(fromByteOffset:p,as:UInt16.self))
+                default: return bytes.loadUnaligned(fromByteOffset:p,as:UInt32.self)
+                }
+            }
+        }
+        var remaining: [UInt32] = []
+        var surfaces: [VehicleMirror:[UInt32]] = [:]
+        for offset in stride(from:0,to:indices.count,by:3) {
+            let triangle = indices[offset..<(offset+3)]
+            let a = points[Int(indices[offset])]
+            let b = points[Int(indices[offset+1])]
+            let c = points[Int(indices[offset+2])]
+            let normal = simd_cross(b-a,c-a)
+            let exposed = vehicleKind != .bmw || normal.z < -0.30*simd_length(normal)
+            if exposed && triangle.allSatisfy({ region(points[Int($0)]) }) {
+                let x = points[Int(indices[offset])].x
+                let mirror: VehicleMirror = abs(x) < 0.35 ? .centre : (x > 0 ? .left : .right)
+                surfaces[mirror,default:[]].append(contentsOf:triangle)
+            } else {
+                remaining.append(contentsOf:triangle)
+            }
+        }
+        guard !surfaces.isEmpty else { return }
+        let originalSources = [.vertex,.normal,.tangent,.texcoord].flatMap { geometry.sources(for:$0) }
+        node.geometry = remaining.isEmpty ? nil : SCNGeometry(sources:originalSources,
+            elements:[SCNGeometryElement(indices:remaining,primitiveType:.triangles)])
+        node.geometry?.firstMaterial = original
+        for (mirror,faces) in surfaces {
+            let vertices = Set(faces).map { points[Int($0)] }
+            let low = vertices.reduce(SIMD3<Float>(repeating:.infinity),simd_min)
+            let high = vertices.reduce(SIMD3<Float>(repeating:-.infinity),simd_max)
+            let texcoords = points.map { point in
+                CGPoint(x:CGFloat((point.x-low.x)/max(0.001,high.x-low.x)),
+                        y:CGFloat((high.y-point.y)/max(0.001,high.y-low.y)))
+            }
+            let glass = SCNGeometry(sources:[source,SCNGeometrySource(textureCoordinates:texcoords)],
+                                   elements:[SCNGeometryElement(indices:faces,primitiveType:.triangles)])
+            let existing = mirrorSurfaces[mirror]
+            let material = existing?.material ?? SCNMaterial()
+            material.name = "LiveMirror"
+            material.lightingModel = .constant
+            material.isDoubleSided = original.isDoubleSided
+            glass.firstMaterial = material
+            let face = SCNNode(geometry:glass)
+            face.name = "VehicleMirror-\(mirror)"
+            face.castsShadow = false
+            node.addChildNode(face)
+            mirrorSurfaces[mirror] = MirrorSurface(material:material,original:original,centre:(low+high)/2)
+            setMirrorImage(nil,for:mirror)
         }
     }
 
@@ -218,10 +421,11 @@ final class RacingWorld {
         guard let template = opponentTemplate else { return }
         let paintColors: [UInt32] = [0x2966A1, 0xDB8E27, 0x438269]
         let paintNames = ["Body_Color", "paint", "Paint 1 Carmine"]
-        let lightNames = ["Brakelight", "Taillight_Glass"]
+        let lightNames = ["Brakelight", "Taillight_Glass", "LIGT_RED", "SourcedBrakeLamp"]
         while opponentVisuals.count < vehicles.count {
             let index = opponentVisuals.count
             let root = template.clone()
+            var opponentBrakeLights: [SCNMaterial] = []
             root.name = "ComputerCar\(index+1)"
             root.enumerateChildNodes { node, _ in
                 guard let geometry = node.geometry,
@@ -232,7 +436,10 @@ final class RacingWorld {
                     guard (paintNames.contains(name) || lightNames.contains(name)),
                           let material = original.copy() as? SCNMaterial else { return original }
                     if paintNames.contains(name) {material.diffuse.contents = NSColor(rgb: paintColors[index % paintColors.count])}
-                    else {material.emission.contents = NSColor(rgb: 0x2A0504)}
+                    else {
+                        material.emission.contents = NSColor(rgb: 0x2A0504)
+                        opponentBrakeLights.append(material)
+                    }
                     return material
                 }
                 node.geometry = copy
@@ -240,14 +447,22 @@ final class RacingWorld {
             scene.rootNode.addChildNode(root)
             let steer = wheelPivots.indices.compactMap { root.childNode(withName: "TrafficSteer\($0)", recursively: false) }
             let roll = wheelPivots.indices.compactMap { root.childNode(withName: "TrafficRoll\($0)", recursively: true) }
-            opponentVisuals.append(OpponentVisual(root: root, body: root.childNode(withName: "TrafficBody", recursively: false), steer: steer, roll: roll))
+            opponentVisuals.append(OpponentVisual(root:root,body:root.childNode(withName:"TrafficBody",recursively:false),
+                                                  steer:steer,roll:roll,brakeLights:opponentBrakeLights))
         }
-        for (visual, vehicle) in zip(opponentVisuals, vehicles) {
-            visual.root.position = vector(vehicle.position)
+        for index in vehicles.indices {
+            let visual = opponentVisuals[index], vehicle = vehicles[index]
+            visual.root.position = vector(vehicle.position,y:roadElevation(of:vehicle))
             visual.root.eulerAngles.y = CGFloat(vehicle.heading)
             visual.body?.position.y = CGFloat(vehicle.heave)
             visual.body?.eulerAngles.x = CGFloat(-vehicle.pitch)
             visual.body?.eulerAngles.z = CGFloat(vehicle.roll)
+            let braking = vehicle.brakeLightsActive
+            if braking != visual.brakeLampOn {
+                opponentVisuals[index].brakeLampOn = braking
+                let brakeColor = Self.brakeColor(braking)
+                visual.brakeLights.forEach { $0.emission.contents = brakeColor }
+            }
             for index in visual.steer.indices {
                 visual.steer[index].eulerAngles.y = CGFloat(vehicle.wheelSteer(index))
                 visual.steer[index].position.y = wheelBaseHeights[index] + CGFloat(vehicle.wheels[index].surfaceHeight)
@@ -257,6 +472,181 @@ final class RacingWorld {
             }
         }
     }
+
+    private static let brakeOnColor = NSColor(rgb:0xFF3328)
+    private static let brakeOffColor = NSColor(rgb:0x2A0504)
+
+    private static func brakeColor(_ active: Bool) -> NSColor {
+        active ? brakeOnColor : brakeOffColor
+    }
+
+    private static let tyreMarkMaterial: SCNMaterial = {
+        let ink = NSColor(rgb:0x18191A,alpha:0.62)
+        let texture = NSImage(size:NSSize(width:32,height:8))
+        texture.lockFocus()
+        NSGradient(colorsAndLocations:(.clear,0),(ink,0.33),(ink,0.67),(.clear,1))?
+            .draw(in:NSRect(x:0,y:0,width:32,height:8),angle:0)
+        texture.unlockFocus()
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = texture
+        material.isDoubleSided = true
+        material.writesToDepthBuffer = false
+        return material
+    }()
+
+    func breakTyreMarkStreaks() {
+        previousMarkPoints = Array(repeating:nil,count:4)
+    }
+
+    func clearTyreMarks() {
+        breakTyreMarkStreaks()
+        tyreMarks.removeAll(keepingCapacity:true)
+        tyreMarkNode.geometry = nil
+        tyreMarkClock = 0
+        tyreMarkDirty = false
+    }
+
+    func updateTyreMarks(vehicle: Vehicle,dt: Double) {
+        guard dt > 0, circuit.condition == .dry else { return }
+        let speed = vehicle.speed
+        let rollingDirection = vehicle.forwardSpeed < 0 ? -1.0 : 1.0
+        func leavesMark(_ tyre: WheelState) -> Bool {
+            guard tyre.surface == .asphalt, tyre.normalLoad > 700 else { return false }
+            return -tyre.slipRatio*rollingDirection > 0.68 ||
+                (abs(tyre.relaxedSlipAngle) > 0.25 && tyre.gripUsage > 0.90)
+        }
+        if speed > 4 && vehicle.wheels.contains(where:leavesMark) {
+            let points = vehicle.contactPoints
+            for index in points.indices {
+                guard leavesMark(vehicle.wheels[index]) else {
+                    previousMarkPoints[index] = nil
+                    continue
+                }
+                let point = points[index]
+                if let previous = previousMarkPoints[index] {
+                    let gap = simd_distance(previous,point)
+                    if gap < 0.26 { continue }
+                    if gap < 2.2 &&
+                        circuit.nearest(to:previous).distance < circuit.width/2-0.14 &&
+                        circuit.nearest(to:point).distance < circuit.width/2-0.14 {
+                        tyreMarks.append(TyreMark(start:previous,end:point))
+                        tyreMarkDirty = true
+                    }
+                }
+                previousMarkPoints[index] = point
+            }
+        } else {
+            breakTyreMarkStreaks()
+        }
+        if tyreMarks.count > 400 { tyreMarks.removeFirst(tyreMarks.count-400) }
+        guard tyreMarkDirty else { return }
+        tyreMarkClock += dt
+        guard tyreMarkClock >= 0.10 else { return }
+        tyreMarkClock = 0
+        tyreMarkDirty = false
+        redrawTyreMarks()
+    }
+
+    private func redrawTyreMarks() {
+        var vertices: [SCNVector3] = []
+        var texcoords: [CGPoint] = []
+        var indices: [UInt32] = []
+        vertices.reserveCapacity(tyreMarks.count*4)
+        texcoords.reserveCapacity(tyreMarks.count*4)
+        indices.reserveCapacity(tyreMarks.count*6)
+        for mark in tyreMarks {
+            let direction = simd_normalize(mark.end-mark.start)
+            let halfWidth = SIMD2(direction.y,-direction.x)*0.105
+            let first = UInt32(vertices.count)
+            for point in [mark.start-halfWidth,mark.start+halfWidth,mark.end-halfWidth,mark.end+halfWidth] {
+                vertices.append(vector(point,y:elevation(at:point)+0.043))
+            }
+            texcoords.append(contentsOf:[CGPoint(x:0,y:0),CGPoint(x:1,y:0),CGPoint(x:0,y:1),CGPoint(x:1,y:1)])
+            indices.append(contentsOf:[first,first+2,first+1,first+1,first+2,first+3])
+        }
+        let geometry = SCNGeometry(sources:[SCNGeometrySource(vertices:vertices),SCNGeometrySource(textureCoordinates:texcoords)],
+                                   elements:[SCNGeometryElement(indices:indices,primitiveType:.triangles)])
+        geometry.materials = [Self.tyreMarkMaterial]
+        tyreMarkNode.geometry = geometry
+        if tyreMarkNode.parent == nil {
+            tyreMarkNode.name = "TyreMarks"
+            tyreMarkNode.renderingOrder = 3
+            tyreMarkNode.castsShadow = false
+            scene.rootNode.addChildNode(tyreMarkNode)
+        }
+    }
+
+    func updateSpray(player: Vehicle, opponents: [Vehicle], cockpit: Bool, active: Bool) {
+        guard circuit.condition == .wet else { return }
+        let vehicles = [player] + opponents
+        let count = vehicles.count * 2
+        while sprayEmitters.count > count { sprayEmitters.removeLast().node.removeFromParentNode() }
+        while sprayEmitters.count < count {
+            let node = SCNNode()
+            let particles = SCNParticleSystem()
+            particles.birthRate = 0
+            particles.particleLifeSpan = 0.42
+            particles.particleLifeSpanVariation = 0.14
+            particles.particleVelocity = 2.3
+            particles.particleVelocityVariation = 1.1
+            particles.particleSize = 0.28
+            particles.particleSizeVariation = 0.12
+            particles.emittingDirection = SCNVector3(0,0.33,-1)
+            particles.spreadingAngle = 29
+            particles.acceleration = SCNVector3(0,-0.7,0)
+            particles.blendMode = .alpha
+            particles.particleColor = NSColor(rgb:0xCBD5DB,alpha:0.16)
+            particles.particleImage = Self.sprayTexture
+            particles.isLocal = false
+            node.addParticleSystem(particles)
+            sprayRoot.addChildNode(node)
+            sprayEmitters.append(SprayEmitter(node:node,system:particles))
+        }
+        for (index, vehicle) in vehicles.enumerated() {
+            let distance = simd_distance(player.position,vehicle.position)
+            let detail = clamp((140-distance)/72,0,1)
+            let visibility = active ? detail*detail*(3-2*detail) : 0
+            let forward = vehicle.forward
+            let rear = vehicle.position-forward*(vehicle.wheelbase-vehicle.kind.frontAxle+0.18)
+            let across = vehicle.modelX*(vehicle.trackWidth/2)
+            let height = 0.13+roadElevation(of:vehicle)
+            for side in 0..<2 {
+                let slot = index*2+side
+                let emitter = sprayEmitters[slot]
+                let rate = vehicle.wheels[side+2].spray*95*visibility
+                if rate > 0.25 {
+                    let contact = rear + (side == 0 ? -across : across)
+                    emitter.node.position = vector(contact,y:height+vehicle.wheels[side+2].surfaceHeight)
+                    emitter.node.eulerAngles.y = CGFloat(vehicle.heading)
+                    let category = index == 0 && !cockpit ? Self.hiddenFromMirror : 1
+                    if emitter.category != category {
+                        sprayEmitters[slot].category = category
+                        emitter.node.categoryBitMask = category
+                    }
+                    if abs(rate-emitter.birthRate) > 0.65 {
+                        sprayEmitters[slot].birthRate = rate
+                        emitter.system.birthRate = CGFloat(rate)
+                    }
+                } else if emitter.birthRate != 0 {
+                    sprayEmitters[slot].birthRate = 0
+                    emitter.system.birthRate = 0
+                }
+            }
+        }
+    }
+
+    private static let sprayTexture: NSImage = {
+        let size = NSSize(width:32,height:32)
+        let image = NSImage(size:size)
+        image.lockFocus()
+        let gradient = NSGradient(colors:[.white,NSColor.white.withAlphaComponent(0.22),.clear],
+                                  atLocations:[0,0.5,0.92],colorSpace:.deviceRGB)
+        let centre = NSPoint(x:16,y:16)
+        gradient?.draw(fromCenter:centre,radius:0,toCenter:centre,radius:16,options:[])
+        image.unlockFocus()
+        return image
+    }()
 
     private func buildCar() {
         if vehicleKind != .concept { buildProductionCar(); return }
@@ -325,19 +715,6 @@ final class RacingWorld {
                 if m.name == "Glass" { self.glassNodes.append(node) }
             }
         }
-        // The source model's screen is a static demonstration texture.
-        top.childNode(withName: "InteriorSteeringDash", recursively: true)?.isHidden = true
-        let bezel = material(NSColor(rgb: 0x101719), roughness: 0.6)
-        _ = box(0.34, 0.14, 0.025, at: SCNVector3(0, 0.83, 1.055), material: bezel, parent: body, chamfer: 0.012)
-        let display = SCNPlane(width: 0.32, height: 0.12)
-        instrumentMaterial.lightingModel = .constant
-        display.materials = [instrumentMaterial]
-        let displayNode = SCNNode(geometry: display)
-        displayNode.name = "LiveInstrumentDisplay"
-        displayNode.position = SCNVector3(0, 0.83, 1.039)
-        displayNode.eulerAngles.y = .pi
-        body.addChildNode(displayNode)
-        buildRearWing()
         let deformable: Set<String> = ["BodyHood", "BodyHoodTopgrill", "BodyPanelsColor2",
             "BodyRearPanelsColor1", "BodyHeadlights", "BodyTaillightsPanels", "BodyTaillights"]
         model.enumerateChildNodes { node, _ in
@@ -376,11 +753,18 @@ final class RacingWorld {
         guard let url = assetURL("Vehicles/\(file).glb"), let asset = try? GLTFAsset(url:url),
               let model = try? asset.makeScene() else { fatalError("Missing bundled vehicle: \(file)") }
         body.addChildNode(model)
-        let paint = ([1: 0x951B16, 2: 0x66777E, 3: 0xB4B7BD, 4: 0x244E69] as [Int: UInt32])[vehicleKind.rawValue]
+        let paint = ([1: 0x951B16] as [Int: UInt32])[vehicleKind.rawValue]
         model.enumerateChildNodes { node, _ in
             for m in node.geometry?.materials ?? [] {
                 if self.vehicleKind == .centenario {
-                    if m.name == "material_31" { self.glassNodes.append(node) }
+                    if m.name == "material_31" {
+                        m.diffuse.contents = NSColor(rgb:0x26313B)
+                        m.transparency = 0.30
+                        m.metalness.contents = 0.03
+                        m.roughness.contents = 0.12
+                        m.clearCoat.contents = 0.24
+                        self.glassNodes.append(node)
+                    }
                     if m.name == "LIGT_RED" { self.brakeLights.append(m) }
                     continue
                 }
@@ -388,36 +772,42 @@ final class RacingWorld {
                 case "Body_Color", "paint":
                     if let paint { m.diffuse.contents = NSColor(rgb: paint) }
                     m.multiply.contents = NSColor.white
-                    m.metalness.contents = 0.12; m.roughness.contents = 0.32
-                    m.clearCoat.contents = 0.55; m.clearCoatRoughness.contents = 0.18
+                    m.metalness.contents = 0.05; m.roughness.contents = 0.28
+                    m.clearCoat.contents = 0.72; m.clearCoatRoughness.contents = 0.17
                 case "Tires", "rubber":
                     m.diffuse.contents = NSColor(rgb:0x1A1B1C); m.metalness.contents = 0
                     m.roughness.contents = 0.96
-                case "Glass_Gray", "window":
-                    m.diffuse.contents = NSColor(rgb:0x243137); m.metalness.contents = 0.0
-                    m.roughness.contents = 0.16; m.transparency = 0.45
+                case "Glass_Gray", "window", "CockpitWindow":
+                    m.diffuse.contents = NSColor(rgb:0x34434D); m.metalness.contents = 0.0
+                    m.roughness.contents = 0.16; m.transparency = 0.29
                     m.clearCoat.contents = 0.12; m.clearCoatRoughness.contents = 0.15
                     m.transparencyMode = .aOne; m.writesToDepthBuffer = false
                     self.glassNodes.append(node)
                 case "InteriorBlocker": self.glassNodes.append(node)
-                case "RLA_miata_seats": self.seatNodes.append(node)
                 case "RLA_miata_alcantara":
                     m.diffuse.contents = NSColor(rgb:0x27292A)
                     m.metalness.contents = 0; m.roughness.contents = 0.94
                     m.normal.intensity = 0.25
                 case "Leather_red", "Leather", "Interior_dark", "Interior_light", "Carpet", "Carbon_Fiber", "plastic_gray":
-                    m.diffuse.contents = NSColor(rgb:0x202225); m.metalness.contents = 0
-                    m.roughness.contents = 0.85
+                    if m.name == "Carbon_Fiber" {
+                        m.metalness.contents = 0.12; m.roughness.contents = 0.62
+                    } else {
+                        m.metalness.contents = 0; m.roughness.contents = 0.86
+                        if m.name != "Leather_red" {
+                            m.diffuse.contents = NSColor(rgb:m.name == "Interior_light" ? 0x3B3C40 : 0x28292D)
+                        }
+                    }
                 case "silver", "metal_chrome", "metal_gray":
-                    m.diffuse.contents = NSColor(rgb:0x9B9C9D); m.metalness.contents = 0.85
-                    m.roughness.contents = 0.28
+                    let brushed = self.vehicleKind == .ferrari && m.name == "metal_gray"
+                    m.diffuse.contents = NSColor(rgb:brushed ? 0x5A5D61 : 0x9B9C9D)
+                    m.metalness.contents = brushed ? 0.52 : 0.85
+                    m.roughness.contents = brushed ? 0.46 : 0.28
+                case "SourcedBrakeLamp": self.brakeLights.append(m)
                 case "Taillight_Glass":
                     m.diffuse.contents = NSColor(rgb:0x750D08); m.metalness.contents = 0
                     m.roughness.contents = 0.25; self.brakeLights.append(m)
                 case "full_black":
                     m.metalness.contents = 0; m.roughness.contents = 0.95
-                    // The exterior-only Porsche includes opaque cabin filler.
-                    if self.vehicleKind == .porsche { self.seatNodes.append(node) }
                 default: break
                 }
             }
@@ -428,14 +818,15 @@ final class RacingWorld {
             mesh.removeFromParentNode(); mesh.simdPosition = .zero
             let pivot = SCNNode(); pivot.simdPosition = position
             let roll = SCNNode(); roll.addChildNode(mesh); pivot.addChildNode(roll); car.addChildNode(pivot)
-            if vehicleKind == .porsche || vehicleKind == .bmw || vehicleKind == .mazda || vehicleKind == .centenario {
+            if vehicleKind == .bmw || vehicleKind == .centenario {
                 // Calipers belong to the upright: steer with the wheel,
                 // but never spin with the tyre/rim and brake disc.
                 var calipers: [SCNNode] = []
                 mesh.enumerateChildNodes { node, _ in
-                    if (vehicleKind == .porsche && node.geometry?.materials.contains(where: { $0.name == "Material.001" }) == true) ||
-                        (node.geometry != nil && (node.parent?.name == "BrakeCaliperMesh" ||
-                            (vehicleKind == .centenario && ["Object_7","Object_18"].contains(node.parent?.name ?? "")))) { calipers.append(node) }
+                    if node.geometry != nil && (node.parent?.name == "BrakeCaliperMesh" ||
+                        (vehicleKind == .centenario && ["Object_7","Object_18"].contains(node.parent?.name ?? ""))) {
+                        calipers.append(node)
+                    }
                 }
                 for node in calipers {
                     let local = simd_inverse(pivot.simdWorldTransform) * node.simdWorldTransform
@@ -448,24 +839,7 @@ final class RacingWorld {
         }
         importedSteering = model.childNode(withName:"Steering",recursively:true)
         steeringAxis = vehicleKind == .centenario ? simd_normalize(SIMD3(0,0.31,-0.95)) : SIMD3(0,0,-1)
-        if vehicleKind.hasSimpleCabin { buildSimpleCabin() }
         steeringBase = importedSteering?.simdTransform ?? matrix_identity_float4x4
-        if vehicleKind != .centenario {
-            // Functional display sits on the dashboard; the exterior model stays intact.
-            let display = SCNPlane(width:0.19,height:0.07)
-            instrumentMaterial.lightingModel = .constant; display.materials = [instrumentMaterial]
-            let instrument = SCNNode(geometry:display); instrument.name = "LiveInstrumentDisplay"
-            switch vehicleKind {
-            case .ferrari: instrument.position = SCNVector3(0.345,0.84,0.69)
-            case .mazda:
-                instrument.position = SCNVector3(0.345,0.815,0.380)
-                let housing = box(0.205,0.082,0.025,at:SCNVector3(0.345,0.815,0.394),
-                                  material:material(NSColor(rgb:0x202326)),parent:body,chamfer:0.003)
-                housing.name = "InstrumentHousing"
-            default: instrument.position = SCNVector3(-0.25,0.73,0.65)
-            }
-            instrument.eulerAngles.y = .pi; body.addChildNode(instrument)
-        }
         model.enumerateChildNodes { node, _ in
             guard let geometry = node.geometry,
                   geometry.materials.contains(where: {
@@ -473,7 +847,8 @@ final class RacingWorld {
                     if self.vehicleKind == .centenario {
                         return ["Object_64","Object_76","Object_92","Object_93","Object_95"].contains(node.parent?.name ?? "")
                     }
-                    return ["Body_Color","paint"].contains(name)
+                    return ["Body_Color","paint","AuthoredPaint","CAR.carros","CarPaintWhite"].contains(name) ||
+                        (self.vehicleKind == .porsche && node.parent?.name == "Object_8")
                   }),
                   let source = geometry.sources(for:.vertex).first, source.bytesPerComponent == 4 else { return }
             let vertices = source.data.withUnsafeBytes { data in
@@ -491,47 +866,6 @@ final class RacingWorld {
         }
         silhouette.transform = SCNMatrix4Identity
         ghostCar.addChildNode(silhouette); ghostCar.isHidden = true; scene.rootNode.addChildNode(ghostCar)
-    }
-
-    private func buildSimpleCabin() {
-        let trim = material(NSColor(rgb:0x141719),roughness:0.94)
-        _ = box(1.35,0.14,0.31,at:SCNVector3(0,0.73,0.83),material:trim,parent:body,chamfer:0.04)
-        _ = box(1.48,0.08,1.8,at:SCNVector3(0,0.28,-0.05),material:trim,parent:body)
-        _ = box(1.48,0.44,0.18,at:SCNVector3(0,0.49,0.84),material:trim,parent:body,chamfer:0.02)
-        for x: CGFloat in [-0.72,0.72] {
-            _ = box(0.12,0.46,1.7,at:SCNVector3(x,0.51,-0.05),material:trim,parent:body,chamfer:0.025)
-        }
-        let rim = SCNTorus(ringRadius:0.16,pipeRadius:0.016)
-        rim.ringSegmentCount = 64; rim.pipeSegmentCount = 12; rim.materials = [trim]
-        let wheel = SCNNode(); wheel.name = "Steering"
-        wheel.position = SCNVector3(0.345,0.77,0.48)
-        let ring = SCNNode(geometry:rim); ring.eulerAngles.x = .pi/2; wheel.addChildNode(ring)
-        let spoke = material(NSColor(rgb:0x4B5052),metal:0.65,roughness:0.38)
-        _ = box(0.29,0.025,0.02,at:SCNVector3(0,0,0),material:spoke,parent:wheel,chamfer:0.008)
-        _ = box(0.035,0.14,0.02,at:SCNVector3(0,-0.06,0),material:spoke,parent:wheel,chamfer:0.008)
-        _ = box(0.08,0.065,0.035,at:SCNVector3(0,0,-0.008),material:trim,parent:wheel,chamfer:0.016)
-        body.addChildNode(wheel); importedSteering = wheel
-        // Five recessed instruments in the generic Porsche cockpit.
-        let bezel=material(NSColor(rgb:0x41474A),metal:0.7,roughness:0.4)
-        let dial=material(NSColor(rgb:0x070A0B),roughness:0.9)
-        let markings=material(NSColor(rgb:0xC8D1D3),roughness:0.8)
-        let needlePaint=material(NSColor(rgb:0xCF5E36),roughness:0.75)
-        for i in 0..<5 {
-            let r:CGFloat=i==2 ? 0.065 : 0.052
-            let gauge=SCNNode();gauge.name="AnalogGauge\(i)";gauge.position=SCNVector3(0.345+CGFloat(i-2)*0.118,0.84,0.79);body.addChildNode(gauge)
-            let face=SCNCylinder(radius:r,height:0.014);face.radialSegmentCount=48;face.materials=[dial]
-            let plate=SCNNode(geometry:face);plate.eulerAngles.x = .pi/2;gauge.addChildNode(plate)
-            let ring=SCNTorus(ringRadius:r,pipeRadius:0.003);ring.materials=[bezel]
-            let edge=SCNNode(geometry:ring);edge.eulerAngles.x = .pi/2;edge.position.z = -0.009;gauge.addChildNode(edge)
-            for tick in 0..<11 {
-                let angle=CGFloat(-2.35+Double(tick)*0.47),mark=SCNNode()
-                mark.position=SCNVector3(sin(angle)*r*0.8,cos(angle)*r*0.8,-0.012)
-                mark.eulerAngles.z = -angle;gauge.addChildNode(mark)
-                _ = box(0.002,0.008,0.002,at:SCNVector3Zero,material:markings,parent:mark)
-            }
-            let pivot=SCNNode();gauge.addChildNode(pivot);gaugeNeedles.append(pivot)
-            _ = box(0.003,r*0.68,0.002,at:SCNVector3(0,r*0.30,-0.016),material:needlePaint,parent:pivot)
-        }
     }
 
     private func buildContactShadows() {
@@ -575,26 +909,20 @@ final class RacingWorld {
 
     func resetCamera() { cameraReady = false; lineClock = 1 }
 
-    private func buildRearWing() {
-        // Inverted airfoil section, twin brackets fixed to the rear deck.
-        let composite = material(NSColor(rgb:0x23292C),metal:0.15,roughness:0.48)
-        let brackets = material(NSColor(rgb:0x4B5053),metal:0.7,roughness:0.46)
-        let wing = SCNNode(); wing.name = "ClubRearWing"; body.addChildNode(wing)
-        for x: CGFloat in [-0.48,0.48] {
-            _ = box(0.11,0.035,0.25,at:SCNVector3(x,0.64,-1.79),material:brackets,parent:wing, chamfer:0.012)
-            let leg = box(0.025,0.42,0.13,at:SCNVector3(x,0.82,-1.84),material:brackets,parent:wing,chamfer:0.012)
-            leg.eulerAngles.x = -0.26
-        }
-        let section = NSBezierPath()
-        section.move(to:NSPoint(x:0,y:0)); section.curve(to:NSPoint(x:0.31,y:0.035),
-            controlPoint1:NSPoint(x:0.025,y:-0.028),controlPoint2:NSPoint(x:0.18,y:0.008))
-        section.curve(to:NSPoint(x:0,y:0),controlPoint1:NSPoint(x:0.17,y:0.047),controlPoint2:NSPoint(x:-0.008,y:0.011)); section.close()
-        let foil = SCNShape(path:section,extrusionDepth:1.89); foil.materials = [composite]
-        let blade = SCNNode(geometry:foil); blade.eulerAngles.y = .pi/2
-        blade.position = SCNVector3(0,1.015,-1.78); wing.addChildNode(blade)
-        for x: CGFloat in [-0.945,0.945] {
-            _ = box(0.011,0.14,0.33,at:SCNVector3(x,1.02,-1.935),material:composite,parent:wing,chamfer:0.009)
-        }
+    /// Front three-quarter presentation camera for the start screen. The car
+    /// sits to the right of the controls, leaving the centre of the road clear.
+    func frameMenuCar(_ vehicle: Vehicle, aspect: CGFloat) {
+        racingLineNode.isHidden = true
+        let height = roadElevation(of:vehicle)
+        let viewpoint = vehicle.position+vehicle.forward*7.65-vehicle.modelX*5.1
+        let towardCar = simd_normalize(vehicle.position-viewpoint)
+        let horizontalRight = SIMD2(-towardCar.y,towardCar.x)
+        let offset = clamp(2.50+(Double(aspect)-1.35)*0.62,2.46,3.45)
+        camera.position = vector(viewpoint,y:height+2.05)
+        camera.look(at:vector(vehicle.position-horizontalRight*offset,y:height+1.32),
+                    up:SCNVector3(0,1,0),localFront:SCNVector3(0,0,-1))
+        camera.camera?.fieldOfView = 46
+        cameraReady = false
     }
 
     private func updateRacingLine(_ vehicle:Vehicle,dt:Double) {
@@ -616,8 +944,9 @@ final class RacingWorld {
             let a=racingLine.sample(at:d), b=racingLine.sample(at:d+racingLine.spacing*0.66)
             let direction=simd_normalize(b.position-a.position), side=SIMD2(direction.y,-direction.x)*0.23
             let index=Int32(vertices.count)
-            vertices += [vector(a.position-side,y:0.045),vector(a.position+side,y:0.045),
-                         vector(b.position-side,y:0.045),vector(b.position+side,y:0.045)]
+            vertices += [a.position-side,a.position+side,b.position-side,b.position+side].map {
+                vector($0,y:0.045+elevation(at:$0))
+            }
             let cue=racingLine.cue(at:d,speed:vehicle.speed)
             let group=cue == .brake ? 2 : (cue == .lift ? 1 : 0)
             groups[group] += [index,index+2,index+1,index+1,index+2,index+3]
@@ -634,43 +963,22 @@ final class RacingWorld {
         mesh.materials=active.map { materials[$0] };racingLineNode.geometry=mesh;racingLineNode.castsShadow=false
     }
 
-    private func updateInstrument(_ vehicle: Vehicle) {
-        let image = NSImage(size: NSSize(width: 512, height: 192))
-        image.lockFocus()
-        NSColor(rgb: 0x091114).setFill()
-        NSRect(x: 0, y: 0, width: 512, height: 192).fill()
-        let lime = NSColor(rgb: 0xE6E9D5)
-        for bar in 0..<25 {
-            let light = bar > 20 ? NSColor(rgb: 0xE85A42) : (bar > 15 ? NSColor(rgb: 0xDFB64C) : NSColor(rgb: 0x58A678))
-            (Double(bar) / 25 < vehicle.rpm / 7400 ? light : NSColor(rgb: 0x202B29)).setFill()
-            NSRect(x: 18 + bar * 19, y: 163, width: 14, height: 10).fill()
-        }
-        (String(format: "%03d", Int(vehicle.speedKPH)) as NSString).draw(at: NSPoint(x: 23, y: 24), withAttributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 106, weight: .medium), .foregroundColor: NSColor.white
-        ])
-        (vehicle.gearLabel as NSString).draw(at: NSPoint(x: 369, y: 29), withAttributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 95, weight: .bold), .foregroundColor: lime
-        ])
-        ("KM/H                                  GEAR" as NSString).draw(at: NSPoint(x: 27, y: 13), withAttributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 17, weight: .medium), .foregroundColor: NSColor(rgb: 0x8B9EA4)
-        ])
-        image.unlockFocus()
-        instrumentMaterial.diffuse.contents = image
-    }
-
     func update(vehicle: Vehicle, input: DrivingInput, dt: Double, cockpit: Bool, ghost: GhostFrame?, view: DrivingView? = nil) {
         let mode = view ?? (cockpit ? .cockpit : .chase)
+        let cameraContinuous = cameraReady && presentedView == mode && dt > 0
         updateRacingLine(vehicle,dt:dt)
         updateDamage(vehicle.damage)
-        car.position = vector(vehicle.position)
-        sunlight.position = vector(vehicle.position, y: 60)
-        // The renderer has no glTF transmission path. Clear the cabin glazing in
-        // the interior view instead of applying an opaque reflection over the road.
-        glassNodes.forEach { $0.isHidden = mode.isInterior }
-        seatNodes.forEach { $0.isHidden = mode.isInterior }
-        importedSteering?.isHidden = mode == .dashboard
-        instrumentClock += dt
-        if instrumentClock > 0.08 && vehicleKind != .centenario { instrumentClock = 0; updateInstrument(vehicle) }
+        let elevation = roadElevation(of:vehicle)
+        car.position = vector(vehicle.position,y:elevation)
+        sunlight.position = vector(vehicle.position, y: 60+elevation)
+        if presentedView != mode {
+            // Interior views clear the opaque glTF glazing from the driver's view.
+            glassNodes.forEach { $0.isHidden = mode.isInterior }
+            seatNodes.forEach { $0.isHidden = mode.isInterior }
+            cabinFill.light?.intensity = mode.isInterior ? 80 : 0
+            importedSteering?.isHidden = mode == .dashboard
+            presentedView = mode
+        }
         car.eulerAngles.y = CGFloat(vehicle.heading)
         body.position.y = CGFloat(vehicle.heave)
         body.eulerAngles.z = CGFloat(vehicle.roll)
@@ -681,75 +989,122 @@ final class RacingWorld {
             pivot.simdOrientation = steer * camber
             pivot.scale.y = CGFloat(vehicle.wheels[index].radiusScale)
         }
-        if let wing = body.childNode(withName: "ClubRearWing", recursively: false) {
-            wing.eulerAngles.z = CGFloat(vehicle.damage.rear * 0.18)
-            wing.eulerAngles.x = CGFloat(vehicle.damage.rear * 0.12)
-            wing.position.y = CGFloat(-vehicle.damage.rear * 0.12)
-        }
         for (index, wheel) in rollingWheels.enumerated() {
             wheel.simdOrientation = simd_quatf(angle:Float(vehicle.wheels[index].rotation),axis:SIMD3(1,0,0))
             wheelPivots[index].position.y = wheelBaseHeights[index] + CGFloat(vehicle.wheels[index].surfaceHeight)
         }
         for (i,node) in contactShadows.enumerated() {
-            node.position.y = 0.031+CGFloat(max(0,vehicle.wheels[i].surfaceHeight))
+            node.position.y = 0.031+CGFloat(vehicle.wheels[i].surfaceHeight)
             node.opacity = CGFloat(clamp(vehicle.wheels[i].normalLoad/3000,0,1))
         }
-        let gauges=[vehicle.coolantTemperature/140,vehicle.speedKPH/300,vehicle.rpm/8000,
-                    (vehicle.wheels.map(\.brakeTemperature).max() ?? 40)/900,vehicle.powerFactor]
-        for (i,needle) in gaugeNeedles.enumerated() { needle.eulerAngles.z = CGFloat(2.35-clamp(gauges[i],0,1)*4.7) }
         importedSteering?.simdTransform = steeringBase * simd_float4x4(simd_quatf(angle: Float(vehicle.steeringAngle * 9), axis: steeringAxis))
-        brakeLights.forEach { $0.emission.contents = NSColor(rgb: input.brake > 0.05 ? 0xFF3328 : 0x2A0504) }
+        let braking = vehicle.brakeLightsActive
+        if braking != brakeLampOn {
+            brakeLampOn = braking
+            let brakeColor = Self.brakeColor(braking)
+            brakeLights.forEach { $0.emission.contents = brakeColor }
+        }
         let f = vehicle.forward
-        let mirrorHeight = 1.36 + vehicle.heave
+        let mirrorHeight = 1.36 + vehicle.heave + elevation
         mirrorCamera.position = vector(vehicle.position, y: mirrorHeight)
         mirrorCamera.look(at: vector(vehicle.position - f * 60, y: mirrorHeight - 1.9),
                           up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
+        if mode.isInterior {
+            for mirror in [VehicleMirror.left,.right] {
+                guard let surface = mirrorSurfaces[mirror] else { continue }
+                let node = camera(for:mirror)
+                let side = mirror == .left ? 1.0 : -1.0
+                let mount = vehicleKind == .honda ? SIMD3(Float(side*0.855),0.947,0.638) :
+                    surface.centre+SIMD3(Float(side*0.03),0.012,-0.05)
+                let origin = body.simdConvertPosition(mount,to:nil)
+                let direction = -f+vehicle.modelX*(side*0.24)
+                node.simdPosition = origin
+                node.look(at:vector(SIMD2(Double(origin.x),Double(origin.z))+direction*55,y:Double(origin.y)-2.6),
+                            up:SCNVector3(0,1,0),localFront:SCNVector3(0,0,-1))
+            }
+        }
         let desired: SIMD3<Float>
         let target: SCNVector3
         if mode.isInterior || mode == .bonnet || mode == .bumper {
-            let side = vehicleKind == .concept ? 0.0 : 0.345
-            var longitudinal = 0.38, lateral = side, height = seatHeight
-            if vehicleKind != .concept { longitudinal = -0.12 }
-            if mode == .dashboard { longitudinal += 0.42; height = vehicleKind == .ferrari ? 0.96 : 1.04 }
-            if mode == .cockpit && vehicleKind == .mazda {
-                longitudinal = -0.24
-                height = seatHeight - 0.06
-            }
-            if vehicleKind == .centenario && mode.isInterior {
-                lateral = 0.355
-                height = seatHeight - 0.065
-                longitudinal = mode == .cockpit ? -0.15 : 0.20
+            var longitudinal = -0.12, lateral = 0.345, height = seatHeight
+            if mode == .cockpit {
+                switch vehicleKind {
+                case .concept: longitudinal = 0.38; lateral = 0; height = 1+(seatHeight-1)*0.47
+                case .ferrari: longitudinal = -0.045; height += 0.015
+                case .porsche: longitudinal = -0.11; lateral = 0.375; height = 1.015+(seatHeight-1)*0.55
+                case .bmw: longitudinal = 0.05; lateral = 0.39
+                case .mazda: longitudinal = -0.24; lateral = 0.376; height -= 0.035
+                case .centenario: longitudinal = -0.05; lateral = 0.355; height -= 0.030
+                case .lotus: longitudinal = -0.17; lateral = 0.295; height = 1.034+(seatHeight-1)*0.16
+                case .honda: longitudinal = -0.01; lateral = 0.33; height += 0.20
+                }
+            } else if mode == .dashboard {
+                if vehicleKind == .concept { longitudinal = 0.80; lateral = 0 }
+                else if vehicleKind == .centenario { longitudinal = 0.24; lateral = 0.355 }
+                else if vehicleKind == .mazda { longitudinal = 0.20; lateral = 0.376 }
+                else if vehicleKind == .bmw { longitudinal = 0.35; lateral = 0.39 }
+                else if vehicleKind == .porsche { longitudinal = 0.32; lateral = 0.375 }
+                else if vehicleKind == .lotus { longitudinal = 0.26; lateral = 0.295 }
+                else if vehicleKind == .honda { longitudinal = 0.44; lateral = 0.33 }
+                else { longitudinal = 0.30 }
+                height = vehicleKind == .honda ? 1.20 : (vehicleKind == .ferrari || vehicleKind == .lotus ? 0.98 : 1.04)
             }
             if mode == .bonnet { longitudinal = 1.25; lateral = 0; height = 1.10 }
             if mode == .bumper { longitudinal = 2.6; lateral = 0; height = 0.42 }
-            let p = vehicle.position + f * longitudinal + vehicle.modelX * lateral
-            desired = SIMD3(Float(p.x), Float(height + vehicle.heave), Float(p.y))
-            let glance = mode.isInterior ? sideLook * 0.73 : 0
+            let glanceRange = vehicleKind == .honda ? 0.86 : 1.22
+            let requestedGlance = mode.isInterior ? sideLook*glanceRange : 0
+            glanceAngle = cameraContinuous ? glanceAngle + (requestedGlance-glanceAngle)*(1-exp(-dt*18)) : requestedGlance
+            let glance = glanceAngle
+            let p = vehicle.position + f*(longitudinal-abs(glance)*0.035) + vehicle.modelX*(lateral-glance*0.052)
+            let cameraHeight = elevation + height + vehicle.heave * (mode.isInterior ? 0.55 : 1)
+            desired = SIMD3(Float(p.x), Float(cameraHeight), Float(p.y))
             let direction = f * cos(glance) - vehicle.modelX * sin(glance)
-            target = vector(p + direction * 80, y: height + vehicle.heave - (mode == .bumper ? 0.5 : 2.0))
+            var roadGradient = SIMD2<Double>.zero
+            if circuit.hasElevation {
+                let local = circuit.nearest(to:vehicle.position)
+                let surface = circuit.roadProfile(at:local.progress,lateral:local.lateral)
+                roadGradient = local.tangent*surface.grade+SIMD2(local.tangent.y,-local.tangent.x)*surface.crossfall
+            }
+            let bodyPitch = clamp(vehicle.pitch-simd_dot(roadGradient,f),-0.11,0.11)
+            let targetPitch = simd_dot(roadGradient,direction)*0.82+bodyPitch*(mode.isInterior ? 0.29 : 0.56)
+            gazePitch = cameraContinuous ? gazePitch+(targetPitch-gazePitch)*(1-exp(-dt*13)) : targetPitch
+            let downTilt = mode == .bumper ? 0.5 : (mode.isInterior ? 3.3 : 2)
+            target = vector(p+direction*80,y:cameraHeight-downTilt+gazePitch*80)
             camera.camera!.fieldOfView = mode.isInterior ? cockpitFOV : 65
         } else {
             let targetYaw = vehicle.heading + sideLook * 1.65
             let yawError = atan2(sin(targetYaw-chaseYaw),cos(targetYaw-chaseYaw))
-            chaseYaw = cameraReady ? chaseYaw + yawError*(1-exp(-dt*8)) : targetYaw
+            chaseYaw = cameraContinuous ? chaseYaw+yawError*(1-exp(-dt*8)) : targetYaw
             let behind = SIMD2(sin(chaseYaw),cos(chaseYaw))
-            let distance = mode == .chaseFar ? 10.5 : 6.4
+            let distance = mode == .chaseFar ? 10.5 : 5.8
             var p = vehicle.position - behind * distance
             let loc = circuit.nearest(to:p)
             if loc.distance > 15 { p = loc.point + simd_normalize(p-loc.point)*15 }
-            let height = (mode == .chaseFar ? 3.5 : 2.15) + max(0,distance-simd_distance(p,vehicle.position))*0.48
+            let height = (mode == .chaseFar ? 3.5 : 2.05) + max(0,distance-simd_distance(p,vehicle.position))*0.48 + self.elevation(at:p)
             desired = SIMD3(Float(p.x),Float(height),Float(p.y))
-            target = vector(vehicle.position + f * (3.4-abs(sideLook)*2.5), y: 0.75)
-            camera.camera!.fieldOfView = 58
+            target = vector(vehicle.position + f * (3.4-abs(sideLook)*2.5), y: 0.75+elevation)
+            camera.camera!.fieldOfView = mode == .chaseFar ? 58 : 54
         }
         cameraPosition = desired
         cameraReady = true
         camera.simdPosition = cameraPosition
         camera.look(at: target, up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
         if let ghost {
-            ghostCar.isHidden = false
-            ghostCar.position = SCNVector3(Float(ghost.x), 0, Float(ghost.z))
+            let point = SIMD2(ghost.x,ghost.z)
+            let separation = simd_distance(point,vehicle.position)
+            let reveal = clamp((separation-1.6)/5.0,0,1)
+            ghostCar.opacity = CGFloat(reveal*reveal*(3-2*reveal))
+            ghostCar.isHidden = reveal < 0.02
+            ghostCar.position = vector(point,y:self.elevation(at:point))
             ghostCar.eulerAngles.y = CGFloat(ghost.heading)
         } else { ghostCar.isHidden = true }
+    }
+
+    private func elevation(at point: SIMD2<Double>) -> Double {
+        circuit.hasElevation ? circuit.roadHeight(at:circuit.nearest(to:point)) : 0
+    }
+
+    private func roadElevation(of vehicle: Vehicle) -> Double {
+        vehicle.hasRoadElevationSample ? vehicle.roadElevation : elevation(at:vehicle.position)
     }
 }

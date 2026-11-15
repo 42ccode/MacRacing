@@ -26,12 +26,55 @@ import simd
         feedback.reset();car.velocity=car.forward*20;car.absActive=true;car.absRelease=0.8
         let absFeedback=feedback.update(vehicle:car,input:DrivingInput(brake:1),impact:.zero,dt:0.01,active:true)
         check(absFeedback.brake>0 && absFeedback.throttle==0,"ABS pulses are routed to the brake trigger")
+        var pulse = HapticFeedback()
+        let absTrace = (0..<60).map { _ in
+            pulse.update(vehicle:car,input:DrivingInput(brake:0.9),impact:.zero,dt:1/120,active:true).brake
+        }
+        let steadyPulse = absTrace.dropFirst(12)
+        check(steadyPulse.max()! > 0.55 && steadyPulse.min()! < 0.15 &&
+              Set(steadyPulse.map { Int($0*100) }).count > 12,
+              "ABS produces a distinguishable pulse with intermediate amplitudes")
+        car.absActive = false
+        var released = HapticOutput.zero
+        for _ in 0..<12 {
+            released = pulse.update(vehicle:car,input:DrivingInput(),impact:.zero,dt:1/120,active:true)
+        }
+        check(released.brake < 0.01,"ABS feedback fades promptly when the brake unloads")
         feedback.reset();car.absActive=false;car.wheels[2].slipRatio=0.9
         let spin=feedback.update(vehicle:car,input:DrivingInput(throttle:1),impact:.zero,dt:0.05,active:true)
         check(spin.throttle>0 && spin.brake==0,"Driven wheel spin is routed to the throttle trigger")
         check(spin.scaled(0).peak==0 && spin.scaled(.nan).peak==0,"Off and invalid gain safely silence all actuators")
         check(HapticOutput(left:9,right:9,brake:9,throttle:9).scaled(1).peak<=0.8,"Feedback saturates at the configured safe output ceiling")
-        check(HapticOutput.test(at:0.1).left>0 && HapticOutput.test(at:0.45).right>0 && HapticOutput.test(at:0.8).brake>0 && HapticOutput.test(at:1.1).throttle>0 && HapticOutput.test(at:1.4).peak==0,"Finite calibration sequence covers both handles and triggers")
+        check(HapticOutput.test(at:0.1).left>0 && HapticOutput.test(at:0.8).right>0 && HapticOutput.test(at:1.3).brake>0 &&
+              HapticOutput.test(at:1.9).throttle>0 && HapticOutput.test(at:HapticOutput.testDuration).peak==0,
+              "Finite calibration sequence covers both handles and triggers")
+        check(absFeedback.combinedGrip >= absFeedback.brake*0.8 && HapticOutput.test(at:1.9).combinedGrip > 0.4,
+              "Combined grip mode retains ABS and trigger effects")
+        let kerbAndABS = HapticOutput(left:0.27,right:0.04,brake:0.24)
+        check(kerbAndABS.combinedGrip > 0.30 && kerbAndABS.combinedGrip < 0.36,
+              "The combined Xbox channel preserves weaker brake texture over a kerb")
+        check(HapticOutput.compatibilityLevel(for:0.227,previous:4) == 4 &&
+              HapticOutput.compatibilityLevel(for:0.235,previous:4) == 5 &&
+              HapticOutput.compatibilityLevel(for:0.224,previous:5) == 5,
+              "Compatibility output holds its level through a small fluctuation near a boundary")
+        var locking = Vehicle()
+        locking.velocity = locking.forward*20
+        locking.wheels[0].slipRatio = -0.75
+        locking.wheels[0].normalLoad = 3100
+        var roadFeedback = HapticFeedback()
+        let rollingLock = roadFeedback.update(vehicle:locking,input:DrivingInput(brake:0.7),impact:.zero,dt:1/120,active:true)
+        locking.wheels[0].normalLoad = 0
+        let unloadedLock = roadFeedback.update(vehicle:locking,input:DrivingInput(brake:0.7),impact:.zero,dt:1/120,active:true)
+        check(rollingLock.brake > 0.2 && unloadedLock.brake == 0,
+              "A loaded locking tyre warns through the brake trigger without false feedback from an unloaded wheel")
+        var controlled = Vehicle()
+        controlled.velocity = controlled.forward*20
+        controlled.tcActive = true
+        controlled.tcReduction = 0.5
+        var tcFeedback = HapticFeedback()
+        let tcCue = tcFeedback.update(vehicle:controlled,input:DrivingInput(throttle:0.6),impact:.zero,dt:0.05,active:true)
+        check(tcCue.throttle > 0.08 && tcCue.throttle < 0.14 && tcCue.brake == 0,
+              "A traction cut leaves a subtle throttle warning even after spin is suppressed")
         let circuit=Circuit()
         check(kerbElevation(progress:1,distanceFromEdge:0)==0 && kerbElevation(progress:1,distanceFromEdge:0.85)==0,"Kerb entry and exit meet the asphalt without a height step")
         check((0..<100).allSatisfy { (0...0.043).contains(kerbElevation(progress:Double($0)/10,distanceFromEdge:0.4)) },"Shared kerb profile remains within its 42 mm design height")

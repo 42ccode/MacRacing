@@ -38,6 +38,11 @@ import Foundation
                 !lane.isLimited(location(PitLane.limitEntry-8)) && !lane.isLimited(location(PitLane.limitExit+8)) &&
                 !lane.isLimited(circuit.nearest(to: circuit.start.point)),
                 "\(kind.name) speed zone crosses the timing seam and excludes the main track")
+            let approachSpeed = lane.targetSpeed(at:location(PitLane.limitEntry-10))
+            check((approachSpeed ?? 0)>PitLane.speedLimit &&
+                  lane.targetSpeed(at:location(PitLane.limitExit+6)) == nil &&
+                  lane.targetSpeed(at:circuit.nearest(to:circuit.sample(at:0).point)) == nil,
+                  "\(kind.name) pit approach backs off before the sign and leaves the racing lane clear")
         }
 
         let command = pitLimitedInput(DrivingInput(throttle: 1, brake: 0.8, steering: -0.3), speed: 19)
@@ -61,6 +66,25 @@ import Foundation
         }
 
         let circuit = Circuit()
+        let lane = circuit.pitLane
+        var approaching = Vehicle()
+        approaching.kind = .mazda
+        approaching.gear = 2
+        approaching.velocity = approaching.forward*25
+        for index in approaching.wheels.indices { approaching.wheels[index].angularVelocity = 25/approaching.wheelRadius }
+        let begin = PitLane.limitEntry-27
+        for _ in 0..<960 where approaching.distanceTravelled < PitLane.limitEntry-begin {
+            let progress = begin+approaching.distanceTravelled
+            let sample = circuit.sample(at:progress)
+            let location = circuit.nearest(to:sample.point+sample.right*lane.lateral(at:progress))
+            let target = lane.targetSpeed(at:location) ?? 25
+            let applied = pitLimitedInput(DrivingInput(throttle:1),speed:approaching.speed,limit:target)
+            approaching.step(1/240,input:applied,assists:DrivingAssists(),roadDistance:0,roadWidth:12)
+        }
+        print(String(format:"Pit approach crosses the sign at %.2f km/h from 90 km/h",approaching.speedKPH))
+        check(approaching.distanceTravelled >= 27 && approaching.speed < PitLane.speedLimit+0.75 &&
+              approaching.speed > PitLane.speedLimit-2,
+              "With the limiter enabled, a 90 km/h approach is near the zone speed at the sign")
         var car = Vehicle()
         car.velocity = circuit.start.tangent * 14
         var session = RaceSession()

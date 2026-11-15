@@ -23,7 +23,7 @@ RULES = {
     'local host email': rb'[A-Za-z0-9_.+-]+@[A-Za-z0-9_.-]+\.local\b',
 }
 BLOCKED_PARTS = {'.build', 'dist', 'APEX Lab Data', '.ssh', '.aws', '.azure', '.codex', '.agents', '.venv', '__pycache__'}
-BLOCKED_NAMES = {'.DS_Store', '.git-credentials', '.netrc', '.npmrc', 'practice.json', 'latest-session.csv', 'driving-view.png', 'credentials.json', 'secrets.json', 'secrets.yaml', 'secrets.yml'}
+BLOCKED_NAMES = {'.DS_Store', '.git-credentials', '.netrc', '.npmrc', 'practice.json', 'latest-session.csv', 'latest-sprint.csv', 'driving-view.png', 'credentials.json', 'secrets.json', 'secrets.yaml', 'secrets.yml'}
 BLOCKED_SUFFIXES = {'.pem', '.key', '.p12', '.pfx', '.mobileprovision', '.keychain', '.bundle', '.zip', '.log', '.crash', '.ips'}
 
 
@@ -32,6 +32,7 @@ def blocked(path):
     return bool(set(p.parts) & BLOCKED_PARTS or p.name in BLOCKED_NAMES or
                 p.suffix.lower() in BLOCKED_SUFFIXES or
                 (p.name.startswith('.env') and p.name != '.env.example') or
+                (p.name.startswith('practice-before-') and p.suffix == '.json') or
                 p.name.startswith(('id_rsa', 'id_ed25519')) or
                 any(x.endswith(('.app', '.dSYM')) for x in p.parts))
 

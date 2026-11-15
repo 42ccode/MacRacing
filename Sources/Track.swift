@@ -25,7 +25,7 @@ enum CircuitKind: Int, CaseIterable, Codable {
     case north, sprint, technical, grand, ridge, valley
     var name: String { ["NORTH LOOP", "CLUB SPRINT", "TECHNICAL PARK", "GRAND CIRCUIT", "RIDGE RING", "VALLEY CIRCUIT"][rawValue] }
     var label: String { ["北环赛道", "俱乐部短环", "技术公园", "大奖赛长环", "高原高速环", "河谷环线"][rawValue] }
-    var detail: String { ["均衡弯道 · 基础练习", "短直道 · 连续中速弯", "发卡与变向 · 制动练习", "长直道 · 高速弯与减速弯", "长直道 · 连续高速弧线", "连续变向 · 回头弯"][rawValue] }
+    var detail: String { ["均衡弯道 · 基础练习", "短直道 · 连续中速弯", "发卡与变向 · 制动练习", "长直道 · 高速弯与减速弯", "高低起伏 · 带横坡高速弯", "连续变向 · 回头弯"][rawValue] }
     var controls: [SIMD2<Double>] {
         switch self {
         case .north: return [
@@ -57,16 +57,112 @@ enum CircuitKind: Int, CaseIterable, Codable {
     }
 }
 
+struct WheelRoadContact {
+    var distance: Double
+    var progress: Double
+    var kerbsEnabled: Bool
+    var surfaceTemperature = 30.0
+    var waterDepth = 0.0 // millimetres
+    var elevation = 0.0 // metres, excluding the kerb
+    var gradient = SIMD2<Double>.zero // vertical rise per horizontal metre, world X/Z
+}
+
+enum TrackCondition: Int, CaseIterable {
+    case dry, wet
+
+    var label: String { self == .dry ? "干地" : "湿地" }
+}
+
 /// A closed, original circuit. World coordinates are metres in the X/Z plane.
 final class Circuit {
+    private struct Segment {
+        let point: SIMD2<Double>
+        let delta: SIMD2<Double>
+        let tangent: SIMD2<Double>
+        let length: Double
+        let inverseSquaredLength: Double
+        let progress: Double
+    }
+    private let segments: [Segment]
+    private let nearbySegments: [SIMD2<Int>: [Int]]
+    private static let bucketSize = 24.0
     let width: Double = 12
     let samples: [TrackSample]
     let length: Double
     let kind: CircuitKind
+    let condition: TrackCondition
     var name: String { kind.name }
+    var hasElevation: Bool { kind == .ridge }
 
-    init(kind: CircuitKind = .north) {
+    /// Continuous surveyed-style profile for the fictional Ridge Ring.
+    /// The grid and the full pit entry/exit remain level.
+    func roadProfile(at progress: Double, lateral: Double = 0) -> (height: Double, grade: Double, crossfall: Double) {
+        guard hasElevation else { return (0,0,0) }
+        let t = progress / length - floor(progress / length)
+        func window(_ start: Double, _ peak: Double, _ end: Double) -> (value: Double, derivative: Double) {
+            guard t > start && t < end else { return (0,0) }
+            let rising = t < peak
+            let span = rising ? peak - start : end - peak
+            let u = rising ? (t - start)/span : (end - t)/span
+            return (u*u*u*(10+u*(-15+6*u)), (rising ? 1 : -1) * 30*u*u*(1-u)*(1-u)/span)
+        }
+        let crest = window(0.087,0.300,0.510), hollow = window(0.45,0.66,0.93)
+        let outerTurn = window(0.255,0.300,0.357), farTurn = window(0.515,0.553,0.61)
+        let switchback = window(0.641,0.679,0.718)
+        let bank = 0.062*outerTurn.value + 0.048*farTurn.value - 0.045*switchback.value
+        let bankDerivative = 0.062*outerTurn.derivative + 0.048*farTurn.derivative - 0.045*switchback.derivative
+        let u = clamp((abs(lateral)-7)/14,0,1)
+        let blend = 1 - u*u*(3-2*u)
+        let blendDerivative = -copysign(6*u*(1-u)/14,lateral)
+        let shoulder = lateral*blend
+        return (21*crest.value - 12*hollow.value + bank*shoulder,
+                (21*crest.derivative - 12*hollow.derivative + bankDerivative*shoulder)/length,
+                bank*(blend+lateral*blendDerivative))
+    }
+
+    func roadHeight(at location: TrackLocation) -> Double {
+        roadProfile(at:location.progress,lateral:location.lateral).height
+    }
+
+    func surfaceTemperature(at progress: Double) -> Double {
+        // Repeatable dry-session baseline. The profile closes continuously at start/finish.
+        let phase = progress / length * (2 * .pi)
+        let base = condition == .wet ? 26.0 : 34.0
+        return base + 3 * sin(phase - 0.7) + 1.5 * sin(phase * 3)
+    }
+
+    func waterDepth(at progress: Double, lateral: Double = 0) -> Double {
+        guard condition == .wet else { return 0 }
+        let phase = progress / length * (2 * .pi)
+        let rill = 1.4*sin(phase*2+0.4)+0.6*sin(phase*5)
+        let shallow = 0.24*exp(-pow((lateral-rill)/1.95,2))
+        let pocket = 0.69 * pow(max(0,cos(phase*5-1.2)),6) *
+            exp(-pow((lateral-3.5*cos(phase*3+0.2))/1.5,2))
+        let bank = roadProfile(at:progress).crossfall
+        let drainage = clamp(-lateral*bank*0.38,-0.19,0.19)
+        return clamp(0.55 + 0.22*sin(phase*3) + 0.15*cos(phase*7) - shallow + pocket + drainage,0.08,1.30)
+    }
+
+    func wheelContacts(at points: [SIMD2<Double>]) -> [WheelRoadContact] {
+        points.map { point in
+            let contact = nearest(to: point)
+            let profile = roadProfile(at:contact.progress,lateral:contact.lateral)
+            let right = SIMD2(contact.tangent.y,-contact.tangent.x)
+            let gradient = contact.tangent*profile.grade + right*profile.crossfall
+            if pitLane.hasAsphalt(at: contact) {
+                return WheelRoadContact(distance:0,progress:contact.progress,kerbsEnabled:false,
+                                        surfaceTemperature:surfaceTemperature(at:contact.progress),waterDepth:waterDepth(at:contact.progress,lateral:contact.lateral),
+                                        elevation:profile.height,gradient:gradient)
+            }
+            return WheelRoadContact(distance:contact.distance,progress:contact.progress,
+                                    kerbsEnabled:hasKerb(at:contact.progress),surfaceTemperature:surfaceTemperature(at:contact.progress),
+                                    waterDepth:waterDepth(at:contact.progress,lateral:contact.lateral),elevation:profile.height,gradient:gradient)
+        }
+    }
+
+    init(kind: CircuitKind = .north, condition: TrackCondition = .dry) {
         self.kind = kind
+        self.condition = condition
         let controls = kind.controls
         var positions: [SIMD2<Double>] = []
         for index in controls.indices {
@@ -94,29 +190,72 @@ final class Circuit {
         }
         samples = result
         length = accumulated + simd_distance(positions.last!, positions.first!)
-    }
-
-    func nearest(to position: SIMD2<Double>) -> TrackLocation {
-        var bestSquared = Double.infinity
-        var result = TrackLocation(point: .zero, tangent: [1, 0], progress: 0, lateral: 0, distance: 0, segment: 0)
-        for index in samples.indices {
-            let a = samples[index]
-            let b = samples[(index + 1) % samples.count]
-            let delta = b.point - a.point
+        segments = result.indices.map { index in
+            let sample = result[index]
+            let delta = result[(index + 1) % result.count].point - sample.point
             let squaredLength = simd_length_squared(delta)
-            let t = clamp(simd_dot(position - a.point, delta) / max(squaredLength, 0.0001), 0, 1)
-            let closest = a.point + delta * t
-            let squaredDistance = simd_length_squared(position - closest)
-            if squaredDistance < bestSquared {
-                bestSquared = squaredDistance
-                let tangent = simd_normalize(delta)
-                result = TrackLocation(point: closest, tangent: tangent,
-                    progress: a.distance + sqrt(squaredLength) * t,
-                    lateral: simd_dot(position - closest, SIMD2(tangent.y, -tangent.x)),
-                    distance: sqrt(squaredDistance), segment: index)
+            return Segment(point:sample.point,delta:delta,tangent:simd_normalize(delta),
+                           length:sqrt(squaredLength),inverseSquaredLength:1/max(squaredLength,0.0001),
+                           progress:sample.distance)
+        }
+        let size = Self.bucketSize
+        var nearbySegments: [SIMD2<Int>: [Int]] = [:]
+        for (index, segment) in segments.enumerated() {
+            let end = segment.point + segment.delta
+            let lowerX = min(segment.point.x,end.x), upperX = max(segment.point.x,end.x)
+            let lowerY = min(segment.point.y,end.y), upperY = max(segment.point.y,end.y)
+            let firstX = Int(floor(lowerX/size))-1, lastX = Int(floor(upperX/size))+1
+            let firstY = Int(floor(lowerY/size))-1, lastY = Int(floor(upperY/size))+1
+            // Record this segment once in each query cell where it could be
+            // within one cell width of the query point.
+            for x in firstX...lastX {
+                let left = Double(x)*size
+                let gapX = max(0,lowerX-(left+size),left-upperX)
+                for y in firstY...lastY {
+                    let top = Double(y)*size
+                    let gapY = max(0,lowerY-(top+size),top-upperY)
+                    if gapX*gapX+gapY*gapY <= size*size {
+                        nearbySegments[SIMD2(x,y),default:[]].append(index)
+                    }
+                }
             }
         }
-        return result
+        self.nearbySegments = nearbySegments
+    }
+
+    func nearest(to position: SIMD2<Double>, useSpatialIndex: Bool = true) -> TrackLocation {
+        var bestSquared = Double.infinity
+        var bestIndex = 0
+        var bestFraction = 0.0
+        func consider(_ index: Int) {
+            let segment = segments[index]
+            let offset = position - segment.point
+            let t = clamp(simd_dot(offset, segment.delta) * segment.inverseSquaredLength, 0, 1)
+            let squaredDistance = simd_length_squared(offset - segment.delta * t)
+            if squaredDistance < bestSquared || (squaredDistance == bestSquared && index < bestIndex) {
+                bestSquared = squaredDistance
+                bestIndex = index
+                bestFraction = t
+            }
+        }
+        let size = Self.bucketSize
+        if useSpatialIndex && position.x.isFinite && position.y.isFinite &&
+            abs(position.x) < 100_000 && abs(position.y) < 100_000 {
+            let x = Int(floor(position.x / size))
+            let y = Int(floor(position.y / size))
+            if let indices = nearbySegments[SIMD2(x,y)] {
+                for index in indices { consider(index) }
+            }
+        }
+        // Any segment not in the cell's index is at least one cell width away.
+        if bestSquared >= size * size {
+            for index in segments.indices { consider(index) }
+        }
+        let best = segments[bestIndex]
+        let closest = best.point + best.delta * bestFraction
+        return TrackLocation(point:closest,tangent:best.tangent,progress:best.progress+best.length*bestFraction,
+                             lateral:simd_dot(position-closest,SIMD2(best.tangent.y,-best.tangent.x)),
+                             distance:sqrt(bestSquared),segment:bestIndex)
     }
 
     func sample(at distance: Double) -> TrackSample {
@@ -154,6 +293,12 @@ final class Circuit {
     }
 
     var start: TrackSample { sample(at: 8) }
+    func gridSlot(_ index: Int, frontMark: Bool = false) -> TrackSample {
+        // The painted boxes sit just beyond the timing gantry.
+        let mark = sample(at: 101 - Double(index) * 7 - (frontMark ? 0 : 1.65))
+        let lateral = index.isMultiple(of: 2) ? 2.65 : -2.65
+        return TrackSample(point: mark.point + mark.right*lateral, tangent: mark.tangent, distance: mark.distance)
+    }
     var pitLane: PitLane { PitLane(trackLength:length) }
 }
 
@@ -218,19 +363,25 @@ struct RacingLine {
         var speeds=(0..<count).map { i -> Double in
             let a=positions[(i+count-1)%count], b=positions[i], c=positions[(i+1)%count]
             let ab=b-a, bc=c-b, ac=c-a
-            let curvature=2*abs(ab.x*bc.y-ab.y*bc.x)/max(0.001,simd_length(ab)*simd_length(bc)*simd_length(ac))
-            return min(72,sqrt(6.5/max(curvature,0.0001)))
+            let curvature=2*(ab.x*bc.y-ab.y*bc.x)/max(0.001,simd_length(ab)*simd_length(bc)*simd_length(ac))
+            let profile = circuit.roadProfile(at:samples[i].distance,lateral:offsets[i])
+            let bankSupport = abs(curvature) > 0.0001 ? copysign(1,curvature)*profile.crossfall*9.81 : 0
+            let wetScale = circuit.condition == .wet ?
+                clamp(0.89 - 0.14*circuit.waterDepth(at:samples[i].distance,lateral:offsets[i]),0.72,0.89) : 1
+            return min(72,sqrt((6.5+bankSupport)/max(abs(curvature),0.0001))) * wetScale
         }
         // Closed-loop passes propagate braking upstream, including past the
         // finish line. Distance uses the offset path, not just centreline spacing.
         for _ in 0..<3 {
             for i in (0..<count).reversed() {
                 let j=(i+1)%count, ds=simd_distance(positions[i],positions[j])
-                speeds[i]=min(speeds[i],sqrt(speeds[j]*speeds[j]+2*6*ds))
+                let grade = circuit.roadProfile(at:samples[i].distance,lateral:offsets[i]).grade
+                speeds[i]=min(speeds[i],sqrt(speeds[j]*speeds[j]+2*(6+9.81*grade)*ds))
             }
             for i in 0..<count {
                 let j=(i+1)%count, ds=simd_distance(positions[i],positions[j])
-                speeds[j]=min(speeds[j],sqrt(speeds[i]*speeds[i]+2*3*ds))
+                let grade = circuit.roadProfile(at:samples[i].distance,lateral:offsets[i]).grade
+                speeds[j]=min(speeds[j],sqrt(speeds[i]*speeds[i]+2*(3-9.81*grade)*ds))
             }
         }
         points=samples.indices.map {Point(progress:samples[$0].distance,position:positions[$0],targetSpeed:speeds[$0])}
@@ -286,6 +437,20 @@ struct PitLane {
 
     func isLimited(_ location: TrackLocation) -> Bool {
         contains(location) && (Self.limitEntry...Self.limitExit).contains(localProgress(location.progress))
+    }
+
+    func metresToSpeedLimit(at location: TrackLocation) -> Double? {
+        let progress = localProgress(location.progress)
+        guard contains(location),progress < Self.limitEntry else { return nil }
+        return Self.limitEntry-progress
+    }
+
+    func targetSpeed(at location: TrackLocation) -> Double? {
+        guard contains(location) else { return nil }
+        let progress = localProgress(location.progress)
+        guard progress <= Self.limitExit else { return nil }
+        let metres = max(0,Self.limitEntry-progress)
+        return sqrt(Self.speedLimit*Self.speedLimit+2*2.7*metres)
     }
 
     func inServiceBox(_ location: TrackLocation) -> Bool {

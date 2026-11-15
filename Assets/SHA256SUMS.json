@@ -44,7 +44,7 @@
   "Scenery/concrete_road_barrier_arm_1k.jpg": "b940847648012f2db8c24b16e07ad1e39b3bd33ea493203364deca209606e4b4",
   "Scenery/concrete_road_barrier_diff_1k.jpg": "88b2d79829ffec7b11ac4d9c8554328f30b665d2c17f634197fde4f1ca8696fe",
   "Scenery/concrete_road_barrier_nor_gl_1k.jpg": "c1072f51ff5c3d7158f0fbb0aa26e82b816b745b9f03639c4816832af2b37c52",
-  "THIRD-PARTY-NOTICES.md": "75b6be3f81372cb858158ce7adeb9cf8755a601cb11e1abefc493775148c4eb7",
+  "THIRD-PARTY-NOTICES.md": "9e488de19bc0fb3789497e36228f2f4944180864df60c96eec72381cbb5fa026",
   "Vegetation/impostors.json": "2ad6fbcd021b4130c8b78e49ede3321558131988260237dadba36bafd91801a5",
   "Vegetation/shrub_01-0.png": "8762e98a2ce3c4686496b05b842aa2789372a4cc76e94940b6014bfdaf611a84",
   "Vegetation/shrub_01-1.png": "0c03b4362df8d38b75c1bb750f0eb67ee889ba094cecf4ee0035b4919d661b5b",
@@ -58,10 +58,14 @@
   "Vegetation/tree_small_02-3.png": "f30455530661707d6b3dc97c87a8083fda73a767452608a1c683a2dcdddc8f3d",
   "Vegetation/tree_small_02-files.json": "20c846944513cb96fb90bce6040ac785da74d8dbbb592c75a2297e540015fbb4",
   "Vegetation/tree_small_02-info.json": "eb22dab8ff5ff4a46378724a645ed787450bf103f09dcee7f837150a16e798d1",
+  "Vehicles/BMWM3E30.glb": "52a07ab1f2d649cba6fd0c676257b609f99e71c037588568bdcbe015f3076e89",
   "Vehicles/Centenario.glb": "14de38326f323c40bb25cc3d95e062d08a7e88516e71bfbe7f038fe85e46ff83",
   "Vehicles/Ferrari458.glb": "77d273787464292206577c650ff7b4b1281b63475173ef3d22b875881fb39530",
-  "Vehicles/Porsche911-SOURCE-LICENSE.txt": "08425640ff5961f6496c7e24ab84e75eb0c70713a9b0623196fcb33ec600ad97",
-  "Vehicles/Porsche911.glb": "98ae6196c47be50782c8a15e0def7b8dcc81ab8026692465e98caa7f77801013",
-  "Vehicles/README.md": "4662909fa742cb2769cc8b0c5be9382477747936fe4c8c605926a5aaca128df9",
-  "Vehicles/sources.json": "b473137a3bd6414d7be237071725949497d2c1075b72d8b01f0232826c8c32aa"
+  "Vehicles/HondaE.glb": "dd6258688deae84703d2b4c8ef11760b25bb89d7a3db828bd9c1fccdf4e7b737",
+  "Vehicles/LotusElise.glb": "ef75e4cad787093328906059db7cc97f5107f57691794b3ab279ffb2120d2554",
+  "Vehicles/MazdaMX5.glb": "5cb7e3f814f79d43c01b0a6831c6ec37d2b766b5bdbac4141cb960bc1c7d4502",
+  "Vehicles/Porsche911-LEGACY-LICENSE.txt": "08425640ff5961f6496c7e24ab84e75eb0c70713a9b0623196fcb33ec600ad97",
+  "Vehicles/Porsche911.glb": "d8c59161c0bfd1707b49a17bbc39041ec527e8c32d43d5b0df4e43bbbc6a7e49",
+  "Vehicles/README.md": "d9597eed53aa8dac2d329f67ee41e982f194207fffc4dd8f87cd5323a7c907c7",
+  "Vehicles/sources.json": "c09b3107baee672d3ff883e60ae3d76f72587defcc6c120aa7fc39b1087c7139"
 }

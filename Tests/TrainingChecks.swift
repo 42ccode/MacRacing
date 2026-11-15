@@ -3,22 +3,31 @@ import simd
 @main struct TrainingChecks {
     static var failures=0
     static func check(_ value:Bool,_ name:String) {print("\(value ? "PASS" : "FAIL")  \(name)");if !value {failures += 1}}
-    static func tick(_ session:inout RaceSession,progress:Double,speed:Double=20,dt:Double=0.1,off:Bool=false) {
+    static func tick(_ session:inout RaceSession,progress:Double,speed:Double=20,dt:Double=0.1,off:Bool=false,assisted:Bool=false) {
         var car=Vehicle();car.position=SIMD2(progress,0);car.velocity=SIMD2(speed,0)
         let loc=TrackLocation(point:car.position,tangent:SIMD2(1,0),progress:progress,lateral:0,distance:off ? 20 : 0,segment:0)
-        _ = session.step(dt,vehicle:car,location:loc,trackLength:1200,trackWidth:12)
+        let input = DrivingInput(throttle:progress/1200,brake:0.25,steering:-0.5)
+        _ = session.step(dt,vehicle:car,location:loc,trackLength:1200,trackWidth:12,assisted:assisted,input:input)
     }
-    static func lap(speed:Double=20,dt:Double=0.1,off:Bool=false,record:LapRecord?=nil) -> RaceSession {
+    static func lap(speed:Double=20,dt:Double=0.1,off:Bool=false,assisted:Bool=false,record:LapRecord?=nil) -> RaceSession {
         var session=RaceSession();session.restore(record);session.resetLap(at:0)
         for i in 1...20000 {
             let distance=Double(i)*dt*speed,progress=distance.truncatingRemainder(dividingBy:1200)
-            tick(&session,progress:progress,speed:speed,dt:dt,off:off && progress>400 && progress<420)
+            tick(&session,progress:progress,speed:speed,dt:dt,off:off && progress>400 && progress<420,assisted:assisted)
             if session.completedLaps>0 {break}
         }
         return session
     }
     static func main() throws {
         let reference=lap();guard let record=reference.record else {fatalError("Missing reference")}
+        let a = LapInputs(DrivingInput(brake:0.5),speedKPH:150,linePressure:0.12)
+        let b = LapInputs(DrivingInput(brake:0.75),speedKPH:120,linePressure:0.44)
+        let pressureMidpoint = a.interpolated(to:b,share:0.5)
+        let legacyData = Data(#"{"throttle":0.1,"brake":0.5,"steering":0,"speedKPH":160}"#.utf8)
+        let legacy = try JSONDecoder().decode(LapInputs.self,from:legacyData)
+        check(pressureMidpoint.isValid && abs((pressureMidpoint.linePressure ?? 0)-0.28)<0.001 &&
+              legacy.isValid && legacy.linePressure == nil && legacy.interpolated(to:a,share:0.5).linePressure == nil,
+              "Lap analysis stores actual pressure without fabricating it for older inputs")
         check(abs(record.time-60)<0.001,"Constant-speed lap completes in 60 seconds")
         check(record.sectors.count==3 && record.sectors.allSatisfy {abs($0-20)<0.001},"Three sector crossings interpolate to 20 seconds each")
         check(abs(record.sectors.reduce(0,+)-record.time)<0.001,"Sector durations sum to the completed lap")
@@ -35,15 +44,51 @@ import simd
         let invalid=lap(off:true,record:record)
         check(!invalid.lastValid && invalid.best==record.time && !invalid.newBest,"Off-track lap cannot replace an existing best")
         check(invalid.record?.trace.count==record.trace.count,"Invalid lap preserves the saved reference trace")
+        var verge = RaceSession()
+        verge.resetLap(at:0)
+        var outside = Vehicle()
+        outside.velocity = SIMD2(20,0)
+        for i in outside.wheels.indices { outside.wheels[i].surface = .grass }
+        outside.wheels[0].surface = .kerb
+        let nearEdge = TrackLocation(point:.zero,tangent:SIMD2(1,0),progress:2,lateral:7,distance:7,segment:0)
+        _ = verge.step(0.1,vehicle:outside,location:nearEdge,trackLength:1200,trackWidth:12)
+        check(verge.validLap,"One tyre still on the kerb keeps a practice lap valid")
+        outside.wheels[0].surface = .grass
+        _ = verge.step(0.1,vehicle:outside,location:nearEdge,trackLength:1200,trackWidth:12)
+        check(!verge.validLap,"All four tyres leaving the road invalidate a practice lap before the centre fallback")
+        guard let analysed = reference.analysedLap, let quick = lap(speed:24).analysedLap else {
+            fatalError("Valid lap did not retain input samples")
+        }
+        let middle = analysed.inputs[LapInputs.intervals / 2]
+        check(abs(middle.throttle-0.5)<0.00001 && middle.brake==0.25 && middle.steering == -0.5 && middle.speedKPH==72,
+              "Input samples align to track distance with the original units")
+        check(invalid.analysedLap == nil && lap(assisted:true).analysedLap == nil,
+              "Off-track and automatic laps cannot enter practice analysis")
+        var assistedCrossing = RaceSession()
+        assistedCrossing.beginOutLap(at:1199)
+        tick(&assistedCrossing,progress:1,assisted:true)
+        tick(&assistedCrossing,progress:3)
+        check(!assistedCrossing.validLap && assistedCrossing.invalidReason == "自动驾驶",
+              "Automatic driving across the start cannot seed a manual lap")
+        var analysis = PracticeAnalysis()
+        analysis.append(quick)
+        for _ in 0..<25 { analysis.append(analysed) }
+        var reloaded = try JSONDecoder().decode(PracticeAnalysis.self, from:JSONEncoder().encode(analysis))
+        reloaded.validate()
+        check(reloaded.history.count==20 && reloaded.latest?.summary.time==analysed.summary.time
+              && reloaded.fastest?.summary.time==quick.summary.time,
+              "History is bounded while the latest and fastest input traces survive JSON reload")
         var wrong=RaceSession();wrong.restore(record);wrong.resetLap(at:0)
         for i in 1...50 {tick(&wrong,progress:Double(i)*2)}
         for i in 1...10 {tick(&wrong,progress:100-Double(i)*2,speed:-20)}
         check(!wrong.validLap && wrong.invalidReason=="逆向行驶" && wrong.delta==nil,"Sustained reverse driving invalidates lap and suppresses delta")
         var recovery=RaceSession();recovery.restore(record);recovery.resetLap(at:700)
         tick(&recovery,progress:710)
-        check(recovery.waitingForStart && recovery.elapsed==0 && recovery.delta==nil,"Recovery away from start waits for a fresh timing lap")
+        check(recovery.waitingForStart && recovery.elapsed==0 && recovery.delta==nil && recovery.liveGhost == nil,
+              "Recovery away from start waits for a fresh timing lap and hides the ghost")
         tick(&recovery,progress:1199);tick(&recovery,progress:1)
-        check(!recovery.waitingForStart && recovery.checkpoint==0 && recovery.elapsed<0.1,"Returning across start begins a clean flying lap")
+        check(!recovery.waitingForStart && recovery.checkpoint==0 && recovery.elapsed<0.1 && recovery.liveGhost != nil,
+              "Returning across start starts the flying lap and its ghost together")
         var skip=RaceSession();skip.resetLap(at:0);tick(&skip,progress:2);tick(&skip,progress:500)
         check(!skip.validLap && skip.delta==nil,"Jumping ahead cannot manufacture a valid lap")
         var noReference=RaceSession();noReference.resetLap(at:0);tick(&noReference,progress:2)
@@ -59,6 +104,27 @@ import simd
         let keys=VehicleKind.allCases.flatMap { car in CircuitKind.allCases.map {LapRecord.key(vehicle:car,circuit:$0)} }
         check(Set(keys).count==keys.count,"All vehicle and circuit record keys are distinct")
         check(reference.ghost(at:30) != nil && reference.ghost(at:61)==nil,"Restored ghost interpolation stays within recorded lap duration")
+        let circuit = Circuit()
+        let length = circuit.length
+        var flying = RaceSession()
+        flying.beginOutLap(at:length-10)
+        for i in 0..<350 {
+            let sample = circuit.sample(at:length-10+Double(i)*6.3)
+            var car = Vehicle()
+            car.reset(at:sample)
+            car.velocity = sample.tangent*21
+            _ = flying.step(0.3,vehicle:car,location:circuit.nearest(to:sample.point),trackLength:length,trackWidth:circuit.width)
+            if flying.newBest { break }
+        }
+        let seam = circuit.sample(at:0).point
+        let ghostStart = flying.bestGhost.first
+        let ghostEnd = flying.bestGhost.last
+        func distance(_ frame: GhostFrame?) -> Double {
+            guard let frame else { return .infinity }
+            return simd_distance(SIMD2(frame.x,frame.z),seam)
+        }
+        check(flying.newBest && distance(ghostStart)<0.3 && distance(ghostEnd)<0.3,
+              "On a non-aligned lap both ghost endpoints land on the physical timing seam")
         if failures>0 {exit(1)}
     }
 }

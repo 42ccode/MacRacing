@@ -54,10 +54,15 @@ final class TrackEnvironment {
     }
 
     @discardableResult private func mesh(_ v: [SCNVector3], _ uv: [CGPoint], _ indices: [Int32], _ m: SCNMaterial,
-                      normals: [SCNVector3]? = nil, name: String = "") -> SCNNode {
+                      normals: [SCNVector3]? = nil, colors: [SIMD4<Float>]? = nil, name: String = "") -> SCNNode {
         let ns = normals ?? v.map { _ in SCNVector3(0,1,0) }
-        let g = SCNGeometry(sources: [.init(vertices:v),.init(normals:ns),.init(textureCoordinates:uv)],
-                            elements:[SCNGeometryElement(indices:indices,primitiveType:.triangles)])
+        var sources: [SCNGeometrySource] = [.init(vertices:v),.init(normals:ns),.init(textureCoordinates:uv)]
+        if let colors {
+            let data = colors.withUnsafeBufferPointer { Data(buffer:$0) }
+            sources.append(SCNGeometrySource(data:data,semantic:.color,vectorCount:colors.count,
+                usesFloatComponents:true,componentsPerVector:4,bytesPerComponent:4,dataOffset:0,dataStride:16))
+        }
+        let g = SCNGeometry(sources:sources,elements:[SCNGeometryElement(indices:indices,primitiveType:.triangles)])
         g.materials = [m]
         let n = SCNNode(geometry:g); n.name = name; root.addChildNode(n); return n
     }
@@ -82,10 +87,22 @@ final class TrackEnvironment {
         n.scale = SCNVector3(scale,scale,scale); n.position = p; parent.addChildNode(n)
     }
     private func terrainHeight(_ p: SIMD2<Double>) -> Double {
-        let d = circuit.nearest(to:p).distance
+        let location = circuit.nearest(to:p), d = location.distance
         let blend = clamp((d-27)/95,0,1)
         let hills = 3 + sin(p.x*0.008+0.8)*5 + cos(p.y*0.012)*3 + sin((p.x+p.y)*0.022)*1.6
-        return -0.045 + max(0,hills)*blend*blend
+        let profile = circuit.roadHeight(at:location)
+        let edge = clamp((d-22)/105,0,1)
+        return -0.045 + profile*(1-edge*edge*(3-2*edge)) + max(0,hills)*blend*blend
+    }
+
+    private func roadVector(_ s: TrackSample, _ lateral: Double, _ base: Double) -> SCNVector3 {
+        vector(s.point+s.right*lateral,y:base+circuit.roadProfile(at:s.distance,lateral:lateral).height)
+    }
+
+    private func normal(_ s: TrackSample, _ lateral: Double, additional: SIMD2<Double> = .zero) -> SCNVector3 {
+        let p = circuit.roadProfile(at:s.distance,lateral:lateral)
+        let gradient = s.tangent*p.grade + s.right*p.crossfall + additional
+        return SCNVector3(simd_normalize(SIMD3<Float>(Float(-gradient.x),1,Float(-gradient.y))))
     }
     private func ground() {
         let grass = scanMaterial("grass_ground",tint:0xADB59A)
@@ -101,7 +118,16 @@ final class TrackEnvironment {
         var heights = [Double](), v = [SCNVector3](), uv = [CGPoint](), ix = [Int32](), ns = [SCNVector3]()
         for z in 0...count { for x in 0...count {
             let p = SIMD2(Double(x)*step-size/2,Double(z)*step-size/2)
-            let y = terrainHeight(p); heights.append(y); v.append(vector(p,y:y)); uv.append(CGPoint(x:p.x/5,y:p.y/5))
+            var y = terrainHeight(p)
+            if circuit.hasElevation {
+                let location = circuit.nearest(to:p)
+                // Reserve the full road corridor for the finer shoulder mesh.
+                // Drop the coarse terrain far enough that no quad can crest
+                // above the asphalt between samples.
+                let weight = clamp((39-location.distance)/14,0,1)
+                y -= 1.15 * weight
+            }
+            heights.append(y); v.append(vector(p,y:y)); uv.append(CGPoint(x:p.x/5,y:p.y/5))
         }}
         for z in 0...count { for x in 0...count {
             let dx = heights[z*(count+1)+min(x+1,count)]-heights[z*(count+1)+max(x-1,0)]
@@ -111,25 +137,39 @@ final class TrackEnvironment {
             if z<count && x<count { let i = Int32(z*(count+1)+x), s = Int32(count+1); ix += [i,i+s,i+1,i+1,i+s,i+s+1] }
         }}
         mesh(v,uv,ix,grass,normals:ns,name:"ContouredGrassTerrain")
+        if circuit.hasElevation {
+            // Fine shoulder mesh keeps the coarse terrain from intersecting the bank.
+            for side in [-1.0,1.0] {
+                for (a,b) in [(6.38,9.0),(9,13),(13,18),(18,24),(24,34)] {
+                    strip(min(a*side,b*side),max(a*side,b*side),-0.012,grass,name:"GradedShoulder")
+                }
+            }
+        }
     }
     private func strip(_ a: Double,_ b: Double,_ height: Double,_ m: SCNMaterial,
                        filter: ((Int)->Bool)? = nil, offset: ((TrackSample)->Double)? = nil, name: String = "") {
-        var v = [SCNVector3](), uv = [CGPoint](), ix = [Int32]()
+        var v = [SCNVector3](), uv = [CGPoint](), ix = [Int32](), ns = [SCNVector3]()
         for i in 0...circuit.samples.count {
             let s = circuit.samples[i%circuit.samples.count], shift = offset?(s) ?? 0
             let d = i == circuit.samples.count ? circuit.length : s.distance
-            v += [vector(s.point+s.right*(a+shift),y:height),vector(s.point+s.right*(b+shift),y:height)]
+            v += [roadVector(s,a+shift,height),roadVector(s,b+shift,height)]
+            if circuit.hasElevation { ns += [normal(s,a+shift),normal(s,b+shift)] }
             uv += [CGPoint(x:a/3,y:d/3),CGPoint(x:b/3,y:d/3)]
             if i<circuit.samples.count && (filter?(i) ?? true) {
                 let n = Int32(i*2); ix += [n,n+2,n+1,n+1,n+2,n+3]
             }
         }
         m.isDoubleSided = true
-        if !ix.isEmpty { mesh(v,uv,ix,m,name:name) }
+        if !ix.isEmpty { mesh(v,uv,ix,m,normals:circuit.hasElevation ? ns : nil,name:name) }
     }
     private func road() {
         let asphalt = scanMaterial("asphalt_track",tint:0xC6C5C1)
         asphalt.normal.intensity = 0.30
+        if circuit.condition == .wet {
+            asphalt.roughness.contents = 0.24
+            asphalt.clearCoat.contents = 0.34
+            asphalt.clearCoatRoughness.contents = 0.24
+        }
         asphalt.shaderModifiers = [.surface: """
         #pragma body
         float2 p = _surface.diffuseTexcoord * 3.0;
@@ -143,7 +183,12 @@ final class TrackEnvironment {
                     * (1.0-smoothstep(0.34,0.42,abs(p.x+3.64)));
         _surface.diffuse.rgb *= 0.99 + 0.07*variation + 0.04*aggregate - 0.15*rubber - 0.21*joint + 0.17*patch;
         """]
-        strip(-6,6,0.025,asphalt,name:"DrivingSurface")
+        if circuit.condition == .wet {
+            asphalt.shaderModifiers?[.surface, default:""] += "\n_surface.diffuse.rgb *= 0.76;"
+            wetRoad(asphalt)
+        } else {
+            strip(-6,6,0.025,asphalt,name:"DrivingSurface")
+        }
         let edge = scanMaterial("asphalt_02",tint:0x8D8678)
         strip(-6.38,-6,0.016,edge); strip(6,6.38,0.016,edge)
         let wornPaint = trackPaint(0xB6B4A9)
@@ -153,17 +198,16 @@ final class TrackEnvironment {
         for target in circuit.cornerDistances {
             for distance in [100.0,50.0] {
                 let s = circuit.sample(at:target-distance)
-                let n = SCNNode(); n.position = vector(s.point+s.right*9.4); n.eulerAngles.y = CGFloat(atan2(s.tangent.x,s.tangent.y)+Double.pi); root.addChildNode(n)
+                let n = SCNNode(); n.position = roadVector(s,9.4,0); n.eulerAngles.y = CGFloat(atan2(s.tangent.x,s.tangent.y)+Double.pi); root.addChildNode(n)
                 box(1.1,1.25,0.07,SCNVector3(0,1.25,0),paint,parent:n)
                 tube(SCNVector3(-0.36,0,0),SCNVector3(-0.36,1.8,0),0.025,dark,parent:n)
                 tube(SCNVector3(0.36,0,0),SCNVector3(0.36,1.8,0),0.025,dark,parent:n)
                 label(String(Int(distance)),size:0.48,at:SCNVector3(0,1.25,0.04),parent:n,color:dark)
             }
         }
-        for (slot,distance) in stride(from:24.0,to:108,by:7).enumerated() {
-            let s = circuit.sample(at:distance)
-            let side = slot.isMultiple(of:2) ? -1.0 : 1.0
-            let n = SCNNode(); n.position = vector(s.point+s.right*2.65*side); n.eulerAngles.y = CGFloat(atan2(s.tangent.x,s.tangent.y)); root.addChildNode(n)
+        for slot in 0..<12 {
+            let s = circuit.gridSlot(slot, frontMark:true)
+            let n = SCNNode(); n.position = vector(s.point); n.eulerAngles.y = CGFloat(atan2(s.tangent.x,s.tangent.y)); root.addChildNode(n)
             box(2.46,0.004,0.09,SCNVector3(0,0.036,0),wornPaint,parent:n)
             for edge: CGFloat in [-1.19,1.19] {
                 box(0.08,0.004,0.52,SCNVector3(edge,0.036,-0.27),wornPaint,parent:n)
@@ -183,6 +227,30 @@ final class TrackEnvironment {
         let front = SCNNode(); front.eulerAngles.y = .pi; n.addChildNode(front)
         label(circuit.name,size:0.38,at:SCNVector3(0,5.82,0.46),parent:front,color:paint)
         for i in 0..<5 { box(0.26,0.48,0.18,SCNVector3(CGFloat(i-2)*0.34,5.35,0),dark,parent:n,bevel:0.05) }
+    }
+
+    private func wetRoad(_ asphalt: SCNMaterial) {
+        let across = 12, along = Int(ceil(circuit.length/3))
+        var points: [SCNVector3] = [], normals: [SCNVector3] = [], coords: [CGPoint] = []
+        var colors: [SIMD4<Float>] = [], indices: [Int32] = []
+        for i in 0...along {
+            let distance = Double(i)*circuit.length/Double(along), sample = circuit.sample(at:distance)
+            for j in 0...across {
+                let lateral = Double(j)-6
+                let depth = circuit.waterDepth(at:distance,lateral:lateral)
+                let wet = Float(clamp((depth-0.30)/0.80,0,1))
+                points.append(roadVector(sample,lateral,0.025))
+                normals.append(normal(sample,lateral))
+                coords.append(CGPoint(x:lateral/3,y:distance/3))
+                colors.append(SIMD4(1-wet*0.25,1-wet*0.21,1-wet*0.14,1))
+                if i < along && j < across {
+                    let a = Int32(i*(across+1)+j), b = a+Int32(across+1)
+                    indices += [a,b,a+1,a+1,b,b+1]
+                }
+            }
+        }
+        asphalt.isDoubleSided = true
+        mesh(points,coords,indices,asphalt,normals:normals,colors:colors,name:"WetDrivingSurface")
     }
     private func brakingMarks() {
         let width = 32, height = 128
@@ -221,8 +289,8 @@ final class TrackEnvironment {
                     let sample = circuit.sample(at:progress)
                     let offset = lane + 0.22*sin(progress*0.085)
                     let halfWidth = 0.13 + 0.045*sin(t * .pi)
-                    vertices += [vector(sample.point+sample.right*(offset-halfWidth),y:0.034),
-                                 vector(sample.point+sample.right*(offset+halfWidth),y:0.034)]
+                    vertices += [roadVector(sample,offset-halfWidth,0.034),
+                                 roadVector(sample,offset+halfWidth,0.034)]
                     uv += [CGPoint(x:0,y:t),CGPoint(x:1,y:t)]
                     if i<steps {
                         let n = base+Int32(i*2)
@@ -247,13 +315,12 @@ final class TrackEnvironment {
                     let sample=circuit.sample(at:distance)
                     for edge in edges {
                         let h=kerbElevation(progress:distance,distanceFromEdge:edge)
-                        vertices.append(vector(sample.point+sample.right*side*(6+edge),y:0.025+h))
+                        vertices.append(roadVector(sample,side*(6+edge),0.025+h))
                         uv.append(CGPoint(x:edge/3,y:distance/3))
                         let across=(kerbElevation(progress:distance,distanceFromEdge:edge+0.001)-kerbElevation(progress:distance,distanceFromEdge:edge-0.001))/0.002
                         let along=(kerbElevation(progress:distance+0.001,distanceFromEdge:edge)-kerbElevation(progress:distance-0.001,distanceFromEdge:edge))/0.002
                         let gradient=sample.right*side*across+sample.tangent*along
-                        let n=simd_normalize(SIMD3<Float>(Float(-gradient.x),1,Float(-gradient.y)))
-                        normals.append(SCNVector3(n))
+                        normals.append(normal(sample,side*(6+edge),additional:gradient))
                     }
                 }
                 for j in 0..<3 {
@@ -274,7 +341,7 @@ final class TrackEnvironment {
         let sample=circuit.sample(at:120), centre=sample.point+sample.right*34
         let corners=[SIMD2(-12.0,-7),SIMD2(12.0,-7),SIMD2(-12.0,7),SIMD2(12.0,7)]
         if corners.allSatisfy({ circuit.nearest(to:centre+sample.right*$0.x+sample.tangent*$0.y).distance>17 }) {
-            let stand=SCNNode(); stand.name="SpectatorStand";stand.position=vector(centre);stand.eulerAngles.y=CGFloat(atan2(sample.tangent.x,sample.tangent.y));root.addChildNode(stand)
+            let stand=SCNNode(); stand.name="SpectatorStand";stand.position=vector(centre,y:circuit.hasElevation ? terrainHeight(centre) : 0);stand.eulerAngles.y=CGFloat(atan2(sample.tangent.x,sample.tangent.y));root.addChildNode(stand)
             for row in 0..<6 {
                 let x=CGFloat(row)*1.1-3, h=CGFloat(row)*0.42+0.3
                 box(1.1,h,20,SCNVector3(x,h/2,0),concrete,parent:stand)
@@ -296,7 +363,7 @@ final class TrackEnvironment {
             for side in [-1.0,1.0] {
                 let point=s.point+s.right*(17.3*side)
                 guard circuit.nearest(to:point).distance>16.8 else {continue}
-                let n=SCNNode();n.position=vector(point);n.eulerAngles.y=CGFloat(atan2(s.tangent.x,s.tangent.y));root.addChildNode(n)
+                let n=SCNNode();n.position=roadVector(s,17.3*side,0);n.eulerAngles.y=CGFloat(atan2(s.tangent.x,s.tangent.y));root.addChildNode(n)
                 box(0.12,0.8,0.12,SCNVector3(0,0.4,0),paint,parent:n)
                 box(0.13,0.13,0.025,SCNVector3(0,0.67,-0.07),side>0 ? seat : dark,parent:n)
             }
@@ -330,7 +397,7 @@ final class TrackEnvironment {
                     let slope = Float((upper.1-lower.1)/(upper.0-lower.0))
                     let normal = simd_normalize(SIMD3<Float>(-Float(s.right.x*side),slope,-Float(s.right.y*side)))
                     for (height, offset) in [lower,upper] {
-                        v.append(vector(s.point+s.right*(15.8+offset)*side,y:height))
+                        v.append(roadVector(s,(15.8+offset)*side,height))
                         uv.append(CGPoint(x:s.distance/4,y:height*2))
                         normals.append(SCNVector3(normal))
                     }
@@ -355,14 +422,14 @@ final class TrackEnvironment {
             let s = circuit.samples[i], next = circuit.samples[(i+3)%circuit.samples.count]
             for side in [-1.0,1.0] {
                 let a = s.point+s.right*17*side, b = next.point+next.right*17*side
-                tube(vector(a),vector(a,y:3.0),0.033,steel)
-                tube(vector(s.point+s.right*15.95*side),vector(s.point+s.right*15.95*side,y:0.72),0.04,steel)
-                let k = Int32(v.count); v += [vector(a,y:0.2),vector(b,y:0.2),vector(a,y:2.8),vector(b,y:2.8)]
+                tube(roadVector(s,17*side,0),roadVector(s,17*side,3),0.033,steel)
+                tube(roadVector(s,15.95*side,0),roadVector(s,15.95*side,0.72),0.04,steel)
+                let k = Int32(v.count); v += [roadVector(s,17*side,0.2),roadVector(next,17*side,0.2),roadVector(s,17*side,2.8),roadVector(next,17*side,2.8)]
                 let u = simd_distance(a,b)/0.28
                 uv += [CGPoint(x:0,y:0),CGPoint(x:u,y:0),CGPoint(x:0,y:9.3),CGPoint(x:u,y:9.3)]
                 ix += [k,k+2,k+1,k+1,k+2,k+3]
                 ns += Array(repeating:SCNVector3(Float(s.right.x),0,Float(s.right.y)),count:4)
-                tube(vector(a,y:2.8),vector(b,y:2.8),0.016,steel)
+                tube(roadVector(s,17*side,2.8),roadVector(next,17*side,2.8),0.016,steel)
             }
         }
         mesh(v,uv,ix,chain,normals:ns,name:"CatchFencing").castsShadow = false

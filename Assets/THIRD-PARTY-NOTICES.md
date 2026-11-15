@@ -46,13 +46,15 @@ The following Poly Haven assets are CC0. Trees are rendered from the original 3D
 ## Additional vehicles (1.2)
 
 - **Ferrari 458** — vicent091036, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). [Author model](https://sketchfab.com/models/57bf6cc56931426e87494f554df1dab6), distributed through the [official three.js example](https://github.com/mrdoob/three.js/blob/dev/examples/webgl_materials_car.html).
-- **Porsche 911 Carrera 4S** — Lionsharp Studios / Karol Miklas, [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). [Author model](https://sketchfab.com/3d-models/free-porsche-911-carrera-4s-d01b254483794de3819786d93e0e1ebf), distributed through [PlayCanvas](https://github.com/playcanvas/web-components/tree/main/examples/assets/models). The adapted Porsche model and model appearance remain under CC BY-SA 4.0.
+- **Porsche 911 Carrera 4S (992)** — JK3Dstudios, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). [Author model](https://sketchfab.com/3d-models/porsche-911-c4s-2020-aerokit-ee69c474a1cc4085944cde4cb7ae87db).
+- **Lotus Elise** — Stéphane Agullo, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). [Author model](https://sketchfab.com/3d-models/lotus-elise-75e9045ac1af4cdbb69318108c81edfd).
+- **Honda e** — Alex Murias, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). [Author model](https://sketchfab.com/3d-models/free-honda-e-detailed-interior-2021-814cf3f8cfd64594b1c4f96e873c3cef).
 
-Both models are decoded and adapted for the native renderer, with normalized transforms and separate animated wheels. Runtime paint, instruments and deformation differ from the sources; Porsche uses a generic simplified cabin. See `Vehicles/README.md` for modifications, licensing, source hashes and reproduction instructions. Vehicle names/designs/marks remain their owners' property; no endorsement is claimed. The simulation presets and shared engine sound are not manufacturer-calibrated.
+See [Vehicles/README.md](Vehicles/README.md) for conversion and redistribution details.
 
-## Additional vehicles (1.8)
+## BMW M3 E30 and Mazda MX-5 NA
 
-BMW M3 E30 by Martin Trafas and Mazda Miata MX-5 by Black Snow, each under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Original model links, distribution sources, hashes and modifications are in [Vehicles/README.md](Vehicles/README.md).
+BMW M3 E30 by Artem P and Mazda Miata MX-5 NA by Lexyc16, each under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Original model links, distribution sources, hashes and modifications are in [Vehicles/README.md](Vehicles/README.md).
 
 ## Lamborghini Centenario LP-770
 

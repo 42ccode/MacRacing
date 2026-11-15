@@ -9,6 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "关于 APEX Lab", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let settings = NSMenuItem(title:"设置…",action:#selector(openSettings),keyEquivalent:",")
+        settings.target = self
+        appMenu.addItem(settings)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 APEX Lab", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
@@ -28,9 +31,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let rect = NSRect(origin: .zero, size: size)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "APEX Lab — Circuit Test"
-        window.subtitle = "Mac 原生驾驶模拟原型 · v1.13"
-        window.minSize = NSSize(width: 1100, height: 740)
+        window.subtitle = "Mac 原生驾驶模拟 · 3.0 预览"
+        window.contentMinSize = NSSize(width: 900, height: 664)
         window.backgroundColor = NSColor(rgb: 0x10191D)
+        window.acceptsMouseMovedEvents = true
         window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua)
         window.isReleasedWhenClosed = false
@@ -48,6 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if CommandLine.arguments.contains("--quick-start") { game.action("start") }
     }
 
+    @objc private func openSettings() { game?.action("settings") }
+    func windowDidResize(_ notification: Notification) { game?.viewportChanged() }
+    func windowDidMiniaturize(_ notification: Notification) { game?.loseFocus() }
     func applicationDidResignActive(_ notification: Notification) { game?.loseFocus() }
     func applicationWillTerminate(_ notification: Notification) { game?.shutdown() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

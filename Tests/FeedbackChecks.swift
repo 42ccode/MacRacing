@@ -11,6 +11,54 @@ import simd
         var feedback=HapticFeedback()
         let idle=feedback.update(vehicle:car,input:DrivingInput(),impact:.zero,dt:0.05,active:true)
         check(idle.peak==0,"Smooth straight running does not produce permanent rumble")
+        func cornerTrace(front: Double,rear: Double,load: Double = 3100,lateralForce: Double = 3000) -> [HapticOutput] {
+            var sample = car
+            var mapping = HapticFeedback()
+            for index in sample.wheels.indices {
+                sample.wheels[index].normalLoad = load
+                sample.wheels[index].relaxedSlipAngle = 0.15
+                sample.wheels[index].slidingFraction = index < 2 ? front : rear
+                sample.wheels[index].lateralForce = lateralForce
+                sample.wheels[index].longitudinalForce = 3000-abs(lateralForce)
+            }
+            return (0..<60).map { _ in
+                mapping.update(vehicle:sample,input:DrivingInput(),impact:.zero,dt:1/60,active:true)
+            }
+        }
+        let frontTrace = cornerTrace(front:0.95,rear:0.18).suffix(30)
+        let rearTrace = cornerTrace(front:0.18,rear:0.95).suffix(30)
+        let frontStrengths = frontTrace.map(\.combinedGrip), rearStrengths = rearTrace.map(\.combinedGrip)
+        let rearLevels = rearStrengths.reduce(into:[Int]()) { values,strength in
+            values.append(HapticOutput.compatibilityLevel(for:strength*0.75,previous:values.last ?? 0))
+        }
+        check(frontStrengths.min()! > 0.15 && frontStrengths.max()!-frontStrengths.min()! < 0.01 &&
+              rearStrengths.max()!-rearStrengths.min()! > 0.10 &&
+              Set(rearLevels).count >= 3 &&
+              frontTrace.last!.sharpness > rearTrace.last!.sharpness+0.20,
+              "Front push gives steady scrub while rear breakaway pulses even on a combined handle")
+        check(cornerTrace(front:1,rear:1,load:0).allSatisfy { $0.peak == 0 } &&
+              cornerTrace(front:1,rear:1,lateralForce:0).allSatisfy { $0.peak == 0 },
+              "Airborne and purely longitudinal sliding do not generate cornering cues")
+        let balanced = cornerTrace(front:0.95,rear:0.95).suffix(30).map(\.combinedGrip)
+        check(balanced.min()! > 0.15 && balanced.max()!-balanced.min()! < 0.01,
+              "A balanced four-wheel slide does not falsely signal rear breakaway")
+        var fishtail = Vehicle()
+        fishtail.kind = .mazda
+        fishtail.gear = 0
+        fishtail.yawRate = 1.6
+        fishtail.velocity = fishtail.forward*22 - fishtail.modelX*(fishtail.yawRate*fishtail.kind.frontAxle)
+        for index in fishtail.wheels.indices { fishtail.wheels[index].angularVelocity = 22/fishtail.wheelRadius }
+        var recovery = HapticFeedback()
+        var initialCue = 0.0, finalCue = 0.0
+        for frame in 0..<240 {
+            for _ in 0..<4 {
+                fishtail.step(1/240,input:DrivingInput(),assists:DrivingAssists(),roadDistance:0,roadWidth:12)
+            }
+            finalCue = recovery.update(vehicle:fishtail,input:DrivingInput(),impact:.zero,dt:1/60,active:true).combinedGrip
+            if frame < 6 { initialCue = max(initialCue,finalCue) }
+        }
+        check(initialCue > 0.08 && finalCue < 0.01,
+              "A simulated rear-axle disturbance reaches the handles within 100 ms and clears as the car settles")
         car.wheels[1].kerbFeedback=1;car.wheels[3].kerbFeedback=1
         let left=feedback.update(vehicle:car,input:DrivingInput(),impact:.zero,dt:0.05,active:true)
         check(left.left>0.3 && left.right==0,"Driver-left kerbs excite the left handle only")

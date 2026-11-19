@@ -14,6 +14,7 @@ struct PhysicsChecks {
         let circuit = Circuit()
         let dt = 1.0 / 120
         checkRidgeProfile()
+        checkCombinedSlip()
         var oldPose = Vehicle()
         oldPose.heading = .pi - 0.01
         oldPose.wheels[0].rotation = 6.27
@@ -643,6 +644,60 @@ struct PhysicsChecks {
               "A wheel crossing the grass edge loses grip progressively across the tread")
         if failures > 0 { exit(1) }
         print("\nAll physics and timing checks passed.")
+    }
+
+    static func checkCombinedSlip() {
+        let assists = DrivingAssists(abs:false, tractionControl:false, automatic:false)
+        var locked = Vehicle()
+        locked.kind = .mazda
+        locked.gear = 0
+        for _ in 0..<80 {
+            locked.step(1/240,input:DrivingInput(brake:1),assists:assists,roadDistance:0,roadWidth:12)
+        }
+        locked.velocity = locked.forward * 24 + locked.modelX * 4
+        locked.steeringAngle = -0.18
+        for index in locked.wheels.indices {
+            locked.wheels[index].relaxedSlipRatio = -1
+        }
+        locked.step(1/720,input:DrivingInput(brake:1,steering:1),assists:assists,roadDistance:0,roadWidth:12)
+        let contact = locked.wheels[0]
+        let steer = locked.wheelSteer(0)
+        let along = contact.longitudinalForce * cos(steer) - contact.lateralForce * sin(steer)
+        let across = contact.lateralForce * cos(steer) + contact.longitudinalForce * sin(steer)
+        check(contact.angularVelocity == 0 && contact.slidingFraction == 1 &&
+              along < 0 && abs(across / along - 4.0 / 24.0) < 1e-6,
+              "A fully locked steered wheel slides against its ground velocity even during a steering transient")
+
+        var entry = Vehicle()
+        entry.kind = .mazda
+        entry.gear = 0
+        entry.velocity = entry.forward * 28
+        for index in entry.wheels.indices {
+            entry.wheels[index].angularVelocity = 28 / entry.wheelRadius
+            entry.wheels[index].temperature = 57
+        }
+        func applyPedal(_ car: inout Vehicle, travel: Double, frames: Int) {
+            for _ in 0..<frames {
+                car.step(1/240,input:DrivingInput(brake:travel,steering:0.62),assists:assists,roadDistance:0,roadWidth:12)
+            }
+        }
+        applyPedal(&entry,travel:0.90,frames:84)
+        var held = entry, eased = entry, released = entry
+        applyPedal(&held,travel:0.90,frames:48)
+        applyPedal(&eased,travel:0.45,frames:48)
+        applyPedal(&released,travel:0,frames:48)
+        func frontLateralForce(_ car: Vehicle) -> Double {
+            abs(car.wheels[0].lateralForce + car.wheels[1].lateralForce)
+        }
+        let heldForce = frontLateralForce(held)
+        let easedForce = frontLateralForce(eased)
+        let releasedForce = frontLateralForce(released)
+        print(String(format:"MX-5 combined slip after 200 ms: front lateral force %.0f / %.0f / %.0f N at 90 / 45 / 0 percent brake",
+                     heldForce,easedForce,releasedForce))
+        check(held.wheels[0].slidingFraction > 0.99 && abs(held.wheels[0].slipRatio) > 0.99 &&
+              abs(released.wheels[0].slipRatio) < 0.08 && easedForce > heldForce * 1.3 &&
+              releasedForce > easedForce * 1.5 && abs(released.yawRate) > abs(eased.yawRate),
+              "Progressive brake release restores front cornering force and yaw authority on the same turn-in")
     }
 
     static func checkRidgeProfile() {

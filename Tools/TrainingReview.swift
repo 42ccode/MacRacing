@@ -39,6 +39,26 @@ final class FrameMeasurements: NSObject, SCNSceneRendererDelegate {
 @main struct TrainingReview {
     static var failures=0
     static func check(_ valid:Bool,_ title:String) {print("\(valid ? "PASS" : "FAIL")  \(title)");if !valid {failures += 1}}
+    static func reviewWheelTelemetry(_ rows: [[Substring]], expectCornering: Bool) {
+        let wheels = ["fr","fl","rr","rl"]
+        let expected = ["applied_throttle","applied_brake","brake_steady_target","engine_throttle"]
+            + wheels.map { $0+"_sliding_fraction" } + wheels.map { $0+"_lateral_force_n" }
+        guard let header = rows.first, header.suffix(expected.count).map(String.init) == expected,
+              rows.count > 1 else {
+            check(false,"CSV appends four sliding fractions and four lateral forces after the control channels")
+            return
+        }
+        let samples = rows.dropFirst()
+        let readings = samples.map { $0.suffix(8).compactMap { Double($0) } }
+        check(samples.allSatisfy { $0.count == header.count } && readings.allSatisfy { values in
+            values.count == 8 && values.prefix(4).allSatisfy { (0...1).contains($0) }
+                && values.suffix(4).allSatisfy { $0.isFinite }
+        }, "CSV writes one bounded sliding fraction and one signed lateral force per wheel")
+        if expectCornering {
+            check(readings.contains { $0.prefix(4).contains { $0 > 0.02 } && $0.suffix(4).contains { $0 < -100 } },
+                  "An imposed lateral velocity produces tread sliding and an opposing recorded tyre force")
+        }
+    }
     static func tick(_ session:inout RaceSession,progress:Double,speed:Double,dt:Double=0.1,off:Bool=false) {
         var car=Vehicle();car.position=SIMD2(progress,0);car.velocity=SIMD2(speed,0)
         let phase = progress / 1200 * 2 * Double.pi
@@ -160,6 +180,7 @@ final class FrameMeasurements: NSObject, SCNSceneRendererDelegate {
               !FileManager.default.fileExists(atPath:tempRace.appendingPathComponent("latest-session.csv").path),
               "Short races write separate telemetry")
         let rows = try String(contentsOf:sprintCSV,encoding:.utf8).split(separator:"\n").map { $0.split(separator:",") }
+        reviewWheelTelemetry(rows,expectCornering:false)
         if let header = rows.first, let index = header.firstIndex(of:"session_time_s") {
             let samples = rows.dropFirst()
             let times = samples.compactMap { $0.indices.contains(index) ? Double($0[index]) : nil }
@@ -322,6 +343,7 @@ final class FrameMeasurements: NSObject, SCNSceneRendererDelegate {
         let best = readPractice()?.records?[key]?.time
         check(best != nil && best == game.session.best && !game.isPaused,
               "A valid crossing saves the lap in the background while the game keeps driving")
+        game.vehicle.velocity += game.vehicle.modelX*3.5
         RunLoop.main.run(until:Date(timeIntervalSinceNow:0.16))
         game.action("brakeBiasUp")
         let bias = game.assists.frontBrakeBias
@@ -333,11 +355,8 @@ final class FrameMeasurements: NSObject, SCNSceneRendererDelegate {
               readPractice()?.vehicleSettings?[String(car.kind.rawValue)]?.frontBrakeBias == bias,
               "Track record, live brake-bias change and settings remain ordered across queued saves")
         let csv = try String(contentsOf:folder.appendingPathComponent("latest-session.csv"),encoding:.utf8)
-        let rows = csv.split(separator:"\n").map { $0.split(separator:",").map(String.init) }
-        let header = rows[0]
-        check(rows.count>1 && rows.dropFirst().allSatisfy { $0.count == header.count } &&
-              Array(header.suffix(4)) == ["applied_throttle","applied_brake","brake_steady_target","engine_throttle"],
-              "New telemetry keeps one numeric value per column and appends the applied controls")
+        let rows = csv.split(separator:"\n").map { $0.split(separator:",") }
+        reviewWheelTelemetry(rows,expectCornering:true)
         game.action("menuBack")
         game.action("resume")
         game.input.keys.insert(13)

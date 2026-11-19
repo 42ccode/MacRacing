@@ -193,8 +193,8 @@ struct TrafficContact {
             }
         }
         guard depth > 0 else {return nil}
-        let firstArm = contactPoint - first.position
-        let secondArm = contactPoint - second.position
+        let firstArm = contactPoint - first.centreOfGravityPosition
+        let secondArm = contactPoint - second.centreOfGravityPosition
         // +Y yaw rotates local forward toward local +X. The lever arm uses that convention.
         let firstLever = firstArm.y * normal.x - firstArm.x * normal.y
         let secondLever = secondArm.y * normal.x - secondArm.x * normal.y

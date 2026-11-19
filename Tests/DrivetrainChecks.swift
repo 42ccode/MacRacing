@@ -202,6 +202,73 @@ import simd
               "Changing bias changes actual front/rear tyre braking forces")
         check(abs(forward.force-rearward.force)/rearward.force < 0.05,
               "At partial braking below grip limits, changing the split preserves total force")
+
+        func frontAxleOnRollers(_ kind: VehicleKind, brake: Double) -> (normal: Double, braking: Double) {
+            var sample = Vehicle()
+            sample.kind = kind
+            sample.gear = 0
+            let rollerSpeed = 22.0
+            for wheel in sample.wheels.indices { sample.wheels[wheel].angularVelocity = rollerSpeed/sample.wheelRadius }
+            for _ in 0..<600 {
+                sample.velocity = sample.forward * rollerSpeed
+                sample.step(1/240, input: DrivingInput(brake:brake), assists: DrivingAssists(automatic:false),
+                            roadDistance:0, roadWidth:12)
+            }
+            return (sample.wheels[0].normalLoad + sample.wheels[1].normalLoad,
+                    -sample.wheels.reduce(0) { $0 + $1.longitudinalForce })
+        }
+        let coastingHonda = frontAxleOnRollers(.honda,brake:0)
+        let brakingHonda = frontAxleOnRollers(.honda,brake:0.5)
+        let inferredHeight = VehicleKind.honda.wheelbase * (brakingHonda.normal - coastingHonda.normal)
+            / (brakingHonda.braking - coastingHonda.braking)
+        print(String(format:"Honda e effective CG height from brake load transfer %.3f m",inferredHeight))
+        check(abs(inferredHeight - 0.50) < 0.015,
+              "Measured Honda front axle load change under braking recovers its published approximate CG height")
+
+        func roadStepInertia(_ kind: VehicleKind) -> (roll: Double, pitch: Double) {
+            var sample = Vehicle()
+            sample.kind = kind
+            var contacts = Array(repeating:WheelRoadContact(distance:0,progress:0,kerbsEnabled:false),count:4)
+            contacts[0].elevation = 0.008
+            let interval = 1.0/720
+            sample.step(interval, input:DrivingInput(), assists:DrivingAssists(), roadDistance:0, roadWidth:12, roadContacts:contacts)
+            let loads = sample.wheels.map(\.normalLoad)
+            let rollMoment = (loads[1] + loads[3] - loads[0] - loads[2]) * kind.track/2
+            let frontArm = kind.distanceFromCGToFrontAxle
+            let pitchMoment = (loads[0] + loads[1]) * frontArm - (loads[2] + loads[3]) * (kind.wheelbase-frontArm)
+            return (rollMoment * interval * interval / sample.roll, pitchMoment * interval * interval / sample.pitch)
+        }
+        let eliseInertia = roadStepInertia(.lotus), hondaInertia = roadStepInertia(.honda)
+        check(eliseInertia.roll > 0 && eliseInertia.pitch > 0 &&
+              hondaInertia.roll > eliseInertia.roll * 1.5 && hondaInertia.pitch > eliseInertia.pitch * 1.7,
+              "Wheel loads on a unilateral road step produce distinct roll and pitch responses for the Elise and Honda e")
+
+        for (kind, expectedFrontShare) in [(VehicleKind.ferrari,0.42),(.porsche,0.38),(.honda,0.50)] {
+            var sample = Vehicle()
+            sample.kind = kind
+            drive(&sample,seconds:1,input:DrivingInput())
+            let totalLoad = sample.wheels.reduce(0) { $0 + $1.normalLoad }
+            let frontShare = (sample.wheels[0].normalLoad + sample.wheels[1].normalLoad) / totalLoad
+            check(abs(frontShare - expectedFrontShare) < 0.001 && abs(totalLoad-sample.mass*9.81) < 1 && abs(sample.pitch) < 0.0001,
+                  "Stationary wheel loads reproduce the reference axle split without pitching: \(kind.label)")
+        }
+
+        var spinning = Vehicle()
+        spinning.kind = .ferrari
+        spinning.heading = 0.7
+        spinning.position = SIMD2(10,-12)
+        spinning.heave = 0.15
+        spinning.yawRate = 3
+        spinning.gear = 0
+        let originalCG = spinning.centreOfGravityPosition
+        let originalOrigin = spinning.position
+        spinning.step(1/720,input:DrivingInput(),assists:DrivingAssists(),roadDistance:0,roadWidth:12)
+        let frontMidpoint = (spinning.contactPoints[0] + spinning.contactPoints[1])/2
+        check(spinning.wheels.allSatisfy { $0.normalLoad == 0 } &&
+              simd_distance(spinning.position,originalOrigin) > 0.0001 &&
+              simd_distance(spinning.centreOfGravityPosition,originalCG) < 0.0000001 &&
+              simd_distance(frontMidpoint,spinning.position + spinning.forward * spinning.kind.frontAxle) < 0.0000001,
+              "An airborne rear-biased car pivots about its stationary CG while the wheels follow the authored model")
         for direction in [-1.0,1.0] {
             var sample = Vehicle(); sample.gear = 0; sample.velocity = sample.forward*7.8*direction
             for index in 0..<4 { sample.wheels[index].angularVelocity = sample.forwardSpeed/sample.wheelRadius }

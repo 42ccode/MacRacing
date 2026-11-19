@@ -166,6 +166,7 @@ struct WheelState {
     var longitudinalForce = 0.0
     var lateralForce = 0.0
     var gripUsage = 0.0
+    var slidingFraction = 0.0
     fileprivate(set) var spray = 0.0
     fileprivate(set) var waterFilm = 0.0
     fileprivate(set) var surfaceContamination = 0.0
@@ -256,8 +257,28 @@ enum VehicleKind: Int, CaseIterable, Codable {
     var mass: Double { [1260, 1485, 1420, 1210, 1025, 1520, 900, 1540][rawValue] }
     var wheelbase: Double { [2.80, 2.65, 2.44, 2.5911, 2.2597, 2.69175, 2.30, 2.50471][rawValue] }
     var frontAxle: Double { [1.485, 1.325, 1.22, 1.2956, 1.1299, 1.345875, 1.15, 1.252355][rawValue] }
+    var distanceFromCGToFrontAxle: Double {
+        switch self {
+        case .ferrari: return wheelbase * 0.58
+        case .porsche: return wheelbase * 0.62
+        default: return frontAxle
+        }
+    }
+    var centreOfGravityOffset: Double { frontAxle - distanceFromCGToFrontAxle }
     var track: Double { [1.96, 1.66, 1.50, 1.4067, 1.4066, 1.697, 1.45, 1.438][rawValue] }
     var radius: Double { [0.384, 0.359, 0.328, 0.3116, 0.3007, 0.37, 0.334, 0.325][rawValue] }
+    var centreOfGravityHeight: Double { [0.44, 0.46, 0.48, 0.51, 0.46, 0.42, 0.43, 0.50][rawValue] }
+    fileprivate typealias BodyInertia = (roll: Double, pitch: Double, yaw: Double)
+    private static let bodyInertias: [BodyInertia] = allCases.map { kind in
+        let lateralSpread = 0.30 * kind.track
+        let verticalSpread = 0.58 * kind.centreOfGravityHeight
+        let longitudinalSpread = 0.46 * kind.wheelbase
+        let lateral = kind.mass * lateralSpread * lateralSpread
+        let vertical = kind.mass * verticalSpread * verticalSpread
+        let longitudinal = kind.mass * longitudinalSpread * longitudinalSpread
+        return (lateral + vertical, longitudinal + vertical, longitudinal + lateral)
+    }
+    fileprivate var bodyInertia: BodyInertia { Self.bodyInertias[rawValue] }
     private var torqueScale: Double { [1, 1.55, 1.28, 0.86, 0.64, 1.82, 0.67, 1.01][rawValue] }
     var frontDriveShare: Double {
         switch self {
@@ -360,6 +381,8 @@ struct Vehicle {
     enum ShiftResult { case shifted, busy, unavailable, stopAndBrake, overRev }
     var forward: SIMD2<Double> { SIMD2(sin(heading), cos(heading)) }
     var modelX: SIMD2<Double> { SIMD2(cos(heading), -sin(heading)) }
+    var centreOfGravityPosition: SIMD2<Double> { position + forward * kind.centreOfGravityOffset }
+    var modelHeave: Double { heave - pitch * kind.centreOfGravityOffset }
     var speed: Double { simd_length(velocity) }
     var speedKPH: Double { speed * 3.6 }
     // Angular coordinates are positive about +Y (toward model-local +X).
@@ -455,8 +478,7 @@ struct Vehicle {
         }
         return (lower + upper) / 2
     }
-    // Geometry-scaled prototype yaw inertia; not a manufacturer measurement.
-    var yawInertia: Double { mass * (wheelbase * wheelbase + trackWidth * trackWidth) * 0.18 }
+    var yawInertia: Double { kind.bodyInertia.yaw }
 
     var powerFactor: Double { max(0.08, 1 - damage.engine * 0.85 - max(0, coolantTemperature - 115) * 0.012) }
 
@@ -495,7 +517,7 @@ struct Vehicle {
         let sideDot = simd_dot(modelX,normal)
         let longitudinal = kind.wheelbase*0.67*clamp(forwardDot*3,-1,1)
         let lateral = (kind.track/2+0.13)*clamp(sideDot*3,-1,1)
-        let arm = forward*longitudinal + modelX*lateral
+        let arm = forward*(longitudinal - kind.centreOfGravityOffset) + modelX*lateral
         let lever = arm.y*normal.x-arm.x*normal.y
         let closing = simd_dot(velocity,normal)+yawRate*lever
         guard closing > 0 else { return 0 }
@@ -604,7 +626,7 @@ struct Vehicle {
         let brake = brakeLinePressure
         let vf = simd_dot(velocity, forward)
         let vl = simd_dot(velocity, modelX)
-        let lf = kind.frontAxle
+        let lf = kind.distanceFromCGToFrontAxle
         let lr = wheelbase - lf
         let halfTrack = trackWidth / 2
         let xs = [-halfTrack, halfTrack, -halfTrack, halfTrack]
@@ -676,7 +698,7 @@ struct Vehicle {
         // Sample all four heights before solving loads, so the anti-roll coupling
         // is symmetric and cannot depend on left/right iteration order.
         let contactRoads = (0..<4).map { i in
-            roadContacts?.count == 4 ? roadContacts![i] : WheelRoadContact(distance:abs(lateral+xs[i]),progress:progress+zs[i],kerbsEnabled:kerbsEnabled)
+            roadContacts?.count == 4 ? roadContacts![i] : WheelRoadContact(distance:abs(lateral+xs[i]),progress:progress+zs[i]+kind.centreOfGravityOffset,kerbsEnabled:kerbsEnabled)
         }
         let elevation = contactRoads.reduce(0) { $0 + $1.elevation } / 4
         if roadElevationReady {
@@ -778,20 +800,27 @@ struct Vehicle {
             let longitudinalResponse = 1-transientBlend*exp(-dt*max(abs(u),3)/longitudinalLength)
             let relaxedRatio = wheel.relaxedSlipRatio
             let stiffnessScale = pow(max(load, 1) / 3100, 0.82)
-            let linearY = -48000 * stiffnessScale * tan(clamp(forceSlipAngle, -1.2, 1.2))
-            // Use the previous patch state for the post-peak drop so the implicit
-            // wheel solve remains monotonic even on the falling side of the curve.
-            let sliding = hypot(relaxedRatio * slipDenominator, v)
-            let available = capacity * (0.82 + 0.18 * exp(-sliding / 5))
+            let lateralDeflection = -tan(forceSlipAngle)
+            let linearY = 48000 * stiffnessScale * lateralDeflection
+            let lateralSlipSpeed = lateralDeflection * max(abs(u), 1.5)
+            let slidingSpeed = hypot(relaxedRatio * slipDenominator, lateralSlipSpeed)
+            let slidingGrip = capacity * (0.82 + 0.18 * exp(-slidingSpeed / 5))
+            let longitudinalStiffness = 65000 * stiffnessScale
 
-            func forces(_ omega: Double) -> (fx: Double, fy: Double, ratio: Double) {
+            func forces(_ omega: Double) -> (fx: Double, fy: Double, ratio: Double, slidingFraction: Double) {
                 let slipRatio = (omega * radius - u) / slipDenominator
+                guard capacity > 0 else { return (0, 0, slipRatio, 0) }
                 let forceRatio = relaxedRatio + (slipRatio - relaxedRatio) * longitudinalResponse
-                let linearX = 65000 * stiffnessScale * forceRatio
+                let linearX = longitudinalStiffness * forceRatio
                 let demand = hypot(linearX, linearY)
-                let magnitude = available * (1 - exp(-demand / max(available, 1)))
-                let scale = demand > 0.00001 ? magnitude / demand : 1
-                return (linearX * scale, linearY * scale, slipRatio)
+                let slidingLength = min(1, demand / (3 * capacity))
+                let adhesionScale = (1 - slidingLength) * (1 - slidingLength)
+                let slidingFraction = slidingLength * slidingLength * (3 - 2 * slidingLength)
+                let longitudinalSlipSpeed = omega * radius - u
+                let slipSpeed = hypot(longitudinalSlipSpeed, v)
+                let slidingScale = slidingGrip * slidingFraction / max(slipSpeed, 0.05)
+                return (linearX * adhesionScale + longitudinalSlipSpeed * slidingScale,
+                        linearY * adhesionScale - v * slidingScale, slipRatio, slidingFraction)
             }
 
             var driveTorque = driveTorques[i]
@@ -821,7 +850,7 @@ struct Vehicle {
                 let oppositeDry = (1-grassCoverage(opposite)) * (1-clamp(opposite.waterDepth/0.75,0,1))
                 // Run a higher slip target on a uniformly dry axle. Under
                 // braking in a corner, bring it down to save lateral grip.
-                let lateralUse = clamp(abs(linearY) / max(available,1),0,1)
+                let lateralUse = clamp(abs(linearY) / max(capacity,1),0,1)
                 let slipThreshold = assists.absSlipThreshold
                     + min(dryContact,oppositeDry)*(0.012+Double(assists.absLevel)*0.006)
                     - 0.020*lateralUse
@@ -857,9 +886,6 @@ struct Vehicle {
                 var lo = centre - span
                 var hi = centre + span
                 let resistance = sign * brakeTorque
-                // The contact force is monotonic in wheel speed. A bracketed
-                // secant step usually converges in a few evaluations; bisection
-                // keeps the same robustness if the contact patch changes slope.
                 var fLo = balance(lo) + resistance
                 var fHi = balance(hi) + resistance
                 var root: Double?
@@ -882,6 +908,8 @@ struct Vehicle {
                 }
             }
             let contact = forces(omega)
+            wheel.slidingFraction = contact.slidingFraction
+            let available = capacity + (slidingGrip - capacity) * contact.slidingFraction
             wheel.gripUsage = available > 1 ? clamp(hypot(contact.fx, contact.fy) / available, 0, 1) : 0
             let brakeWork = brakeTorque * abs((previousOmega+omega)/2)
             wheel.brakeTemperature += (brakeWork/14500-(wheel.brakeTemperature-26)*(0.004+abs(u)*0.00025))*dt
@@ -914,11 +942,13 @@ struct Vehicle {
 
         let drag = (kind.dragCoefficient*(1-wakeStrength*0.20) + damage.front*0.22 + damage.rear*0.13) * vf * abs(vf)
         let rolling = (vf >= 0 ? 1.0 : -1.0) * min(rollingDemand, abs(vf) * mass / dt)
+        let groundLongitudinalForce = totalFx - simd_dot(slopeReaction,forward) - rolling
+        let groundLateralForce = totalFy - simd_dot(slopeReaction,modelX)
         totalFx -= drag + rolling
         let ax = totalFx / mass
         let ay = totalFy / mass
-        let feltAx = ax - simd_dot(slopeReaction,forward)/mass
-        let feltAy = ay - simd_dot(slopeReaction,modelX)/mass
+        let feltAx = (groundLongitudinalForce - drag) / mass
+        let feltAy = groundLateralForce / mass
         let acceleration = forward * ax + modelX * ay
         velocity += acceleration * dt
         yawRate += yawTorque / yawInertia * dt
@@ -927,16 +957,19 @@ struct Vehicle {
             yawRate *= exp(-12 * dt)
             if speed < 0.002 && brake > 0.1 { velocity = .zero }
         }
+        let previousForward = forward
         heading += yawRate * dt
         heading = atan2(sin(heading), cos(heading))
-        position += velocity * dt
+        position += velocity * dt + (previousForward - forward) * kind.centreOfGravityOffset
         distanceTravelled += speed * dt
         lateralG += (feltAy / 9.81 - lateralG) * min(1, dt * 12)
         longitudinalG += (feltAx / 9.81 - longitudinalG) * min(1, dt * 12)
         tyreSlip = maximumSlip
         heaveRate += ((verticalForce - weight - aeroLoad.x - aeroLoad.y) / mass) * dt
-        rollRate += (rollTorque + mass * feltAy * 0.44) / 520 * dt
-        pitchRate += (pitchTorque + mass * feltAx * 0.44 - aeroLoad.x * lf + aeroLoad.y * lr) / 1900 * dt
+        let height = kind.centreOfGravityHeight
+        let inertia = kind.bodyInertia
+        rollRate += (rollTorque + groundLateralForce * height) / inertia.roll * dt
+        pitchRate += (pitchTorque + groundLongitudinalForce * height - aeroLoad.x * lf + aeroLoad.y * lr) / inertia.pitch * dt
         heave += heaveRate * dt
         roll += rollRate * dt
         pitch += pitchRate * dt

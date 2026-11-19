@@ -45,6 +45,7 @@ struct HapticOutput: Equatable {
 /// Hardware-independent signal mapping. Wheel order: FR, FL, RR, RL.
 struct HapticFeedback {
     private var roadPhase = 0.0
+    private var rearSlipPhase = 0.0
     private var absPhase = 0.0
     private var absEnvelope = 0.0
     private var output = HapticOutput.zero
@@ -61,12 +62,27 @@ struct HapticFeedback {
             let rate = target > value ? attack : release
             return value + (target-value)*(1-exp(-step*rate))
         }
+        func cornerSlip(_ wheel: WheelState) -> Double {
+            let totalForce = hypot(wheel.longitudinalForce,wheel.lateralForce)
+            guard totalForce > 1, wheel.normalLoad > 100 else { return 0 }
+            let lateralShare = abs(wheel.lateralForce)/totalForce
+            let slide = clamp((wheel.slidingFraction-0.12)/0.88,0,1)
+            let treadSpeed = speed*abs(sin(wheel.relaxedSlipAngle))
+            let load = clamp(wheel.normalLoad/(vehicle.mass*9.81/4),0,1)
+            return slide*lateralShare*load*clamp(treadSpeed/1.6,0,1)
+        }
+        let corner = SIMD4(cornerSlip(vehicle.wheels[0]),cornerSlip(vehicle.wheels[1]),
+                           cornerSlip(vehicle.wheels[2]),cornerSlip(vehicle.wheels[3]))
+        let frontSlip = max(corner[0],corner[1])
+        let rearSlip = max(corner[2],corner[3])
+        let rearExcess = max(0,rearSlip-frontSlip)
+        rearSlipPhase = (rearSlipPhase+step*5).truncatingRemainder(dividingBy:1)
+        let rearPulse = 0.5+0.5*cos(2 * .pi * rearSlipPhase)
         func road(_ index: Int) -> Double {
             let wheel = vehicle.wheels[index]
             let contact = clamp((wheel.normalLoad-100)/1100,0,1)
-            let lateral = clamp((abs(wheel.slipAngle)-0.032)/0.16,0,1)
-            let saturation = clamp((wheel.gripUsage-0.58)/0.42,0,1)
-            let scrub = lateral * (0.028 + 0.19*saturation)
+            let scrub = index < 2 ? 0.23*corner[index] :
+                0.16*corner[index]+min(corner[index],rearExcess)*(0.22*rearPulse-0.09)
             let texture = 0.60 + 0.40 * sin(2 * .pi * (roadPhase + Double(index)*0.17))
             let grass = wheel.surface == .grass ? 0.105*texture : 0
             let wheelPulse = 0.5+0.5*cos(wheel.rotation)
@@ -75,7 +91,7 @@ struct HapticFeedback {
             let vibrationShare = clamp((abs(wheel.angularVelocity)-120)/65,0,1)
             let flatTexture = wheelPulse*wheelPulse*(1-vibrationShare)+0.375*vibrationShare
             let flatSpot = wheel.flatSpot * (0.015+0.13*flatTexture) * clamp(speed/20,0,1)
-            return rolling*contact*(0.53*wheel.kerbFeedback + scrub + grass + flatSpot)
+            return rolling*(scrub + contact*(0.53*wheel.kerbFeedback + grass + flatSpot))
         }
         func grip(_ front: Int,_ rear: Int) -> Double {
             let a = road(front), b = road(rear)
@@ -109,7 +125,9 @@ struct HapticFeedback {
         let lockCue = input.brake > 0.12 && !vehicle.absActive ? locking*rolling*0.30 : 0
         output.brake = max(0.77*pulse,heavyBrake*0.24,lockCue)
         output.throttle = follow(output.throttle,max(spin,tractionControl),attack:38,release:31)
-        let sharp = 0.23 + 0.38*clamp(vehicle.kerbFeedback+max(impact.x,impact.y),0,1) + 0.12*pulse
+        let roadSharpness = 0.38*clamp(vehicle.kerbFeedback+max(impact.x,impact.y),0,1)
+        let frontSharpness = 0.37*max(0,frontSlip-rearSlip)*rolling
+        let sharp = 0.23 + max(roadSharpness,frontSharpness) + 0.12*pulse
         output.sharpness = follow(output.sharpness,sharp,attack:55,release:23)
         return output.scaled(1)
     }

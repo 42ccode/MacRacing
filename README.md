@@ -1,4 +1,4 @@
-# APEX Lab — Circuit Test 3.0 Preview 20
+# APEX Lab — Circuit Test 3.0 Preview 21
 
 面向 Apple Silicon Mac 的原生赛车驾驶原型。使用 Swift、SceneKit / Metal、Game Controller、Core Haptics 和 AVFoundation，无需 Unity 或下载第三方依赖。
 
@@ -17,6 +17,10 @@
 ```sh
 ./build.sh --run
 ```
+
+## 3.0 Preview 21 带刹入弯
+
+入弯时保持小幅转向，逐步松开刹车。每个车轮按接地面内的黏着和滑动分配纵向与侧向力。前轮持续擦滑和后轮开始外滑会产生不同的手柄反馈。
 
 ## 3.0 Preview 20 车辆与后视镜
 
@@ -350,7 +354,7 @@
 ./test.sh
 ```
 
-详见 [3.0 Preview 20 验证记录](Docs/VALIDATION-3.0-preview20.md)。
+详见 [3.0 Preview 21 验证记录](Docs/VALIDATION-3.0-preview21.md)。
 
 ## 当前边界
 

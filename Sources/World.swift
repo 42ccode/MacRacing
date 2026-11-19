@@ -454,7 +454,7 @@ final class RacingWorld {
             let visual = opponentVisuals[index], vehicle = vehicles[index]
             visual.root.position = vector(vehicle.position,y:roadElevation(of:vehicle))
             visual.root.eulerAngles.y = CGFloat(vehicle.heading)
-            visual.body?.position.y = CGFloat(vehicle.heave)
+            visual.body?.position.y = CGFloat(vehicle.modelHeave)
             visual.body?.eulerAngles.x = CGFloat(-vehicle.pitch)
             visual.body?.eulerAngles.z = CGFloat(vehicle.roll)
             let braking = vehicle.brakeLightsActive
@@ -980,7 +980,7 @@ final class RacingWorld {
             presentedView = mode
         }
         car.eulerAngles.y = CGFloat(vehicle.heading)
-        body.position.y = CGFloat(vehicle.heave)
+        body.position.y = CGFloat(vehicle.modelHeave)
         body.eulerAngles.z = CGFloat(vehicle.roll)
         body.eulerAngles.x = CGFloat(-vehicle.pitch)
         for (index, pivot) in wheelPivots.enumerated() {
@@ -1005,7 +1005,7 @@ final class RacingWorld {
             brakeLights.forEach { $0.emission.contents = brakeColor }
         }
         let f = vehicle.forward
-        let mirrorHeight = 1.36 + vehicle.heave + elevation
+        let mirrorHeight = 1.36 + vehicle.modelHeave + elevation
         mirrorCamera.position = vector(vehicle.position, y: mirrorHeight)
         mirrorCamera.look(at: vector(vehicle.position - f * 60, y: mirrorHeight - 1.9),
                           up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
@@ -1056,7 +1056,7 @@ final class RacingWorld {
             glanceAngle = cameraContinuous ? glanceAngle + (requestedGlance-glanceAngle)*(1-exp(-dt*18)) : requestedGlance
             let glance = glanceAngle
             let p = vehicle.position + f*(longitudinal-abs(glance)*0.035) + vehicle.modelX*(lateral-glance*0.052)
-            let cameraHeight = elevation + height + vehicle.heave * (mode.isInterior ? 0.55 : 1)
+            let cameraHeight = elevation + height + vehicle.modelHeave * (mode.isInterior ? 0.55 : 1)
             desired = SIMD3(Float(p.x), Float(cameraHeight), Float(p.y))
             let direction = f * cos(glance) - vehicle.modelX * sin(glance)
             var roadGradient = SIMD2<Double>.zero

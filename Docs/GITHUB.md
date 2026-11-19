@@ -39,6 +39,6 @@ git push origin main v1.13.0
 python3 Tools/package_release.py
 ```
 
-当前输出为 `dist/APEX-Lab-3.0-preview20-arm64.zip`。ZIP 可作为 GitHub Release 附件，构建产物由 Git 忽略。构建脚本使用本地临时签名。Developer ID 签名与公证尚未配置。
+压缩包名称取自应用版本和预览阶段，生成在 `dist/`。ZIP 可作为 GitHub Release 附件，构建产物由 Git 忽略。构建脚本使用本地临时签名。Developer ID 签名与公证尚未配置。
 
 发布时保留 `Assets/THIRD-PARTY-NOTICES.md`、素材元数据和署名。项目原创代码的开源许可证尚未选定；素材分别采用其注明的许可证，不由未来的代码许可证覆盖。

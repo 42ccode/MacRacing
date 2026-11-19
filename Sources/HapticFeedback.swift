@@ -119,7 +119,12 @@ struct HapticFeedback {
         let spin = input.throttle > 0.1 && vehicle.gear != 0
             ? clamp((driveSlip-0.12)*0.63,0,0.50)*rolling : 0
         let tractionControl = vehicle.tcActive && input.throttle > 0.15 ? 0.23*vehicle.tcReduction*rolling : 0
-        let left = grip(1,3), right = grip(0,2)
+        // Both front tyres act on the same steering rack. A rolling tyre
+        // produces this low, directional cue before the sharper scrub begins.
+        let rackMoment = vehicle.wheels[0].aligningMoment + vehicle.wheels[1].aligningMoment
+        let steeringLoad = 0.18 * tanh(rackMoment / 55) * rolling
+        let left = max(grip(1,3), max(0,steeringLoad))
+        let right = max(grip(0,2), max(0,-steeringLoad))
         output.left = follow(output.left,left+0.70*impact.x,attack:63,release:25)
         output.right = follow(output.right,right+0.70*impact.y,attack:63,release:25)
         let lockCue = input.brake > 0.12 && !vehicle.absActive ? locking*rolling*0.30 : 0

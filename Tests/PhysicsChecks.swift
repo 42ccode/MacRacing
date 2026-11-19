@@ -15,6 +15,7 @@ struct PhysicsChecks {
         let dt = 1.0 / 120
         checkRidgeProfile()
         checkCombinedSlip()
+        checkTrailBrakeRamp()
         var oldPose = Vehicle()
         oldPose.heading = .pi - 0.01
         oldPose.wheels[0].rotation = 6.27
@@ -138,7 +139,9 @@ struct PhysicsChecks {
         for _ in 0..<80 {
             locked.step(dt, input: DrivingInput(brake: 1), assists: noABS, roadDistance: 0, roadWidth: 12)
         }
-        check(locked.speed > 3 && locked.wheels.contains(where: { $0.slipRatio < -0.8 }), "Braking without ABS can lock a rotating wheel while the car is moving")
+        check(locked.speed > 3 && locked.wheels.contains {
+            $0.slipRatio < -0.8 && $0.rollingContactSpeed < locked.speed*0.2 && $0.slidingPower > 1000
+        }, "A wheel locked by braking without ABS loses rolling speed and dissipates sliding power")
 
         var splitGrip = Vehicle()
         for _ in 0..<240 {
@@ -164,8 +167,8 @@ struct PhysicsChecks {
         let grassLeft = brakeOnSplitSurface(grassOnLeft:true)
         let grassRight = brakeOnSplitSurface(grassOnLeft:false)
         check(abs(grassLeft.yawRate) > 0.1 && abs(grassLeft.yawRate + grassRight.yawRate) < 0.005 &&
-              abs(grassLeft.longitudinalG - grassRight.longitudinalG) < 0.005 && grassLeft.tyreScrub > 0.05,
-              "Mirrored split-surface stops give opposite yaw and retain a tyre slip cue")
+              abs(grassLeft.longitudinalG - grassRight.longitudinalG) < 0.005 && grassLeft.wheels.contains { $0.slidingPower > 100 },
+              "Mirrored split-surface stops give opposite yaw and dissipate measurable sliding work")
         var dryABS = Vehicle()
         dryABS.kind = .mazda
         dryABS.gear = 0
@@ -644,6 +647,55 @@ struct PhysicsChecks {
               "A wheel crossing the grass edge loses grip progressively across the tread")
         if failures > 0 { exit(1) }
         print("\nAll physics and timing checks passed.")
+    }
+
+    static func checkTrailBrakeRamp() {
+        var assists = DrivingAssists(abs:false,tractionControl:false,automatic:false)
+        var car = Vehicle()
+        car.kind = .mazda
+        car.gear = 0
+        car.velocity = car.forward * 28
+        for i in car.wheels.indices {
+            car.wheels[i].angularVelocity = 28 / car.wheelRadius
+            car.wheels[i].temperature = 57
+        }
+        let dt = 1.0 / 240
+        for _ in 0..<60 {
+            car.step(dt,input:DrivingInput(brake:0.75),assists:assists,roadDistance:0,roadWidth:12)
+        }
+        var sumError = 0.0, peakError = 0.0
+        var monotone = true
+        for frame in 1...96 {
+            let t = Double(frame) / 96
+            let travel = 0.75 - 0.60 * t
+            let previous = car.brakeLinePressure
+            car.step(dt,input:DrivingInput(brake:travel,steering:0.55*t),assists:assists,roadDistance:0,roadWidth:12)
+            let error = abs(car.brakeLinePressure - assists.brakeCurve.pressure(for:travel))
+            monotone = monotone && car.brakeLinePressure <= previous
+            sumError += error
+            peakError = max(peakError,error)
+        }
+        print(String(format:"MX-5 400 ms trail ramp: mean / peak line pressure error %.2f / %.2f percentage points",
+                     sumError*100/96,peakError*100))
+        check(monotone && sumError/96 < 0.015 && peakError < 0.025 && car.yawRate < -0.20,
+              "A rolling brake release tracks the pedal through turn-in without a pressure rebound")
+
+        for curve in BrakeCurve.allCases {
+            assists.brakeCurve = curve
+            let travel = Vehicle.brakeTravel(for:0.001,curve:curve)
+            let expected = curve.pressure(for:travel)
+            let command = DrivingInput(brake:travel)
+            var reapplied = car, retained = car
+            for _ in 0..<60 {
+                reapplied.step(dt,input:DrivingInput(),assists:assists,roadDistance:0,roadWidth:12)
+            }
+            for _ in 0..<240 {
+                reapplied.step(dt,input:command,assists:assists,roadDistance:0,roadWidth:12)
+                retained.step(dt,input:command,assists:assists,roadDistance:0,roadWidth:12)
+            }
+            check(abs(reapplied.brakeLinePressure-expected) < 1e-6 && abs(retained.brakeLinePressure-expected) < 1e-6,
+                  "A feathered pedal can rebuild the same low line pressure after an apex lift: \(curve.label)")
+        }
     }
 
     static func checkCombinedSlip() {

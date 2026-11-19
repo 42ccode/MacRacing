@@ -43,20 +43,23 @@ final class FrameMeasurements: NSObject, SCNSceneRendererDelegate {
         let wheels = ["fr","fl","rr","rl"]
         let expected = ["applied_throttle","applied_brake","brake_steady_target","engine_throttle"]
             + wheels.map { $0+"_sliding_fraction" } + wheels.map { $0+"_lateral_force_n" }
+            + wheels.map { $0+"_aligning_moment_nm" }
         guard let header = rows.first, header.suffix(expected.count).map(String.init) == expected,
               rows.count > 1 else {
-            check(false,"CSV appends four sliding fractions and four lateral forces after the control channels")
+            check(false,"CSV appends four sliding fractions, lateral forces and aligning moments after the control channels")
             return
         }
         let samples = rows.dropFirst()
-        let readings = samples.map { $0.suffix(8).compactMap { Double($0) } }
+        let readings = samples.map { $0.suffix(12).compactMap { Double($0) } }
         check(samples.allSatisfy { $0.count == header.count } && readings.allSatisfy { values in
-            values.count == 8 && values.prefix(4).allSatisfy { (0...1).contains($0) }
-                && values.suffix(4).allSatisfy { $0.isFinite }
-        }, "CSV writes one bounded sliding fraction and one signed lateral force per wheel")
+            values.count == 12 && values.prefix(4).allSatisfy { (0...1).contains($0) }
+                && values.dropFirst(4).allSatisfy { $0.isFinite }
+        }, "CSV writes bounded sliding fractions, signed lateral forces and finite aligning moments for each wheel")
         if expectCornering {
-            check(readings.contains { $0.prefix(4).contains { $0 > 0.02 } && $0.suffix(4).contains { $0 < -100 } },
+            check(readings.contains { $0.count == 12 && $0.prefix(4).contains { $0 > 0.02 } && $0[4..<8].contains { $0 < -100 } },
                   "An imposed lateral velocity produces tread sliding and an opposing recorded tyre force")
+            check(readings.contains { $0.suffix(4).contains { abs($0) > 0.1 } },
+                  "A cornering run exports measurable pneumatic aligning torque")
         }
     }
     static func tick(_ session:inout RaceSession,progress:Double,speed:Double,dt:Double=0.1,off:Bool=false) {

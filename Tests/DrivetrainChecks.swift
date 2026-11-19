@@ -15,7 +15,132 @@ import simd
         }
     }
 
+    static func checkPowertrainSound() {
+        let manual = DrivingAssists(tractionControl:false, automatic:false)
+        let gas = DrivingInput(throttle:0.65)
+        var grid = Vehicle()
+        let gridSlot = TrackSample(point:.zero,tangent:SIMD2(0,1),distance:0)
+        check(grid.powertrainSound.shaftRPM == 950 && grid.powertrainSound.driveLoad == 0,
+              "A newly created combustion car reports idle before its first physics step")
+        drive(&grid,seconds:0.2,input:gas,assists:manual)
+        grid.kind = .honda
+        let rollingMotorRPM = abs(grid.wheels[2].angularVelocity + grid.wheels[3].angularVelocity)/2 * grid.kind.finalDrive * 60/(2 * .pi)
+        check(abs(grid.powertrainSound.shaftRPM - rollingMotorRPM) < 0.001 && grid.powertrainSound.driveLoad == 0,
+              "Selecting the electric car reads wheel-linked motor speed and clears the previous driving torque")
+        grid.reset(at:gridSlot)
+        check(grid.powertrainSound.shaftRPM == 0 && grid.powertrainSound.overrun == 0,
+              "A reset Honda e has a stationary rotor during the countdown")
+        grid.kind = .centenario
+        grid.reset(at:gridSlot)
+        check(grid.powertrainSound.shaftRPM == 950 && grid.powertrainSound.overrun == 0,
+              "Resetting the combustion car restores idle during the countdown")
+        for kind in VehicleKind.allCases where kind != .honda {
+            var free = Vehicle()
+            free.kind = kind
+            free.gear = 0
+            for _ in 0..<480 where free.rpm < 4700 {
+                drive(&free,seconds:1/240,input:gas,assists:manual)
+            }
+            var loaded = free
+            loaded.gear = 3
+            let wheelOmega = free.rpm * 2 * .pi / (60 * kind.gearRatios[2] * kind.finalDrive)
+            loaded.velocity = loaded.forward * (wheelOmega * loaded.wheelRadius)
+            for i in loaded.wheels.indices { loaded.wheels[i].angularVelocity = wheelOmega }
+            loaded.step(1/720,input:gas,assists:manual,roadDistance:0,roadWidth:12)
+            let underPower = loaded.powertrainSound
+            check(abs(free.powertrainSound.shaftRPM - underPower.shaftRPM) < 0.1 &&
+                  free.powertrainSound.driveLoad == 0 && free.powertrainSound.overrun == 0 &&
+                  abs(underPower.driveLoad-gas.throttle) < 0.001 && underPower.overrun == 0,
+                  "Same RPM and throttle resolve unloaded neutral and driving torque: \(kind.label)")
+
+            var shifted = loaded
+            _ = shifted.requestShift(1,pedals:gas,automatic:false)
+            drive(&shifted,seconds:0.02,input:gas,assists:manual)
+            let cut = shifted.powertrainSound.driveLoad
+            drive(&shifted,seconds:0.3,input:gas,assists:manual)
+            check(abs(cut - underPower.driveLoad * 0.35) < 0.001 &&
+                  abs(shifted.powertrainSound.driveLoad - underPower.driveLoad) < 0.001,
+                  "Upshift drops and restores sound load with the transmitted torque: \(kind.label)")
+
+            drive(&loaded,seconds:0.3,input:DrivingInput(),assists:manual)
+            let overrun = loaded.powertrainSound
+            loaded.gear = 0
+            loaded.step(1/720,input:DrivingInput(),assists:manual,roadDistance:0,roadWidth:12)
+            check(overrun.driveLoad == 0 && overrun.overrun > 0.55 &&
+                  loaded.powertrainSound.overrun == 0 && loaded.powertrainSound.driveLoad == 0,
+                  "Lifting backdrives the engine until neutral disconnects it: \(kind.label)")
+            if kind == .mazda {
+                print(String(format:"MX-5 at %.0f rpm: neutral %.3f, loaded %.3f, cut %.3f, closed-throttle backdrive %.3f",
+                             underPower.shaftRPM,free.powertrainSound.driveLoad,underPower.driveLoad,cut,overrun.overrun))
+            }
+        }
+
+        var coast = Vehicle()
+        coast.kind = .mazda
+        coast.gear = 0
+        coast.rpm = 3000
+        drive(&coast,seconds:0.22,input:DrivingInput(),assists:manual)
+        let afterLift = coast.rpm
+        drive(&coast,seconds:3.0,input:DrivingInput(),assists:manual)
+        check((2400...2900).contains(afterLift) && abs(coast.rpm - 950) < 1,
+              "An unloaded MX-5 crank loses speed over time and settles at governed idle")
+        var cutSamples = 0
+        var maxRPM = 0.0
+        for _ in 0..<720 {
+            drive(&coast,seconds:1/240,input:DrivingInput(throttle:1),assists:manual)
+            if coast.ignitionFraction == 0 { cutSamples += 1 }
+            maxRPM = max(maxRPM,coast.rpm)
+        }
+        check(cutSamples > 0 && (coast.kind.redline...coast.kind.redline+40).contains(maxRPM) &&
+              coast.speed == 0 && coast.powertrainSound.driveLoad == 0,
+              "Neutral can reach the governor and cut firing without transmitting wheel torque")
+
+        var onGrass = Vehicle()
+        onGrass.kind = .ferrari
+        var reducedOnGrass = false
+        for _ in 0..<120 {
+            drive(&onGrass,seconds:1/240,input:DrivingInput(throttle:1),distance:10)
+            if onGrass.tcActive && onGrass.powertrainSound.driveLoad + 0.15 < onGrass.engineThrottle {
+                reducedOnGrass = true
+            }
+        }
+        check(reducedOnGrass, "Traction control limiting wheel torque reduces sound load at the same throttle")
+
+        var reverse = Vehicle()
+        reverse.kind = .mazda
+        reverse.gear = -1
+        reverse.velocity = reverse.forward * -4
+        for i in reverse.wheels.indices { reverse.wheels[i].angularVelocity = -4/reverse.wheelRadius }
+        drive(&reverse,seconds:0.15,input:gas,assists:manual)
+        let reverseLoad = reverse.powertrainSound.driveLoad
+        drive(&reverse,seconds:0.2,input:DrivingInput(),assists:manual)
+        check(reverseLoad > 0.5 && reverse.powertrainSound.overrun > 0.1,
+              "Reverse distinguishes propulsive and overrun sound torque in the direction of travel")
+
+        var electric = Vehicle()
+        electric.kind = .honda
+        electric.gear = 0
+        drive(&electric,seconds:0.4,input:gas,assists:manual)
+        check(electric.powertrainSound.shaftRPM == 0 && electric.powertrainSound.driveLoad == 0,
+              "A stationary Honda e in neutral has no spinning traction motor with the accelerator down")
+        electric.velocity = electric.forward * 22
+        for i in electric.wheels.indices { electric.wheels[i].angularVelocity = 22/electric.wheelRadius }
+        drive(&electric,seconds:0.15,input:DrivingInput(),assists:manual)
+        let axleOmega = (electric.wheels[2].angularVelocity + electric.wheels[3].angularVelocity)/2
+        check(electric.powertrainSound.shaftRPM > 3800 &&
+              abs(electric.powertrainSound.shaftRPM - axleOmega * electric.kind.finalDrive * 60/(2 * .pi)) < 0.001 &&
+              electric.powertrainSound.driveLoad == 0 && electric.powertrainSound.overrun == 0,
+              "Honda e coasting in neutral still turns its fixed reduction without driving or regeneration")
+        electric.gear = 1
+        drive(&electric,seconds:0.15,input:gas,assists:manual)
+        let evLoad = electric.powertrainSound.driveLoad
+        drive(&electric,seconds:0.25,input:DrivingInput(),assists:manual)
+        check(evLoad > 0.6 && electric.powertrainSound.driveLoad == 0 && electric.powertrainSound.overrun == 0,
+              "Honda e delivers torque under power and reports no unmodelled regeneration on lift")
+    }
+
     static func main() {
+        checkPowertrainSound()
         let brake = DrivingInput(brake: 1)
         var car = Vehicle()
         check(car.requestShift(-1, pedals: DrivingInput(), automatic: true) == .stopAndBrake,

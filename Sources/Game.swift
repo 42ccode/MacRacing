@@ -279,7 +279,7 @@ final class RacingGame {
     private var telemetrySaveRevision = 0
     private var telemetryClock = 0.0
     private var telemetryElapsed = 0.0
-    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c,fr_travel_mm,fl_travel_mm,rr_travel_mm,rl_travel_mm,fr_load_n,fl_load_n,rr_load_n,rl_load_n,fr_kerb,fl_kerb,rr_kerb,rl_kerb,car_id,track_id,abs_level,tc_level,abs_release,tc_reduction,front_brake_bias,brake_line_pressure,yaw_rate_rad_s,aero_front_n,aero_rear_n,fr_grip_use,fl_grip_use,rr_grip_use,rl_grip_use,fr_contamination,fl_contamination,rr_contamination,rl_contamination,track_condition,tyre_compound,fr_water_mm,fl_water_mm,rr_water_mm,rl_water_mm,road_elevation_m,road_grade_pct,road_crossfall_pct,fr_tread_inner_c,fr_tread_middle_c,fr_tread_outer_c,fl_tread_inner_c,fl_tread_middle_c,fl_tread_outer_c,rr_tread_inner_c,rr_tread_middle_c,rr_tread_outer_c,rl_tread_inner_c,rl_tread_middle_c,rl_tread_outer_c,session_time_s,track_progress_m,track_lateral_m,rack_angle_rad,lap_index,fr_brake_pressure,fl_brake_pressure,rr_brake_pressure,rl_brake_pressure,fr_longitudinal_slip,fl_longitudinal_slip,rr_longitudinal_slip,rl_longitudinal_slip,fr_longitudinal_force_n,fl_longitudinal_force_n,rr_longitudinal_force_n,rl_longitudinal_force_n,wake_strength,applied_throttle,applied_brake,brake_steady_target,engine_throttle,fr_sliding_fraction,fl_sliding_fraction,rr_sliding_fraction,rl_sliding_fraction,fr_lateral_force_n,fl_lateral_force_n,rr_lateral_force_n,rl_lateral_force_n"]
+    private var telemetry: [String] = ["time_s,x_m,z_m,speed_kph,gear,rpm,throttle,brake,steering,lateral_g,longitudinal_g,valid_lap,fr_surface_c,fl_surface_c,rr_surface_c,rl_surface_c,fr_bar,fl_bar,rr_bar,rl_bar,fr_wear,fl_wear,rr_wear,rl_wear,front_damage,rear_damage,engine_damage,coolant_c,fr_travel_mm,fl_travel_mm,rr_travel_mm,rl_travel_mm,fr_load_n,fl_load_n,rr_load_n,rl_load_n,fr_kerb,fl_kerb,rr_kerb,rl_kerb,car_id,track_id,abs_level,tc_level,abs_release,tc_reduction,front_brake_bias,brake_line_pressure,yaw_rate_rad_s,aero_front_n,aero_rear_n,fr_grip_use,fl_grip_use,rr_grip_use,rl_grip_use,fr_contamination,fl_contamination,rr_contamination,rl_contamination,track_condition,tyre_compound,fr_water_mm,fl_water_mm,rr_water_mm,rl_water_mm,road_elevation_m,road_grade_pct,road_crossfall_pct,fr_tread_inner_c,fr_tread_middle_c,fr_tread_outer_c,fl_tread_inner_c,fl_tread_middle_c,fl_tread_outer_c,rr_tread_inner_c,rr_tread_middle_c,rr_tread_outer_c,rl_tread_inner_c,rl_tread_middle_c,rl_tread_outer_c,session_time_s,track_progress_m,track_lateral_m,rack_angle_rad,lap_index,fr_brake_pressure,fl_brake_pressure,rr_brake_pressure,rl_brake_pressure,fr_longitudinal_slip,fl_longitudinal_slip,rr_longitudinal_slip,rl_longitudinal_slip,fr_longitudinal_force_n,fl_longitudinal_force_n,rr_longitudinal_force_n,rl_longitudinal_force_n,wake_strength,applied_throttle,applied_brake,brake_steady_target,engine_throttle,fr_sliding_fraction,fl_sliding_fraction,rr_sliding_fraction,rl_sliding_fraction,fr_lateral_force_n,fl_lateral_force_n,rr_lateral_force_n,rl_lateral_force_n,fr_aligning_moment_nm,fl_aligning_moment_nm,rr_aligning_moment_nm,rl_aligning_moment_nm"]
     private let updateRate = 120
 
     private static func defaultDataDirectory() -> URL {
@@ -385,16 +385,7 @@ final class RacingGame {
         let signal = feedback.update(vehicle:vehicle,input:drivingInput,impact:impactFeedback,dt:dt,
                                      active:driving && input.hapticsAvailable)
         input.updateHaptics(signal,dt:dt,driving:driving)
-        let ear = world.camera.simdWorldRight
-        let earRight = SIMD2(Double(ear.x),Double(ear.z))
         let opponents = hasStarted ? traffic.cars.map(\.vehicle) : []
-        let motorVoices = driving ? opponents.map { OpponentMotor.relative(to:vehicle,opponent:$0,listenerRight:earRight) } : []
-        let raceSignal = sprint.map { $0.showGo ? 4 : $0.countdownSeconds } ?? 0
-        sound.update(rpm: vehicle.rpm, throttle: drivingInput.throttle, ignition: vehicle.ignitionFraction,
-                     cockpit: cockpit, kerb: vehicle.kerbFeedback, roadSpeed: vehicle.speed,
-                     roadSound:RoadSound(vehicle:vehicle),spray:vehicle.wheels.map(\.spray).max() ?? 0,
-                     kind:vehicle.kind,opponents:motorVoices,raceSignal:raceSignal,
-                     paused: isPaused || !hasStarted || serviceRemaining > 0)
         let running = hasStarted && !isPaused
         let continuous = running && renderingRate == .hz120
         if sceneView.isPlaying != running {
@@ -430,6 +421,26 @@ final class RacingGame {
             if !continuous { sceneView.needsDisplay = true }
             sceneDirty = false
         }
+        let ear = world.camera.simdWorldRight
+        let earRight = SIMD2(Double(ear.x),Double(ear.z))
+        let cameraPosition = world.camera.simdWorldPosition
+        let earPosition = SIMD2(Double(cameraPosition.x),Double(cameraPosition.z))
+        let localEar = world.car.simdConvertPosition(cameraPosition, from:nil)
+        let localRight = world.car.simdConvertVector(ear, from:nil)
+        let perspective = VehicleSoundPerspective(kind:vehicle.kind, localEar:SIMD3<Double>(localEar),
+                                                 localRight:SIMD3<Double>(localRight), cockpit:cockpit)
+        let audible = hasStarted && !isPaused && serviceRemaining == 0
+        let motorVoices = audible ? opponents.map {
+            OpponentMotor.relative(to:vehicle,opponent:$0,listenerRight:earRight,listenerPosition:earPosition)
+        } : []
+        let roadSound = RoadSound(vehicle:vehicle,listenerPosition:earPosition,listenerRight:earRight)
+        let raceSignal = sprint.map { $0.showGo ? 4 : $0.countdownSeconds } ?? 0
+        sound.update(rpm: vehicle.rpm, throttle: vehicle.engineThrottle, ignition: vehicle.ignitionFraction,
+                     powertrain: vehicle.powertrainSound, perspective:perspective,
+                     cockpit: cockpit, kerb: vehicle.kerbFeedback, roadSpeed: vehicle.speed,
+                     roadSound:roadSound,spray:vehicle.wheels.map(\.spray).max() ?? 0,
+                     kind:vehicle.kind,opponents:motorVoices,raceSignal:raceSignal,
+                     paused: !audible)
         updateMirror(at: now)
         renderClock += dt
         if renderClock >= 1.0 / 30 {
@@ -671,6 +682,7 @@ final class RacingGame {
                 data += [vehicle.wakeStrength,command.throttle,command.brake,pressureTarget,vehicle.engineThrottle]
                 data += wheels.map(\.slidingFraction)
                 data += wheels.map(\.lateralForce)
+                data += wheels.map(\.aligningMoment)
                 let decimals = String(repeating:",%.4f",count:data.count)
                 let fields = String(format:decimals,arguments:data)
                 telemetry.append(base+fields)
@@ -1195,7 +1207,8 @@ final class RacingGame {
         controlClock.reset()
         input.clear()
         if hasStarted { isPaused = true }
-        sound.update(rpm: vehicle.rpm, throttle: 0, paused: true)
+        sound.update(rpm: vehicle.rpm, throttle: vehicle.engineThrottle, ignition: vehicle.ignitionFraction,
+                     powertrain: vehicle.powertrainSound, cockpit: cockpit, kind: vehicle.kind, paused: true)
         hud.needsDisplay = true
     }
 

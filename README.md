@@ -1,4 +1,4 @@
-# APEX Lab — Circuit Test 3.0 Preview 21
+# APEX Lab — Circuit Test 3.0 Preview 24
 
 面向 Apple Silicon Mac 的原生赛车驾驶原型。使用 Swift、SceneKit / Metal、Game Controller、Core Haptics 和 AVFoundation，无需 Unity 或下载第三方依赖。
 
@@ -17,6 +17,16 @@
 ```sh
 ./build.sh --run
 ```
+
+## 3.0 Preview 24 驾驶声音
+
+MX-5 的 13 秒座舱试听包含空挡补油、挂挡加速、收油反拖和重刹。补油后转速随发动机惯量回落，挂挡后动力声跟随传出的扭矩。四条轮胎分别根据接地力和滑动速度发声。[试听工况变化](Docs/Audio-3.0/MX5-load-transitions.wav)
+
+[八车驾驶试听](Docs/Audio-3.0/Eight-car-audio-tour.wav)按车库顺序播放，每车八秒。MX-5 使用 Eunos Roadster 的低、中、高转录音，Elise 使用 Elise 录音，BMW 使用同代 E30 318is 加速录音。直线滑行时可以听到道路底噪，收油后胎声随轮胎抓地状态变化。
+
+## 3.0 Preview 22 松刹、转向与实车录音
+
+拖刹进弯时，管压可以跟随细小的踏板变化，松净后能重新施加轻刹。手柄将前轮回正力矩映射到左右握把。接近极限时回正提示减弱，胎声随接地滑动增强。动力音加入按车型选择的实录层，各段来源与借用车型见[音频署名](Assets/THIRD-PARTY-NOTICES.md)。[试听 12 秒 MX-5 加速、制动与入弯](Docs/Audio-3.0-preview22/MX5-trail-braking.wav)。
 
 ## 3.0 Preview 21 带刹入弯
 
@@ -354,7 +364,7 @@
 ./test.sh
 ```
 
-详见 [3.0 Preview 21 验证记录](Docs/VALIDATION-3.0-preview21.md)。
+详见 [3.0 Preview 24 验证记录](Docs/VALIDATION-3.0-preview24.md)。
 
 ## 当前边界
 

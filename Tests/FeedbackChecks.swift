@@ -11,6 +11,7 @@ import simd
         var feedback=HapticFeedback()
         let idle=feedback.update(vehicle:car,input:DrivingInput(),impact:.zero,dt:0.05,active:true)
         check(idle.peak==0,"Smooth straight running does not produce permanent rumble")
+        checkAligningMoment()
         func cornerTrace(front: Double,rear: Double,load: Double = 3100,lateralForce: Double = 3000) -> [HapticOutput] {
             var sample = car
             var mapping = HapticFeedback()
@@ -150,5 +151,39 @@ import simd
         check(repair.wheels.allSatisfy { $0.brakeTemperature==40 && $0.brakeFadeFactor==1 },"Service restores brake temperature and available torque")
         check(CircuitKind.allCases.allSatisfy { !Circuit(kind:$0).cornerDistances.isEmpty },"All six maps derive braking markers from their own bends")
         if failures>0 {exit(1)}
+    }
+
+    static func checkAligningMoment() {
+        func sample(degrees: Double, speed: Double = 22) -> (moment: Double, cue: HapticOutput) {
+            var car = Vehicle()
+            car.kind = .mazda
+            car.gear = 0
+            let angle = degrees * .pi / 180
+            car.velocity = car.forward * speed + car.modelX * (abs(speed) * tan(angle))
+            for i in car.wheels.indices {
+                car.wheels[i].temperature = 57
+                car.wheels[i].angularVelocity = speed / car.wheelRadius
+                car.wheels[i].relaxedSlipAngle = angle
+            }
+            car.step(1/720,input:DrivingInput(),assists:DrivingAssists(),roadDistance:0,roadWidth:12)
+            var mapping = HapticFeedback(), signal = HapticOutput.zero
+            for _ in 0..<30 {
+                signal = mapping.update(vehicle:car,input:DrivingInput(),impact:.zero,dt:1/120,active:true)
+            }
+            return (car.wheels[0].aligningMoment + car.wheels[1].aligningMoment, signal)
+        }
+        let small = sample(degrees:1), loaded = sample(degrees:3)
+        let approachingSlide = sample(degrees:8), sliding = sample(degrees:12)
+        check(small.moment > 0 && loaded.moment > small.moment &&
+              approachingSlide.moment < loaded.moment * 0.25 && sliding.moment == 0,
+              "The front contact patches develop aligning torque before sliding and lose it at saturation")
+        let opposite = sample(degrees:-1), reverse = sample(degrees:1,speed:-22)
+        check(abs(opposite.moment + small.moment) < 1e-6 && abs(reverse.moment + small.moment) < 1e-5,
+              "Mirrored sideslip and reversed rolling direction each reverse pneumatic trail torque")
+        check(small.cue.left > 0.04 && small.cue.right == 0 &&
+              abs(small.cue.left - opposite.cue.right) < 1e-6 && sliding.cue.combinedGrip > small.cue.combinedGrip,
+              "Light rolling corners load the corresponding handle before sustained scrub takes over")
+        print(String(format:"MX-5 front aligning torque at 1/3/8/12 degrees: %.1f / %.1f / %.1f / %.1f Nm",
+                     small.moment,loaded.moment,approachingSlide.moment,sliding.moment))
     }
 }

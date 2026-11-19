@@ -24,9 +24,15 @@ with TemporaryDirectory(prefix='.apex-package-', dir=archive.parent) as temporar
         validation = base/'Docs'/f'VALIDATION-{archive_version}.md'
         if not validation.exists():
             validation = base/'Docs'/f'VALIDATION-{release}.md'
-        out.write(validation,f'{root}/VALIDATION.md')
-        for sample in sorted((base/'Docs'/f'Audio-{release}').glob('*.wav')):
+        notes = validation.read_text(encoding='utf-8')
+        notes = notes.replace(f'](Audio-{release}/', '](')
+        notes = notes.replace('](../Assets/THIRD-PARTY-NOTICES.md)', '](THIRD-PARTY-NOTICES.md)')
+        out.writestr(f'{root}/VALIDATION.md', notes)
+        samples = sorted((base/'Docs'/f'Audio-{release}').glob('*.wav'))
+        for sample in samples:
             out.write(sample,f'{root}/{sample.name}')
+        if samples:
+            out.write(base/'Assets/THIRD-PARTY-NOTICES.md',f'{root}/THIRD-PARTY-NOTICES.md')
         credits = base/'Docs'/f'Driving-{release}'/'README.md'
         if credits.exists():
             out.write(credits,f'{root}/实机截图/README.md')

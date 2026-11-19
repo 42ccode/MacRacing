@@ -167,6 +167,11 @@ struct WheelState {
     var lateralForce = 0.0
     var gripUsage = 0.0
     var slidingFraction = 0.0
+    fileprivate(set) var slidingPower = 0.0 // friction work rate in the sliding portion of the footprint, W
+    fileprivate(set) var contactSlipSpeed = 0.0 // resultant tread-to-ground velocity, m/s
+    fileprivate(set) var rollingContactSpeed = 0.0 // longitudinal speed shared by road and tread, m/s
+    fileprivate(set) var pavedContactFraction = 1.0
+    var aligningMoment = 0.0 // Pneumatic contribution about the contact centre, N·m, positive toward model-local +X.
     fileprivate(set) var spray = 0.0
     fileprivate(set) var waterFilm = 0.0
     fileprivate(set) var surfaceContamination = 0.0
@@ -280,6 +285,8 @@ enum VehicleKind: Int, CaseIterable, Codable {
     }
     fileprivate var bodyInertia: BodyInertia { Self.bodyInertias[rawValue] }
     private var torqueScale: Double { [1, 1.55, 1.28, 0.86, 0.64, 1.82, 0.67, 1.01][rawValue] }
+    // Prototype effective crank and flywheel inertia (kg·m²) for unloaded ICE operation.
+    var freeCrankInertia: Double { 0.06 + 0.12 * torqueScale }
     var frontDriveShare: Double {
         switch self {
         case .porsche: return 0.30
@@ -330,6 +337,13 @@ enum VehicleKind: Int, CaseIterable, Codable {
     var credit: String { ["Eric Chadwick / DGG · CC BY 4.0", "vicent091036 · CC BY 4.0", "JK3Dstudios · CC BY 4.0", "Artem P · CC BY 4.0", "Lexyc16 · CC BY 4.0", "SDC PERFORMANCE · CC BY 4.0", "Stéphane Agullo · CC BY 4.0", "Alex Murias · CC BY 4.0"][rawValue] }
 }
 
+/// Source measurements from the drivetrain's last completed physics substep.
+struct PowertrainSound {
+    var driveLoad = 0.0 // Delivered driving torque / full-throttle torque at this RPM.
+    var overrun = 0.0 // Power driving the closed-throttle engine / its drag power at redline.
+    var shaftRPM = 0.0 // Absolute crankshaft or traction motor speed, rev/min.
+}
+
 struct Vehicle {
     var position = SIMD2<Double>.zero
     var velocity = SIMD2<Double>.zero
@@ -362,12 +376,19 @@ struct Vehicle {
     private var pitchRate = 0.0
     private var shiftCooldown = 0.0
     private var shiftingDown = false
+    private var freeRevCut = false
+    private static let closedThrottleDrag = 23.0 // N·m at the engine, before the gearbox.
     private(set) var engineThrottle = 0.0
+    private var shaftLoad = (drive: 0.0, overrun: 0.0)
     private var brakeTakeUp = 0.0
     private(set) var brakeLinePressure = 0.0
     private(set) var brakePedalTravel = 0.0
 
-    var kind = VehicleKind.concept
+    var kind = VehicleKind.concept {
+        didSet {
+            if kind != oldValue { shaftLoad = (0, 0) }
+        }
+    }
     var mass: Double { kind.mass }
     var wheelbase: Double { kind.wheelbase }
     var wheelRadius: Double { kind.radius }
@@ -377,6 +398,15 @@ struct Vehicle {
     private var transmissionRatio: Double {
         if gear == -1 { return kind.reverseRatio }
         return (1...gearRatios.count).contains(gear) ? gearRatios[gear-1] : 0
+    }
+    private var drivenWheelOmega: Double {
+        let front = wheels[0].angularVelocity + wheels[1].angularVelocity
+        let rear = wheels[2].angularVelocity + wheels[3].angularVelocity
+        return (front * kind.frontDriveShare + rear * (1 - kind.frontDriveShare)) / 2
+    }
+    var powertrainSound: PowertrainSound {
+        let shaftRPM = kind == .honda ? abs(drivenWheelOmega) * kind.finalDrive * 60 / (2 * .pi) : rpm
+        return PowertrainSound(driveLoad:shaftLoad.drive, overrun:shaftLoad.overrun, shaftRPM:shaftRPM)
     }
     enum ShiftResult { case shifted, busy, unavailable, stopAndBrake, overRev }
     var forward: SIMD2<Double> { SIMD2(sin(heading), cos(heading)) }
@@ -392,6 +422,7 @@ struct Vehicle {
         return release*release*(3-2*release)
     }
     var ignitionFraction: Double {
+        if gear == 0 && freeRevCut { return 0 }
         let shiftCut = 0.35+0.65*shiftEngagement
         return rpm > kind.redline ? shiftCut * 0.10 : shiftCut
     }
@@ -399,22 +430,6 @@ struct Vehicle {
     var brakeLightsActive: Bool { brakePedalTravel > 0.075 || brakeLinePressure > 0.018 }
     var kerbFeedback: Double { wheels.map(\.kerbFeedback).max() ?? 0 }
     var allWheelsOutside: Bool { wheels.allSatisfy { $0.surface == .grass } }
-    var tyreScrub: Double {
-        let sides = tyreScrubBySide
-        return max(sides.x,sides.y)
-    }
-    /// Driver left and right, scaled by slip speed and contact load.
-    var tyreScrubBySide: SIMD2<Double> {
-        let speed = self.speed
-        let staticLoad = mass*9.81/4
-        func scrub(_ wheel: WheelState) -> Double {
-            let nearLimit = clamp((wheel.gripUsage - 0.45) / 0.55, 0, 1)
-            let slipSpeed = speed * hypot(wheel.relaxedSlipRatio, wheel.relaxedSlipAngle)
-            let load = clamp(wheel.normalLoad/staticLoad,0,1)
-            return nearLimit * clamp(slipSpeed / 3, 0, 1) * load
-        }
-        return SIMD2(max(scrub(wheels[1]),scrub(wheels[3])),max(scrub(wheels[0]),scrub(wheels[2])))
-    }
     var contactPoints: [SIMD2<Double>] {
         let xs = [-trackWidth/2, trackWidth/2, -trackWidth/2, trackWidth/2]
         let lf = kind.frontAxle
@@ -569,6 +584,22 @@ struct Vehicle {
         shiftCooldown = next == 0 ? 0.12 : 0.22
     }
 
+    private mutating func integrateFreeCrank(_ dt: Double) {
+        let idleRPM = 950.0
+        let rpmPerRadSecond = 60 / (2 * Double.pi)
+        let inertia = kind.freeCrankInertia
+        if rpm >= kind.redline { freeRevCut = true }
+        else if rpm <= kind.redline - 120 { freeRevCut = false }
+
+        let losses = Self.closedThrottleDrag * (0.5 + 1.5 * rpm / kind.redline)
+        // The published curve is brake torque. Add back internal losses to
+        // infer the firing torque, then apply friction even if ignition is cut.
+        let fullFiringTorque = kind.fullThrottleTorque(at:rpm) * powerFactor + losses
+        let idleGovernor = clamp(losses + inertia * (idleRPM-rpm) / (rpmPerRadSecond * 0.12), 0, fullFiringTorque)
+        let firingTorque = max(idleGovernor, fullFiringTorque * engineThrottle) * ignitionFraction
+        rpm = clamp(rpm + (firingTorque-losses) / inertia * dt * rpmPerRadSecond, 0, kind.redline+300)
+    }
+
     mutating func requestShift(_ direction: Int, pedals: DrivingInput, automatic: Bool) -> ShiftResult {
         guard direction == -1 || direction == 1 else { return .unavailable }
         let next = gear + direction
@@ -580,10 +611,7 @@ struct Vehicle {
         }
         if next > 0 && next < gear {
             let roadOmega = abs(forwardSpeed)/wheelRadius
-            let front = wheels[0].angularVelocity+wheels[1].angularVelocity
-            let rear = wheels[2].angularVelocity+wheels[3].angularVelocity
-            let drivenOmega = abs(front*kind.frontDriveShare+rear*(1-kind.frontDriveShare))/2
-            let proposedRPM = max(roadOmega,drivenOmega)*gearRatios[next-1]*kind.finalDrive*60/(2 * .pi)
+            let proposedRPM = max(roadOmega,abs(drivenWheelOmega))*gearRatios[next-1]*kind.finalDrive*60/(2 * .pi)
             guard proposedRPM < kind.redline*1.035 else { return .overRev }
         }
         engageGear(next)
@@ -619,10 +647,13 @@ struct Vehicle {
         brakeTakeUp += (takeUpTarget - brakeTakeUp) * (1 - exp(-dt * takeUpRate))
         let pressureTarget = demand * brakeTakeUp
         let delta = pressureTarget - brakeLinePressure
-        // Meter a partial release into a corner, but vent quickly off pedal.
-        let pressureRate = delta >= 0 ? 29 + 11 * pressureTarget : 40 + 26 * (1 - clamp(demand / 0.18,0,1))
+        // Approximate return flow through the brake line by Δp = aQ + bQ².
+        // A small pressure correction sees the line's short compliance time;
+        // a large dump also encounters flow resistance.
+        let pressureRate = delta >= 0 ? 29 + 11 * pressureTarget
+            : (2 / 0.011) / (1 + sqrt(1 - delta / 0.16))
         brakeLinePressure += delta * (1 - exp(-dt * pressureRate))
-        if brakeLinePressure < 0.0001 { brakeLinePressure = 0 }
+        if demand == 0 && brakeLinePressure < 0.0001 { brakeLinePressure = 0 }
         let brake = brakeLinePressure
         let vf = simd_dot(velocity, forward)
         let vl = simd_dot(velocity, modelX)
@@ -640,19 +671,23 @@ struct Vehicle {
         let ratio = transmissionRatio * kind.finalDrive
         let frontShare = kind.frontDriveShare
         let rearShare = 1 - frontShare
-        let drivenOmega = ((wheels[0].angularVelocity + wheels[1].angularVelocity) * frontShare
-            + (wheels[2].angularVelocity + wheels[3].angularVelocity) * rearShare) / 2
-        let coupledRPM = abs(drivenOmega) * ratio * 60 / (2 * .pi)
-        let targetRPM = gear == 0 ? 950 + throttle * (kind.redline - 750) :
-            clamp(coupledRPM, 950 + throttle * 450, kind.redline + 300)
-        let speedMatching = shiftingDown && shiftCooldown > 0 ? 32.0 : 20
-        rpm += (targetRPM-rpm)*(1-exp(-dt*speedMatching))
+        let coupledRPM = abs(drivenWheelOmega) * ratio * 60 / (2 * .pi)
+        if gear == 0 && kind != .honda {
+            integrateFreeCrank(dt)
+        } else {
+            freeRevCut = false
+            let targetRPM = gear == 0 ? 950 + throttle * (kind.redline - 750) :
+                clamp(coupledRPM, 950 + throttle * 450, kind.redline + 300)
+            let speedMatching = shiftingDown && shiftCooldown > 0 ? 32.0 : 20
+            rpm += (targetRPM-rpm)*(1-exp(-dt*speedMatching))
+        }
         shiftCooldown = max(0, shiftCooldown - dt)
         if assists.automatic && gear > 0 && shiftCooldown <= 0 {
             if rpm > kind.upshiftRPM && gear < gearRatios.count { engageGear(gear+1) }
             else if rpm < 2450 && gear > 1 { engageGear(gear-1) }
         }
-        let engineTorque = kind.fullThrottleTorque(at:rpm)*powerFactor*engineThrottle
+        let ratedTorque = kind.fullThrottleTorque(at:rpm)
+        let engineTorque = ratedTorque*powerFactor*engineThrottle
         // Thermostat restricts cooling below operating temperature; nose damage
         // reduces radiator capacity rather than cooling an idling engine to ambient.
         coolantTemperature += ((0.35 + throttle * 1.8 + damage.front * 0.6) -
@@ -660,11 +695,13 @@ struct Vehicle {
         coolantTemperature = clamp(coolantTemperature, 26, 160)
         damage.engine = min(1, damage.engine + max(0, coolantTemperature - 125) * dt * 0.00015)
         let clutch = shiftingDown ? 0.18+0.82*shiftEngagement : 1
-        let engineDrag = 23*clutch*clamp(1-engineThrottle/0.16,0,1)*clamp(abs(vf)/3,0,1)
+        let engineDrag = Self.closedThrottleDrag*clutch*clamp(1-engineThrottle/0.16,0,1)*clamp(abs(vf)/3,0,1)
         let driveDirection = gear < 0 ? -1.0 : 1.0
         let reverseLimit = gear < 0 ? clamp((8 + vf)/2, 0, 1) : 1
-        let axleTorque = (driveDirection * engineTorque * ignitionFraction * reverseLimit - copysign(engineDrag, vf))
-            * transmissionRatio * kind.finalDrive * 0.91
+        let drivingTorque = engineTorque * ignitionFraction * reverseLimit
+        let transmissionEfficiency = 0.91
+        let axleTorque = (driveDirection * drivingTorque - copysign(engineDrag, vf))
+            * transmissionRatio * kind.finalDrive * transmissionEfficiency
         let diffStrength = gear == 0 ? 0 : 6 + throttle * 9
         let frontTransfer = clamp((wheels[1].angularVelocity - wheels[0].angularVelocity) * diffStrength, -350, 350) * frontShare
         let rearTransfer = clamp((wheels[3].angularVelocity - wheels[2].angularVelocity) * diffStrength, -350, 350) * rearShare
@@ -673,6 +710,7 @@ struct Vehicle {
         let driveTorques = [axleTorque * frontShare / 2 + frontTransfer, axleTorque * frontShare / 2 - frontTransfer,
                             axleTorque * rearShare / 2 + rearTransfer, axleTorque * rearShare / 2 - rearTransfer]
         var totalFx = 0.0
+        var deliveredAxleTorque = 0.0
         var totalFy = 0.0
         var slopeReaction = SIMD2<Double>.zero
         var yawTorque = 0.0
@@ -807,20 +845,28 @@ struct Vehicle {
             let slidingGrip = capacity * (0.82 + 0.18 * exp(-slidingSpeed / 5))
             let longitudinalStiffness = 65000 * stiffnessScale
 
-            func forces(_ omega: Double) -> (fx: Double, fy: Double, ratio: Double, slidingFraction: Double) {
+            func forces(_ omega: Double) -> (fx: Double, fy: Double, ratio: Double, slidingFraction: Double, momentPerLength: Double) {
                 let slipRatio = (omega * radius - u) / slipDenominator
-                guard capacity > 0 else { return (0, 0, slipRatio, 0) }
+                guard capacity > 0 else { return (0, 0, slipRatio, 0, 0) }
                 let forceRatio = relaxedRatio + (slipRatio - relaxedRatio) * longitudinalResponse
                 let linearX = longitudinalStiffness * forceRatio
                 let demand = hypot(linearX, linearY)
                 let slidingLength = min(1, demand / (3 * capacity))
-                let adhesionScale = (1 - slidingLength) * (1 - slidingLength)
+                let stickingLength = 1 - slidingLength
+                let adhesionScale = stickingLength * stickingLength
                 let slidingFraction = slidingLength * slidingLength * (3 - 2 * slidingLength)
                 let longitudinalSlipSpeed = omega * radius - u
                 let slipSpeed = hypot(longitudinalSlipSpeed, v)
-                let slidingScale = slidingGrip * slidingFraction / max(slipSpeed, 0.05)
+                let frictionPerSpeed = slidingGrip / max(slipSpeed, 0.05)
+                let slidingScale = frictionPerSpeed * slidingFraction
+                // First moment about the footprint midpoint, with distance measured
+                // from the leading edge. Sticking shear grows linearly; sliding
+                // shear follows the same parabolic pressure profile as its force.
+                let adhesiveMoment = linearY * adhesionScale * (0.5 - 2 * stickingLength / 3)
+                let slidingMoment = v * frictionPerSpeed * 1.5 * adhesionScale * slidingLength * slidingLength
                 return (linearX * adhesionScale + longitudinalSlipSpeed * slidingScale,
-                        linearY * adhesionScale - v * slidingScale, slipRatio, slidingFraction)
+                        linearY * adhesionScale - v * slidingScale, slipRatio, slidingFraction,
+                        adhesiveMoment + slidingMoment)
             }
 
             var driveTorque = driveTorques[i]
@@ -843,6 +889,7 @@ struct Vehicle {
             } else {
                 wheel.tractionTorqueScale = 1
             }
+            deliveredAxleTorque += driveTorque
             let rollingDirection = u < 0 ? -1.0 : 1.0
             if assists.abs && brake > 0.025 {
                 let dryContact = (1-grassShare) * (1-clamp(waterDepth/0.75,0,1))
@@ -909,6 +956,18 @@ struct Vehicle {
             }
             let contact = forces(omega)
             wheel.slidingFraction = contact.slidingFraction
+            let treadSpeed = omega * radius
+            let slipSpeed = hypot(treadSpeed - u, v)
+            wheel.contactSlipSpeed = slipSpeed
+            // Use only the sliding traction in forces(). The sticking portion
+            // also generates cornering force but largely stores elastic energy.
+            wheel.slidingPower = slidingGrip * contact.slidingFraction * slipSpeed * min(1, slipSpeed / 0.05)
+            wheel.rollingContactSpeed = treadSpeed * u > 0 ? min(abs(treadSpeed), abs(u)) : 0
+            wheel.pavedContactFraction = 1 - grassShare
+            // Estimate footprint area from load and gauge pressure, with a
+            // nominal length/width ratio of 0.55. Blend the rolling direction at rest.
+            let patchLength = sqrt(0.55 * load / (max(wheel.pressure, 0.8) * 100_000))
+            wheel.aligningMoment = patchLength * contact.momentPerLength * clamp(u / 1.5, -1, 1)
             let available = capacity + (slidingGrip - capacity) * contact.slidingFraction
             wheel.gripUsage = available > 1 ? clamp(hypot(contact.fx, contact.fy) / available, 0, 1) : 0
             let brakeWork = brakeTorque * abs((previousOmega+omega)/2)
@@ -935,11 +994,19 @@ struct Vehicle {
             let worldFy = fy + simd_dot(normalReaction,modelX)
             totalFx += worldFx
             totalFy += worldFy
-            yawTorque += z * worldFy - x * worldFx
+            yawTorque += z * worldFy - x * worldFx + wheel.aligningMoment
             maximumSlip = max(maximumSlip, min(1, abs(contact.ratio) * 1.4 + abs(slipAngle) * 2))
             wheels[i] = wheel
         }
 
+        let wheelOmega = drivenWheelOmega
+        let reduction = transmissionRatio * kind.finalDrive
+        let netShaftTorque = reduction > 0 ? deliveredAxleTorque * driveDirection / (reduction * transmissionEfficiency) : 0
+        let backdriveRPM = max(0, wheelOmega * driveDirection) * reduction * 60 / (2 * .pi)
+        // An EV in neutral still turns its fixed reduction. Axle drag alone
+        // cannot tell whether energy is recovered, so it supplies no engine-braking voice.
+        shaftLoad.drive = clamp(min(drivingTorque, netShaftTorque) / ratedTorque, 0, 1)
+        shaftLoad.overrun = kind == .honda ? 0 : clamp(min(-netShaftTorque, engineDrag) * backdriveRPM / (Self.closedThrottleDrag * kind.redline), 0, 1)
         let drag = (kind.dragCoefficient*(1-wakeStrength*0.20) + damage.front*0.22 + damage.rear*0.13) * vf * abs(vf)
         let rolling = (vf >= 0 ? 1.0 : -1.0) * min(rollingDemand, abs(vf) * mass / dt)
         let groundLongitudinalForce = totalFx - simd_dot(slopeReaction,forward) - rolling

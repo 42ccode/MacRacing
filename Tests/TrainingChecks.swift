@@ -18,7 +18,47 @@ import simd
         }
         return session
     }
+    static func brakeDetail() throws {
+        var session = RaceSession()
+        session.resetLap(at:0)
+        var car = Vehicle()
+        car.gear = 0
+        for tick in 1...14_401 {
+            let dt = 1.0/240, metres = Double(tick)*20/240
+            let progress = metres.truncatingRemainder(dividingBy:1200)
+            let pulse = max(0,1-abs(progress-303)/2.8)
+            let input = DrivingInput(brake:0.85*pulse,steering:0.45*pulse)
+            car.velocity = car.forward*20
+            car.step(dt,input:input,assists:DrivingAssists(automatic:false),roadDistance:0,roadWidth:12)
+            let location = TrackLocation(point:SIMD2(progress,0),tangent:car.forward,progress:progress,
+                                         lateral:0,distance:0,segment:0)
+            if session.step(dt,vehicle:car,location:location,trackLength:1200,trackWidth:12,input:input) { break }
+        }
+        guard let lap = session.analysedLap else { check(false,"Fine brake trace completes a valid lap"); return }
+        let oldInputs = stride(from:0,to:lap.inputs.count,by:4).map { i in
+            let sample = lap.inputs[i]
+            return LapInputs(DrivingInput(throttle:sample.throttle,brake:sample.brake,steering:sample.steering),
+                             speedKPH:sample.speedKPH,linePressure:sample.linePressure)
+        }
+        let legacy = AnalysedLap(summary:lap.summary,inputs:oldInputs)
+        let restored = try JSONDecoder().decode(AnalysedLap.self,from:JSONEncoder().encode(legacy))
+        let marker = 303.0/1200
+        let details = lap.input(at:marker), old = restored.input(at:marker)
+        check(lap.inputs.count == 801 && oldInputs.count == 201 && restored.isValid,
+              "New 801-point and old 201-point laps round-trip without changing their original spacing")
+        check(details.brake > 0.84 && old.brake == 0 && (details.linePressure ?? 0) > 0.15 &&
+              (details.handwheelDegrees ?? 0) > 0.5 && old.handwheelDegrees == nil,
+              "A 5.6 m brake-and-turn pulse between legacy samples records true pressure and right-handwheel angle only on its measured lap")
+        check(lap.input(at:0).speedKPH == lap.inputs.first?.speedKPH &&
+              restored.input(at:1).speedKPH == restored.inputs.last?.speedKPH &&
+              !AnalysedLap(summary:lap.summary,inputs:Array(oldInputs.dropLast())).isValid,
+              "Mixed-resolution reads include both timing-line endpoints and reject incomplete traces")
+        print(String(format:"Trace pulse at 303 m · pedal %.1f%% · line %.1f%% · handwheel %.1f degrees · previous pedal %.1f%%",
+                     details.brake*100,(details.linePressure ?? 0)*100,details.handwheelDegrees ?? 0,old.brake*100))
+    }
+
     static func main() throws {
+        try brakeDetail()
         let reference=lap();guard let record=reference.record else {fatalError("Missing reference")}
         let a = LapInputs(DrivingInput(brake:0.5),speedKPH:150,linePressure:0.12)
         let b = LapInputs(DrivingInput(brake:0.75),speedKPH:120,linePressure:0.44)
@@ -102,7 +142,21 @@ import simd
         var badGhost=record.ghost;badGhost[1]=badGhost[0]
         check(!LapRecord(time:record.time,sectors:record.sectors,trace:record.trace,ghost:badGhost).isValid,"Duplicate ghost timestamps are rejected")
         let keys=VehicleKind.allCases.flatMap { car in CircuitKind.allCases.map {LapRecord.key(vehicle:car,circuit:$0)} }
-        check(Set(keys).count==keys.count,"All vehicle and circuit record keys are distinct")
+        check(VehicleKind.allCases.map(\.rawValue) == [2,5] && Set(keys).count == keys.count,
+              "The active roster retains stable Porsche and Centenario keys for every circuit")
+        let layoutKeys = TrackCondition.allCases.flatMap { condition in
+            [CircuitKind.ridge,.valley].flatMap { kind in
+                [false,true].map { legacy in
+                    LapRecord.key(vehicle:.porsche,circuit:kind,condition:condition,legacyLayout:legacy)
+                }
+            }
+        }
+        check(Set(layoutKeys).count == 8 &&
+              LapRecord.key(vehicle:.porsche,circuit:.valley,legacyLayout:true,legacyPorscheMass:true) == "timing9-2-5" &&
+              LapRecord.key(vehicle:.porsche,circuit:.ridge) == "timing10-2-4-graded" &&
+              LapRecord.key(vehicle:.porsche,circuit:.ridge,legacyPorscheMass:true) == "timing9-2-4-graded" &&
+              LapRecord.key(vehicle:.centenario,circuit:.ridge) == "timing9-5-4-graded",
+              "Valley creates a separate record for the graded course and preserves existing flat and Ridge keys")
         check(reference.ghost(at:30) != nil && reference.ghost(at:61)==nil,"Restored ghost interpolation stays within recorded lap duration")
         let circuit = Circuit()
         let length = circuit.length

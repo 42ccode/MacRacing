@@ -1,12 +1,20 @@
-# APEX Lab — Circuit Test 3.0 Preview 24
+# APEX Lab 3.0 Preview 60
 
-面向 Apple Silicon Mac 的原生赛车驾驶原型。使用 Swift、SceneKit / Metal、Game Controller、Core Haptics 和 AVFoundation，无需 Unity 或下载第三方依赖。
+APEX Lab 是面向 Apple Silicon Mac 的离线赛车游戏。现可驾驶 Porsche 911 Carrera 4S (992) 和 Lamborghini Centenario LP-770，在六条原创赛道练习、单圈排位、参加自定义比赛和三站巡回赛。游戏使用 Swift、SceneKit / Metal、Game Controller、Core Haptics 和 AVFoundation。 [Preview 55 实机两车选车页](Docs/Driving-3.0/preview55-two-car-garage.jpg)
 
-这是一款独立原创原型，未使用 iRacing 的代码、车辆、赛道或其他资源，不是 iRacing 的移植版。
+驾驶学院从定点停车、带刹入弯和湿地出弯入手。车库可观察原作者座舱与车身、操作活动车门与盖板，并查看各车后视镜。 [911 驾驶舱](Docs/Driving-3.0/preview55-porsche-cockpit.jpg) · [Centenario 驾驶舱](Docs/Driving-3.0/preview55-centenario-cockpit.jpg) · [Centenario 展厅开门](Docs/Driving-3.0/preview55-centenario-showroom.jpg)
 
-车辆历史截图（1.2）：[Ferrari 驾驶舱](Docs/Driving-1.2/ferrari-cockpit.jpg) · [Ferrari 跟车](Docs/Driving-1.2/ferrari-chase.jpg) · [Porsche 跟车](Docs/Driving-1.2/porsche-chase.jpg)。均由原生渲染器生成，未做后期修图。Ferrari 模型：vicent091036，CC BY 4.0；Porsche 模型：Lionsharp Studios / Karol Miklas，CC BY-SA 4.0。完整署名和改动见 [车辆资源说明](Assets/Vehicles/README.md)。
+Preview 55 的松刹入弯课分别反馈带刹转向、逐步松刹和完全松刹后的持续时间。两款车辆保留独立动力、传动和转向设定。 [试玩说明](Docs/试玩说明.md) · [Preview 55 验证记录](Docs/VALIDATION-3.0-preview55.md) · [素材作者与许可](Assets/THIRD-PARTY-NOTICES.md)
 
-1.5 检查图：[Porsche 动态仪表](Docs/Driving-1.5/car-2-cockpit.jpg) · [车外](Docs/Driving-1.5/car-2-exterior.jpg) · [立体路肩](Docs/Driving-1.5/track-kerb.jpg) · [看台](Docs/Driving-1.5/track-stand.jpg)。[图片署名](Docs/Driving-1.5/README.md)。
+911 的方向盘绕原模型轮圈的倾斜轴转动。两辆车在旁边刹车锁胎或推头时，可从相应方向听到轮胎擦地声。 [911 方向盘转角对照](Docs/Driving-3.0/preview56-porsche-steering.jpg) · [Preview 56 验证记录](Docs/VALIDATION-3.0-preview56.md)
+
+松刹换向时，前轮接地斑按当下滑动程度释放纵向变形。按 F8 查看两圈的制动压力、方向盘角度和弯段放大图。窄视野侧看时，两辆车都能看见左后视镜。 [Preview 57 验证记录](Docs/VALIDATION-3.0-preview57.md)
+
+911 Carrera 4S 使用原厂美规 PDK 车型的整备质量，原车重的个人最佳保留在驾驶记录中。两车的 240 Hz 物理步进可补算短时掉帧，车群中的每台引擎使用独立的录音起点。 [Preview 58 验证记录](Docs/VALIDATION-3.0-preview58.md)
+
+驾驶时以 240 Hz 为目标读取输入，画面和回放支持 120 FPS。用键盘短点方向键可微调车头，持续按住可打到全舵；反打时先快速回正。 [Preview 59 验证记录](Docs/VALIDATION-3.0-preview59.md)
+
+Preview 60 调整湿地起步离合器、小幅补刹和键盘输入时序。 [Preview 60 验证记录](Docs/VALIDATION-3.0-preview60.md)
 
 ## 运行
 
@@ -18,9 +26,129 @@
 ./build.sh --run
 ```
 
-## 3.0 Preview 24 驾驶声音
+> 以下版本条目为历史记录，包含当时的玩法和车型。现行阵容以本页「当前内容」为准。
 
-MX-5 的 13 秒座舱试听包含空挡补油、挂挡加速、收油反拖和重刹。补油后转速随发动机惯量回落，挂挡后动力声跟随传出的扭矩。四条轮胎分别根据接地力和滑动速度发声。[试听工况变化](Docs/Audio-3.0/MX5-load-transitions.wav)
+## 3.0 Preview 54 进站避让与理想线路显示
+
+对手驶向维修道时会监测同一路径上的慢车，并在进站分流区继续让行。理想线路复用固定路面顶点，进弯提示根据当时车速更新。[3.0 Preview 54 验证记录](Docs/VALIDATION-3.0-preview54.md)
+
+## 3.0 Preview 53 按车型接触与遥测性能
+
+每款车使用自己的车宽、前伸和后伸距离计算车辆接触。对手轮胎的瘪胎和受损悬架在赛道与回放中可见。驾驶时，遥测的 CSV 文本在后台生成。 [3.0 Preview 53 验证记录](Docs/VALIDATION-3.0-preview53.md)
+
+## 3.0 Preview 52 湿地抓地、赛道接缝与碰撞实录
+
+高速碾过较深积水时，每条轮胎按当时的胎压调整抓地力。六条湿地赛道的铺装路边与主路共享边界。车身撞击声按接触点、相对速度和镜头位置播放，比赛回放保留每次撞击的时刻。 [3.0 Preview 52 验证记录](Docs/VALIDATION-3.0-preview52.md)
+
+## 3.0 Preview 51 E30 仪表、对手甩水和赛场安全
+
+E30 原贴图上的速度表和转速表指针随车辆数据独立运动。对手的甩水声随四轮接地、距离及镜头方向变化。赛道黄旗会识别停在边缘且车身仍侵入行驶范围的车辆。终点阶段，已停稳在安全区且无法继续行驶的对手可提前结算退赛。 [3.0 Preview 51 验证记录](Docs/VALIDATION-3.0-preview51.md)
+
+## 3.0 Preview 50 对手进站、内饰材质和湿路实录
+
+出现可维修损伤的对手会沿维修道进站，服务后等空档再并线。911 和 Elise 调整了原内饰表面的反光。湿地水声加入实录路面纹理，由四轮接地与听者位置实时驱动。 [3.0 Preview 50 验证记录](Docs/VALIDATION-3.0-preview50.md)
+
+## 3.0 Preview 49 松刹连续性与赛中计时差
+
+松刹入弯时，ABS 停止调节后卡钳沿原有回压速度过渡。比赛使用双方经过同一个检查点的时间计算与前车的差距。 [3.0 Preview 49 验证记录](Docs/VALIDATION-3.0-preview49.md)
+
+## 3.0 Preview 48 手柄兼容、回放踏板与渐干对手
+
+手柄的一个震动通道失败时会继续使用可用的握把。校准页单独显示游戏读取与 macOS 输入事件的间隔。回放新增车速、油门开度、刹车行程和液压。渐干正赛的对手会以小幅速度调整利用前方两侧胎路已有的抓地变化。 [3.0 Preview 48 验证记录](Docs/VALIDATION-3.0-preview48.md)
+
+## 3.0 Preview 47 进站选择、座舱回放与湿地声音
+
+正赛可单独换胎、单独维修或同时进行，停车时间按所选项目与实际损伤计算。回放新增驾驶舱、左右观察和可随进度刷新的后视镜。湿地甩水声由四轮共同决定，松油降挡的声音按反拖重新接合的时刻变化。 [3.0 Preview 47 验证记录](Docs/VALIDATION-3.0-preview47.md)
+
+## 3.0 Preview 46 逐圈成绩、回放声音与加载优化
+
+结算和比赛历史可展开每圈时间，并标出发车圈、有效最快圈和越界。回放保留同期的发动机负载、换挡和轮胎声。重排模型顶点数据的加载方式，显著减少 Concept GT 等模型的内存占用。 [3.0 Preview 46 验证记录](Docs/VALIDATION-3.0-preview46.md)
+
+## 3.0 Preview 45 套圈、完赛与真实 60 FPS
+
+套圈时会提示蓝旗，电脑车会选择安全直道留出空间。领跑者跑完后，其他车手在下次有效过线时完成比赛，落后圈数单独列出。60 FPS 模式使用明确的 Metal 上屏节奏，物理计算保持 240 Hz。 [3.0 Preview 45 验证记录](Docs/VALIDATION-3.0-preview45.md)
+
+## 3.0 Preview 44 雨后路面与展厅细节
+
+湿地自定义赛可启用「雨后渐干」。赛车经过的位置会逐渐排开薄水，轮胎抓地、喷雾和路面光泽随时间变化。重刹时自动挡提前准备出弯档位。MX-5、E30、Honda e、Ferrari 458、911 和 Elise 修整了车门、玻璃、盖板或驾驶位视野。 [3.0 Preview 44 验证记录](Docs/VALIDATION-3.0-preview44.md)
+
+## 3.0 Preview 43 进站策略与驾驶记录
+
+正赛暂停菜单可预选下次进站的轮胎和冷压。停车换胎时，刹车盘继续散热。驾驶记录可按车型和干湿条件查六条赛道的个人最佳和三个分段，驾驶学院会显示本次停车位置、连续松刹和出弯打滑等测量结果。 [3.0 Preview 43 验证记录](Docs/VALIDATION-3.0-preview43.md)
+
+## 3.0 Preview 42 排位与赛中维修
+
+发车位可由一圈有效排位决定。电脑车手在相同赛道与路况上各自测时，比赛按排位结果发车。赛中可在维修位停稳维修并更换同规格轮胎，正常计入比赛时间。选车、赛道和赛后回放加入实机画面与赛道镜头。 [3.0 Preview 42 验证记录](Docs/VALIDATION-3.0-preview42.md)
+
+## 3.0 Preview 41 完整比赛流程
+
+可配置圈数、发车位、对手难度和轮胎。完赛后自动结算并保存比赛记录，也可以回放最后 90 秒。巡回赛有俱乐部杯、雨地杯和速度杯，每杯三站。驾驶学院的三节课分别练习起步停车、松刹入弯和湿地出弯。 [3.0 Preview 41 验证记录](Docs/VALIDATION-3.0-preview41.md)
+
+## 3.0 Preview 40 发车并线
+
+自动驾驶会根据离参考线的距离、预计转弯负荷和车身侧滑调整油门。强动力车型在发车并线时保留更多侧向抓地。 [3.0 Preview 40 验证记录](Docs/VALIDATION-3.0-preview40.md)
+
+## 3.0 Preview 39 场景加载
+
+启动时直接构建存档选中的赛道、路况和车辆。切换路况时也只加载已选车型。 [3.0 Preview 39 验证记录](Docs/VALIDATION-3.0-preview39.md)
+
+## 3.0 Preview 38 湿地走线
+
+六条赛道的湿地走线同时参考左右车轮经过的积水，提前向较浅的路线偏移。河谷环线的新坡道圈速从独立记录开始，平地版的圈速、幽灵车和踏板分析仍保存在原存档里。 [3.0 Preview 38 验证记录](Docs/VALIDATION-3.0-preview38.md)
+
+## 3.0 Preview 37 路肩抓地
+
+六条赛道的彩绘路肩采用独立抓地模型。胎面跨过沥青、路肩和草地时按覆盖面积混合，湿地压上彩绘路肩时更容易滑动。 [3.0 Preview 37 验证记录](Docs/VALIDATION-3.0-preview37.md)
+
+## 3.0 Preview 36 四轮制动
+
+ABS 每秒采样 120 次，各轮独立卸压与回压。制动震动和泵阀声随压力变化。八辆车按前后轮惯量计算轮速，六条赛道均覆盖干湿地两圈短赛验证。 [3.0 Preview 36 验证记录](Docs/VALIDATION-3.0-preview36.md)
+
+## 3.0 Preview 35 后视镜
+
+后视摄像机以车型镜面和车身姿态为基准。转头时优先刷新正在查看的一侧，中央和另一侧持续更新。 [3.0 Preview 35 验证记录](Docs/VALIDATION-3.0-preview35.md)
+
+## 3.0 Preview 34 转向与手柄
+
+Centenario 的后轮低速反向转动，高速与前轮同向。座舱方向盘依各车齿条转向比表现。手动挡会在一挡切换即将完成时保留一次换挡输入，快速拨杆更容易接上。 [3.0 Preview 34 验证记录](Docs/VALIDATION-3.0-preview34.md)
+
+## 3.0 Preview 33 湿地与护栏
+
+湿地模式使用真实阴天环境贴图，积水深浅可以从行进方向的光泽变化辨认。车辆触及护栏时由对应的车头、侧面或车尾先接触。 [3.0 Preview 33 验证记录](Docs/VALIDATION-3.0-preview33.md)
+
+## 3.0 Preview 32 制动与轮胎温度
+
+制动盘面和盘体分别计算蓄热、导热和散热。轮胎热量基于滑动耗散与胎体损耗，过热时制动能力会随盘面工况变化。 [3.0 Preview 32 验证记录](Docs/VALIDATION-3.0-preview32.md)
+
+## 3.0 Preview 31 赛道接地
+
+六条赛道的内侧路肩与外侧出弯路肩按曲率分布，车轮和渲染器共用同一坡形。河谷环线加入起伏与交替横坡，自动驾驶在弯道前更早退出已无必要的超车路线。 [3.0 Preview 31 验证记录](Docs/VALIDATION-3.0-preview31.md)
+
+## 3.0 Preview 30 展厅光照
+
+开门和开盖板时可看到对应阴影，座舱观察时自动降低直射光。活动网格去除未使用的顶点，保留原模型的几何、法线和纹理坐标。 [3.0 Preview 30 验证记录](Docs/VALIDATION-3.0-preview30.md)
+
+## 3.0 Preview 29 起步离合与收油
+
+458、911、E30、Centenario 和 Elise 起步时，发动机可以先起转，离合随着负载和车速接合。收油反拖随车型和转速变化。自动挡遇到低速空转会等车身有足够速度后再升挡。 [3.0 Preview 29 验证记录](Docs/VALIDATION-3.0-preview29.md)
+
+## 3.0 Preview 28 燃油车传动
+
+458、911 4S、E30、Centenario 和 Elise 使用各自的传动规格与动力曲线。911 有八挡 PDK；E30 与 Elise 是五挡手动。自动换挡辅助和座舱音效都使用同一套转速与传动负载。规格出处、估算参数与直线实测见 [3.0 Preview 28 验证记录](Docs/VALIDATION-3.0-preview28.md)。
+
+## 3.0 Preview 27 展厅与电驱
+
+八辆车均可开门。911 沿原模型折线拆分了门板和窗玻璃，Honda e 加入后备厢。鼠标可直接点击活动部件，手柄用右摇杆环绕、LT / RT 缩放、Y 循环切换视角。
+
+Honda e 的电机按轮速与 9.545:1 固定减速比求转速，使用 113 kW、315 N·m 的 Advance 规格。D 挡松油回收，制动踏板下由后驱电机和液压制动分担。空挡无回收。
+
+## 3.0 Preview 26 车辆展示
+
+在开始界面或选车页点「车辆展示」。拖动旋转、滚动缩放，或切到座舱近看。八车分别可开前舱盖、前灯、尾灯和座舱照明。Honda e 的四扇门独立开合，Centenario 的门向上开启，MX-5 开前灯时升起翻灯。
+
+## 3.0 Preview 25 座舱声音
+
+MX-5 的 13 秒座舱试听包含空挡补油、升挡、松油反拖、重新给油、降挡和重刹。座舱分别混合空气传入的动力声与车身传入的低频。切火期间保留转动声，扭矩恢复时低频随传动负载回升。[试听工况变化](Docs/Audio-3.0/MX5-load-transitions.wav)
 
 [八车驾驶试听](Docs/Audio-3.0/Eight-car-audio-tour.wav)按车库顺序播放，每车八秒。MX-5 使用 Eunos Roadster 的低、中、高转录音，Elise 使用 Elise 录音，BMW 使用同代 E30 318is 加速录音。直线滑行时可以听到道路底噪，收油后胎声随轮胎抓地状态变化。
 
@@ -261,16 +389,20 @@ MX-5 的 13 秒座舱试听包含空挡补油、挂挡加速、收油反拖和�
 - Porsche 简化座舱增加五联动态指针仪表；三车增加随轮载变化的轮胎接触阴影，并调整橡胶粗糙度。保留 1.4 前轮滚动轴线和卡钳修复。
 - 保留操作设置，重置旧物理版本的最佳圈和幽灵车；仍是未经实车标定的实验模型。
 
+车辆历史截图（1.2）：[Ferrari 驾驶舱](Docs/Driving-1.2/ferrari-cockpit.jpg) · [Ferrari 跟车](Docs/Driving-1.2/ferrari-chase.jpg) · [Porsche 跟车](Docs/Driving-1.2/porsche-chase.jpg)。均由原生渲染器生成，未做后期修图。Ferrari 模型：vicent091036，CC BY 4.0；Porsche 模型：Lionsharp Studios / Karol Miklas，CC BY-SA 4.0。完整署名和改动见 [车辆资源说明](Assets/Vehicles/README.md)。
+
+1.5 检查图：[Porsche 动态仪表](Docs/Driving-1.5/car-2-cockpit.jpg) · [车外](Docs/Driving-1.5/car-2-exterior.jpg) · [立体路肩](Docs/Driving-1.5/track-kerb.jpg) · [看台](Docs/Driving-1.5/track-stand.jpg)。[图片署名](Docs/Driving-1.5/README.md)。
+
 ## 当前内容
 
 - 六条原创闭环赛道，包含路肩、缓冲区、护栏、制动参考牌和维修区建筑；开始 / 暂停界面可切换，附实时位置小地图。
-- 八款可选车辆：Concept GT、Ferrari 458、Porsche 911 Carrera 4S、BMW M3 E30、Mazda MX-5、Lamborghini Centenario、Lotus Elise、Honda e。
-- 各车采用独立质量、轴距、轮距、轮径、扭矩、终传和悬挂预设。Porsche 与 Centenario 使用实验四驱，其余使用后驱，全部采用六速传动。
-- Khronos Car Concept 授权模型、Poly Haven 实拍 PBR 沥青/草地材质与 HDR 天空，详见 `Assets/THIRD-PARTY-NOTICES.md`。
+- 两款可选车辆为 Porsche 911 Carrera 4S (992) 和 Lamborghini Centenario LP-770。两款均可驾驶、进入展厅、查看座舱和操作原模型的活动部件。
+- 两款车使用独立的实验四驱、动力和悬挂预设。911 配有八挡 PDK，Centenario 配有七挡传动及随速度变化的后轮转向。
+- 两款原作者车辆模型与改编展示图按 CC BY 4.0 提供。赛道使用 Poly Haven 等授权地面材质与 HDR 天空。 [第三方素材署名](Assets/THIRD-PARTY-NOTICES.md)
 - 240 Hz 主物理步长、720 Hz 内部子步：四轮独立轮速/联合滑移接地力、四角弹簧阻尼、车身升沉/侧倾/俯仰、载荷敏感性、胎面/胎体双温度、热态胎压、磨损、平斑与爆胎、限滑差速器、动力传动和空气阻力。
-- 软 / 中 / 硬三种干地轮胎，冷胎压可调；抓地力随温度、胎压、磨损与爆胎状态变化。
+- 软、中、硬三种干地轮胎及湿地胎，支持调整冷胎压。抓地力随温度、胎压、磨损、爆胎和水膜变化。
 - 护栏碰撞按方向损伤前后车身、四角悬架和引擎；影响轮胎定位、阻尼、动力、散热、阻力和下压力。车头/尾部局部形变、翼面偏斜、车轮倾斜与爆胎外观随状态更新。
-- 右侧四轮图示按驾驶员左右排列，显示温度、热态胎压、胎面余量、接地路面、爆胎警示，以及最大部件损伤和水温。复位保留状态，12 秒维修换胎恢复车辆。
+- 右侧四轮图示按驾驶员左右排列，显示温度、热态胎压、胎面余量、接地路面、爆胎警示，以及最大部件损伤和水温。复位保留状态。进站可单独换胎、单独维修或同时服务。
 - 四角悬挂弹簧动画、相对静态车高的压缩/伸张量（mm）和轮载（kN）；G 表显示横纵向加速度与约 1.5 秒轨迹。
 - 按每个车轮的实际接地点判断路肩，统一驱动悬挂、侧栏高亮、反馈强度、颠簸声和兼容手柄震动。
 - ABS / TCS 各有 0–5 级，0 关闭、5 强介入，默认 3 级；等级改变锁止 / 打滑阈值及制动卸压 / 限扭幅度。支持驾驶中调整，界面显示实际介入百分比。
@@ -309,7 +441,7 @@ MX-5 的 13 秒座舱试听包含空挡补油、挂挡加速、收油反拖和�
 | 显示 / 隐藏 HUD | — | V |
 | 保存驾驶画面（不含 HUD） | — | F12 |
 | 复位到附近赛道中心（保留车损和轮胎状态） | 长按 A 0.8 秒 | R |
-| 在黄框停车后修车换胎（12 秒） | 十字键 ↓ | P |
+| 在黄框停车后启动所选进站服务 | 十字键 ↓ | P |
 | 拖车至维修位 | 暂停菜单「拖车维修」 | Shift+P |
 | 维修道限速开关 | — | K |
 | 暂停 / 继续 | Menu | Esc |
@@ -348,7 +480,7 @@ MX-5 的 13 秒座舱试听包含空挡补油、挂挡加速、收油反拖和�
 
 从 RC21 起，可以用 `python3 Tools/inspect_telemetry.py "路径/latest-session.csv"` 汇总主要制动区，比较速度变化、LT 行程、管路压力和 ABS 卸压。
 
-遥测字段包括位置、速度、挡位、转速、油门、刹车、转向、纵横向加速度、圈速有效性、四轮温度/压力/磨损和前后车身/引擎损伤、水温，以及四轮悬挂行程、轮载和路肩反馈；时间列是本圈经过时间。1.3 在原字段末尾追加 `car_id,track_id,abs_level,tc_level,abs_release,tc_reduction`，最后两项为 0–1 比例；车型 ID 0–5 对应 Concept/Ferrari/Porsche/BMW/Mazda/Centenario，赛道 ID 0–5 对应上表顺序。CSV 保留原始模型坐标的 lateral_g（正值向左），界面 G 表转换为驾驶员坐标（正值向右）；纵向正值均为加速。
+遥测字段包括位置、速度、挡位、转速、油门、刹车、转向、纵横向加速度、圈速有效性、四轮温度/压力/磨损和前后车身/引擎损伤、水温，以及四轮悬挂行程、轮载和路肩反馈；时间列是本圈经过时间。1.3 在原字段末尾追加 `car_id,track_id,abs_level,tc_level,abs_release,tc_reduction`，最后两项为 0–1 比例；当前车辆 ID 为 2（Porsche 911）和 5（Lamborghini Centenario），赛道 ID 0–5 对应上表顺序。CSV 保留原始模型坐标的 lateral_g（正值向左），界面 G 表转换为驾驶员坐标（正值向右）；纵向正值均为加速。
 
 ## 轮胎与维修
 
@@ -364,7 +496,7 @@ MX-5 的 13 秒座舱试听包含空挡补油、挂挡加速、收油反拖和�
 ./test.sh
 ```
 
-详见 [3.0 Preview 24 验证记录](Docs/VALIDATION-3.0-preview24.md)。
+执行 `./test.sh --skip-controller` 可跳过手柄及震动相关检查。音频回归仅在内存中渲染 PCM，原生游玩验收工具默认将扬声器输出静音。每一版的实测记录均链接在本页对应的版本条目中。
 
 ## 当前边界
 

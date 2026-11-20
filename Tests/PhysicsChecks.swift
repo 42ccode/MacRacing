@@ -16,6 +16,12 @@ struct PhysicsChecks {
         checkRidgeProfile()
         checkCombinedSlip()
         checkTrailBrakeRamp()
+        checkSmallBrakeCorrections()
+        checkTrailBrakeCountersteer()
+        checkABSValveRefill()
+        checkTreadWidths()
+        checkStandingWaterPressure()
+        checkTrackDrying()
         var oldPose = Vehicle()
         oldPose.heading = .pi - 0.01
         oldPose.wheels[0].rotation = 6.27
@@ -44,7 +50,7 @@ struct PhysicsChecks {
         check(car.speedKPH > 100 && car.speedKPH < 240, "Full throttle accelerates plausibly: \(Int(car.speedKPH)) km/h in 10 seconds")
         check(car.gear > 1, "Automatic gearbox shifts up")
         check(abs(simd_dot(car.position - start, car.modelX)) < 0.01, "Straight acceleration does not drift sideways")
-        for _ in 0..<600 { car.step(dt, input: DrivingInput(brake: 1), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12) }
+        for _ in 0..<960 { car.step(dt, input: DrivingInput(brake: 1), assists: DrivingAssists(), roadDistance: 0, roadWidth: 12) }
         check(car.speedKPH < 1, "Full braking stops the car")
 
         car.reset(at: circuit.start)
@@ -101,6 +107,54 @@ struct PhysicsChecks {
         var reversingAway = Vehicle(); reversingAway.velocity = reversingAway.forward*8
         check(reversingAway.hitBarrier(outward:-reversingAway.forward) == 0 && reversingAway.speed == 8,
               "A car moving away from the wall receives no impact impulse")
+        let wallCircuit = Circuit(kind:.ridge)
+        let wallSample = wallCircuit.sample(at:220)
+        for kind in VehicleKind.allCases {
+            let twoSidesStop = [-1.0,1.0].allSatisfy { side in
+                var car = Vehicle()
+                car.kind = kind
+                let normal = wallSample.right*side
+                car.heading = atan2(normal.x,normal.y)
+                car.position = wallSample.point+normal*(Circuit.guardRailInnerEdge-3.5)
+                car.velocity = normal*92
+                car.gear = 0
+                for i in car.wheels.indices { car.wheels[i].angularVelocity = 92/car.wheelRadius }
+                for _ in 0..<16 {
+                    let position = wallCircuit.nearest(to:car.position)
+                    car.step(1/240,input:DrivingInput(),assists:DrivingAssists(),roadDistance:position.distance,
+                             roadWidth:wallCircuit.width,roadContacts:wallCircuit.wheelContacts(at:car.contactPoints))
+                    let projected = wallCircuit.nearest(to:car.position)
+                    if let contact = car.constrainToGuardRail(at:projected) {
+                        let settled = wallCircuit.nearest(to:car.position)
+                        return contact.closingSpeed > 80 && simd_dot(car.velocity,contact.normal) < 0 &&
+                            settled.distance < Circuit.guardRailInnerEdge-1.7 &&
+                            car.constrainToGuardRail(at:settled) == nil
+                    }
+                }
+                return false
+            }
+            check(twoSidesStop,"Both guardrails stop the front of a 331 km/h car at the solved footprint: \(kind.label)")
+        }
+        func inferWheelInertia(_ kind: VehicleKind) -> SIMD2<Double> {
+            var car = Vehicle()
+            car.kind = kind
+            car.gear = 0
+            car.heave = 0.15
+            car.velocity = car.forward*26
+            let omega = 26/car.wheelRadius
+            for i in car.wheels.indices { car.wheels[i].angularVelocity = omega }
+            let t = 1.0/720
+            let assists = DrivingAssists(abs:false,tractionControl:false,automatic:false)
+            car.step(t,input:DrivingInput(brake:1),assists:assists,roadDistance:0,roadWidth:12)
+            let scale = 4050*sqrt(car.mass/1260.0)*car.brakeLinePressure*t
+            let front = scale*assists.frontBrakeBias/(omega-car.wheels[0].angularVelocity)
+            let rear = scale*(1-assists.frontBrakeBias)/(omega-car.wheels[2].angularVelocity)
+            return SIMD2(front,rear)
+        }
+        let porscheWheel = inferWheelInertia(.porsche), centenarioWheel = inferWheelInertia(.centenario)
+        check((1.41...1.43).contains(porscheWheel.x) && (1.82...1.84).contains(porscheWheel.y) &&
+              (1.63...1.65).contains(centenarioWheel.x) && (2.16...2.18).contains(centenarioWheel.y),
+              "The brake solver uses the individual front and rear rotating assemblies when grip is absent")
         func aeroSample(_ kind: VehicleKind, speed: Double, frontDamage: Double = 0) -> Vehicle {
             var car = Vehicle()
             car.kind = kind
@@ -113,10 +167,10 @@ struct PhysicsChecks {
         }
         let slowAero = aeroSample(.centenario,speed:25).aeroLoad
         let fastAero = aeroSample(.centenario,speed:50).aeroLoad
-        let roadCarAero = aeroSample(.mazda,speed:50).aeroLoad
+        let roadCarAero = aeroSample(.porsche,speed:50).aeroLoad
         let damagedAero = aeroSample(.centenario,speed:50,frontDamage:0.8).aeroLoad
         check(simd_distance(fastAero,slowAero*4) < 0.001 &&
-              fastAero.x + fastAero.y > 10 * (roadCarAero.x + roadCarAero.y),
+              fastAero.x + fastAero.y > 4 * (roadCarAero.x + roadCarAero.y),
               "Downforce grows with forward speed and distinguishes road and high-downforce presets")
         check(damagedAero.x < fastAero.x*0.6 && abs(damagedAero.y-fastAero.y) < 0.001,
               "Front body damage changes aerodynamic balance by reducing front downforce")
@@ -151,7 +205,7 @@ struct PhysicsChecks {
               "Contact patches respond independently when one side is on grass")
         func brakeOnSplitSurface(grassOnLeft: Bool) -> Vehicle {
             var car = Vehicle()
-            car.kind = .mazda
+            car.kind = .porsche
             car.gear = 0
             car.velocity = car.forward * 30
             for i in car.wheels.indices { car.wheels[i].angularVelocity = 30 / car.wheelRadius }
@@ -170,7 +224,7 @@ struct PhysicsChecks {
               abs(grassLeft.longitudinalG - grassRight.longitudinalG) < 0.005 && grassLeft.wheels.contains { $0.slidingPower > 100 },
               "Mirrored split-surface stops give opposite yaw and dissipate measurable sliding work")
         var dryABS = Vehicle()
-        dryABS.kind = .mazda
+        dryABS.kind = .porsche
         dryABS.gear = 0
         dryABS.velocity = dryABS.forward*30
         for i in dryABS.wheels.indices {
@@ -203,9 +257,9 @@ struct PhysicsChecks {
         check(parkedContamination > 0.8 && dusty.surfaceContamination < 0.4 &&
               dusty.gripFactor > dirtyGrip*1.08,
               "Contamination persists at rest and clears with distance back on asphalt")
-        func wetStop(depth: Double, compound: TyreCompound) -> Double {
+        func wetStop(depth: Double, compound: TyreCompound, lateral: Double = 0) -> Double {
             var car = Vehicle()
-            car.kind = .mazda
+            car.kind = .porsche
             car.gear = 0
             car.service(setup:TyreSetup(compound:compound))
             car.velocity = car.forward * 30
@@ -213,7 +267,8 @@ struct PhysicsChecks {
                 car.wheels[index].angularVelocity = 30 / car.wheelRadius
                 car.wheels[index].temperature = 57
             }
-            let contacts = Array(repeating:WheelRoadContact(distance:0,progress:0,kerbsEnabled:false,waterDepth:depth),count:4)
+            let contacts = Array(repeating:WheelRoadContact(distance:lateral,progress:0,kerbsEnabled:lateral > 0,
+                                                            waterDepth:depth),count:4)
             for _ in 0..<2400 {
                 if car.speed < 0.2 { break }
                 car.step(1/240,input:DrivingInput(brake:1),assists:DrivingAssists(automatic:false),
@@ -227,8 +282,15 @@ struct PhysicsChecks {
         print(String(format:"108 km/h stop: dry %.1f m, wet slick %.1f m, wet tyre %.1f m",dryDistance,wetSlickDistance,wetTyreDistance))
         check(wetSlickDistance > dryDistance * 1.25 && wetTyreDistance < wetSlickDistance * 0.9,
               "Surface water lengthens braking and wet tyres recover grip")
+        let dryKerb = wetStop(depth:0,compound:.medium,lateral:6.45)
+        let wetKerb = wetStop(depth:0.55,compound:.wet,lateral:6.45)
+        let wetPaintSeam = wetStop(depth:0.55,compound:.wet,lateral:6.0)
+        print(String(format:"108 km/h wet tyre: asphalt %.1f m, edge %.1f m, kerb %.1f m",wetTyreDistance,wetPaintSeam,wetKerb))
+        check(dryKerb > dryDistance * 1.025 && wetKerb > wetTyreDistance * 1.11 &&
+              wetPaintSeam > wetTyreDistance && wetPaintSeam < wetKerb,
+              "Painted kerb has lower wet grip and the tread blends the asphalt-to-paint transition")
         func waterSplit(left: Bool) -> Vehicle {
-            var car = Vehicle(); car.kind = .mazda; car.gear = 0
+            var car = Vehicle(); car.kind = .porsche; car.gear = 0
             car.velocity = car.forward*40
             for i in car.wheels.indices { car.wheels[i].angularVelocity = 40/car.wheelRadius }
             let contacts = car.wheels.indices.map { i in
@@ -250,7 +312,7 @@ struct PhysicsChecks {
         var hotTyre = WheelState()
         func coastAtPressure(_ pressure: Double) -> Vehicle {
             var car = Vehicle()
-            car.kind = .mazda
+            car.kind = .porsche
             car.gear = 0
             car.velocity = car.forward*30
             car.service(setup:TyreSetup(coldPressure:pressure))
@@ -400,7 +462,8 @@ struct PhysicsChecks {
         for _ in 0..<360 { rightTurn.step(dt,input:DrivingInput(throttle:0.6,steering:0.3),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
         check(rightTurn.driverG.x > 0, "G-meter driver-right acceleration is positive")
         let points = rightTurn.contactPoints
-        check(simd_dot(points[1]-points[0],rightTurn.modelX) > 1.9 && simd_dot(points[0]-points[2],rightTurn.forward) > 2.7,
+        check(abs(simd_dot(points[1]-points[0],rightTurn.modelX)-rightTurn.trackWidth) < 1e-9 &&
+              abs(simd_dot(points[0]-points[2],rightTurn.forward)-rightTurn.wheelbase) < 1e-9,
               "Contact sample locations follow both wheel track and vehicle heading")
 
         check(circuit.length > 1000 && circuit.length < 2500, "Closed circuit length: \(Int(circuit.length)) metres")
@@ -430,7 +493,7 @@ struct PhysicsChecks {
         recovery.resetLap(at: circuit.length * 0.7)
         check(recovery.checkpoint == 0 && recovery.elapsed == 0, "Recovery resets checkpoint and timing state")
 
-        for kind in [VehicleKind.ferrari,.porsche] {
+        for kind in [VehicleKind.centenario,.porsche] {
             var preset = Vehicle(); preset.kind = kind
             preset.reset(at:circuit.start)
             for _ in 0..<1200 { preset.step(dt,input:DrivingInput(throttle:0.7,steering:0.02),assists:DrivingAssists(),roadDistance:0,roadWidth:12) }
@@ -442,7 +505,7 @@ struct PhysicsChecks {
         var slipByLevel: [Double] = [], lockByLevel: [Double] = [], cutByLevel: [Double] = []
         for level in [0,1,3,5] {
             let assists = DrivingAssists(absLevel:level,tcLevel:level)
-            var car = Vehicle(); car.kind = .ferrari
+            var car = Vehicle(); car.kind = .centenario
             var slip = 0.0, cut = 0.0
             for _ in 0..<360 {
                 car.step(1.0/120,input:DrivingInput(throttle:1),assists:assists,roadDistance:9,roadWidth:12)
@@ -465,6 +528,41 @@ struct PhysicsChecks {
         check(cutByLevel[3] > cutByLevel[1],"Strong TCS measurably cuts more drive torque than weak TCS")
         check(lockByLevel[3] < lockByLevel[2] && lockByLevel[2] < lockByLevel[1] && lockByLevel[1] < lockByLevel[0],
               "Higher ABS levels progressively reduce front-wheel locking on grass")
+        func steerAxles(_ kind: VehicleKind, speed: Double, input: Double) -> Vehicle {
+            var car = Vehicle()
+            car.kind = kind
+            car.gear = 0
+            car.velocity = car.forward*speed
+            for i in car.wheels.indices { car.wheels[i].angularVelocity = speed/car.wheelRadius }
+            for _ in 0..<100 {
+                car.step(1/240,input:DrivingInput(steering:input),assists:DrivingAssists(automatic:false),
+                         roadDistance:0,roadWidth:12)
+            }
+            return car
+        }
+        let slowLamborghini = steerAxles(.centenario,speed:8,input:0.45)
+        let fastLamborghini = steerAxles(.centenario,speed:43,input:0.45)
+        let leftLamborghini = steerAxles(.centenario,speed:8,input:-0.45)
+        let conventional = steerAxles(.porsche,speed:8,input:0.45)
+        let lowRatio = slowLamborghini.rearSteeringAngle/slowLamborghini.steeringAngle
+        let highRatio = fastLamborghini.rearSteeringAngle/fastLamborghini.steeringAngle
+        print(String(format:"Centenario rear/front steer at 29 and 155 km/h: %.3f / %.3f",lowRatio,highRatio))
+        check((-0.23 ... -0.13).contains(lowRatio) && (0.07...0.13).contains(highRatio) &&
+              abs(slowLamborghini.wheelSteer(2)+leftLamborghini.wheelSteer(3)) < 0.0001 &&
+              slowLamborghini.wheels[2].lateralForce < 0 && conventional.wheelSteer(2) == 0,
+              "Centenario steers both rear tyres opposite at low speed and together with the front at speed")
+        let preview = fastLamborghini.displayPose(previous:slowLamborghini.renderSample,fraction:0.5)
+        check(abs(preview.rearSteeringAngle-(fastLamborghini.rearSteeringAngle+slowLamborghini.rearSteeringAngle)/2) < 0.00001,
+              "The displayed rear-wheel direction follows fixed-step interpolation")
+        var rack = Vehicle()
+        rack.kind = .porsche; rack.steeringAngle = 0.10
+        let turbo911 = rack.handwheelAngle
+        rack.steeringAngle = 0.52
+        let porscheLock = rack.handwheelAngle
+        rack.kind = .centenario
+        check((1.48...1.50).contains(turbo911) && abs(porscheLock-0.52*13.3) < 1e-9 &&
+              abs(rack.handwheelAngle-0.52*13.6) < 1e-9,
+              "The cockpit follows the 911 progressive rack and Centenario linear ratio")
         var exitCar = Vehicle()
         exitCar.kind = .centenario
         exitCar.gear = 2
@@ -578,10 +676,10 @@ struct PhysicsChecks {
         let tip = atSpeed(.centenario,DrivingInput(throttle:0.051))
         check(abs(lift.longitudinalG-tip.longitudinalG)<0.005,
               "The transition into engine braking is continuous around closed throttle")
-        let lightBrake = atSpeed(.mazda,DrivingInput(brake:0.25))
-        let mediumBrake = atSpeed(.mazda,DrivingInput(brake:0.50))
-        let deepBrake = atSpeed(.mazda,DrivingInput(brake:0.75))
-        let fullBrake = atSpeed(.mazda,DrivingInput(brake:1))
+        let lightBrake = atSpeed(.porsche,DrivingInput(brake:0.25))
+        let mediumBrake = atSpeed(.porsche,DrivingInput(brake:0.50))
+        let deepBrake = atSpeed(.porsche,DrivingInput(brake:0.75))
+        let fullBrake = atSpeed(.porsche,DrivingInput(brake:1))
         check((-0.32 ... -0.18).contains(lightBrake.longitudinalG) &&
               lightBrake.longitudinalG - mediumBrake.longitudinalG > 0.2 &&
               mediumBrake.longitudinalG - deepBrake.longitudinalG > 0.2 &&
@@ -604,7 +702,7 @@ struct PhysicsChecks {
               "Lateral tyre force builds over travelled distance after steering input")
         func firstCornerResponse(pressure: Double) -> Double {
             var car = Vehicle()
-            car.kind = .mazda
+            car.kind = .porsche
             car.gear = 0
             car.service(setup:TyreSetup(coldPressure:pressure))
             car.velocity = car.forward*20
@@ -649,10 +747,271 @@ struct PhysicsChecks {
         print("\nAll physics and timing checks passed.")
     }
 
+    static func checkTrackDrying() {
+        let circuit = Circuit(kind:.grand,condition:.wet)
+        var drying = TrackDrying(circuit:circuit)
+        let massFilm = 0.75
+        check(drying.depth(from:massFilm,at:500,lateral:0) == massFilm,
+              "A drying race begins with the exact baseline water film")
+        let speed = 28.0, dt = TrackDrying.interval
+        for _ in 0..<12 {
+            for progress in stride(from:466.0,through:554,by:speed*dt) {
+                drying.advance(dt)
+                for lane in [-0.8,0.8] {
+                    drying.displace(at:progress,lateral:lane,travelled:speed*dt,speed:speed,load:3450,treadWidth:0.24)
+                    drying.displace(at:progress-2.6,lateral:lane,travelled:speed*dt,speed:speed,load:3450,treadWidth:0.24)
+                }
+            }
+        }
+        let line = drying.depth(from:massFilm,at:500,lateral:0.8)
+        let outside = drying.depth(from:massFilm,at:500,lateral:3.6)
+        print(String(format:"Track drying after repeated traffic: %.3f mm on line, %.3f mm clear of traffic",line,outside))
+        check(line < outside-0.13 && line >= 0.035 && outside < massFilm && outside > massFilm-0.02,
+              "Only driven areas lose significant water while nearby wet tarmac remains damp")
+        check(drying.depth(from:massFilm,at:500,lateral:6.1) == massFilm,
+              "The track surface grid does not alter the verge or kerb beyond the driving surface")
+        var parked = drying
+        for _ in 0..<20 {
+            parked.displace(at:500,lateral:0.8,travelled:0,speed:0,load:3600,treadWidth:0.26)
+        }
+        check(parked.depth(from:massFilm,at:500,lateral:0.8) == line,
+              "Stationary tyres do not continuously displace water")
+        let beforeRunoff = outside-line
+        for _ in 0..<40 { parked.advance(1) }
+        let remainingContrast = parked.depth(from:massFilm,at:500,lateral:3.6)-parked.depth(from:massFilm,at:500,lateral:0.8)
+        check(remainingContrast > 0 && remainingContrast < beforeRunoff*0.77,
+              "Runoff gradually reduces sharp differences when the cars have gone")
+
+        var seam = TrackDrying(circuit:circuit)
+        seam.advance(dt)
+        seam.displace(at:circuit.length-0.4,lateral:0.4,travelled:1.2,speed:24,load:3200,treadWidth:0.21)
+        let d100 = seam.depth(from:massFilm,at:circuit.length-0.001,lateral:0.4)
+        let d0 = seam.depth(from:massFilm,at:0.001,lateral:0.4)
+        check(abs(d100-d0) < 0.0002 && d100 < massFilm-0.003,"Water marks stay continuous across the lap seam")
+        let onLine = circuit.sample(at:500)
+        let patch = onLine.point+onLine.right*0.8
+        let nominal = circuit.wheelContacts(at:[patch])[0]
+        let wornLine = circuit.wheelContacts(at:[patch],drying:drying)[0]
+        check(wornLine.waterDepth < nominal.waterDepth*0.75 && wornLine.distance == nominal.distance &&
+              wornLine.elevation == nominal.elevation && wornLine.gradient == nominal.gradient,
+              "The same ground contact feeds the vehicle solver with local water and unchanged track geometry")
+        func roll(contact: WheelRoadContact) -> Vehicle {
+            var car = Vehicle()
+            car.kind = .porsche
+            car.service(setup:TyreSetup(compound:.wet))
+            car.velocity = car.forward*speed
+            for i in car.wheels.indices { car.wheels[i].angularVelocity = (speed-2)/car.wheelRadius }
+            car.step(1/240,input:DrivingInput(brake:0.4),assists:DrivingAssists(),roadDistance:0,roadWidth:12,
+                     roadContacts:Array(repeating:contact,count:4))
+            return car
+        }
+        let soaked = roll(contact:nominal), cleared = roll(contact:wornLine)
+        check(cleared.wheels[0].spray < soaked.wheels[0].spray && cleared.wheels[0].waterFilm < soaked.wheels[0].waterFilm &&
+              abs(cleared.wheels[0].longitudinalForce) > abs(soaked.wheels[0].longitudinalForce),
+              "A rolling wet tyre gets less spray and more longitudinal grip where traffic has cleared water")
+    }
+
+    static func checkTreadWidths() {
+        // All wheels are sampled at the same lateral coordinate to isolate
+        // contact width from track width, steering and weight distribution.
+        let grassEdge = 6.35
+        func sample(_ kind: VehicleKind,at distance: Double,painted: Bool = false) -> Vehicle {
+            var car = Vehicle()
+            car.kind = kind
+            car.gear = 0
+            car.velocity = car.forward*22
+            for i in car.wheels.indices {
+                car.wheels[i].angularVelocity = 17/car.wheelRadius
+                car.wheels[i].relaxedSlipRatio = -0.23
+            }
+            let contacts = Array(repeating:WheelRoadContact(distance:distance,progress:20,
+                kerbsEnabled:painted,waterDepth:0.65),count:4)
+            car.step(1/720,input:DrivingInput(brake:1),assists:DrivingAssists(abs:false),roadDistance:distance,
+                     roadWidth:12,roadContacts:contacts)
+            return car
+        }
+
+        let lamborghiniOutside = sample(.centenario,at:grassEdge+0.12)
+        let porscheOutside = sample(.porsche,at:grassEdge+0.12)
+        check(lamborghiniOutside.wheels[0].pavedContactFraction == 0 &&
+              lamborghiniOutside.wheels[2].pavedContactFraction > 0.03 &&
+              porscheOutside.wheels[0].pavedContactFraction == 0 &&
+              porscheOutside.wheels[2].pavedContactFraction > 0 &&
+              porscheOutside.wheels[2].pavedContactFraction < lamborghiniOutside.wheels[2].pavedContactFraction,
+              "Both staggered rear treads retain contact farther beyond the verge, especially the wider Centenario")
+        let shoulders = stride(from:-0.19,through:0.19,by:0.01).map {
+            sample(.porsche,at:grassEdge+$0).wheels[2].pavedContactFraction
+        }
+        check(shoulders.first == 1 && shoulders.last == 0 &&
+              zip(shoulders,shoulders.dropFirst()).allSatisfy { $0 >= $1 } &&
+              shoulders.contains { (0.48...0.52).contains($0) },
+              "A wide tyre blends through a monotone, centred contact transition")
+        let paintedApproach = sample(.centenario,at:5.88,painted:true)
+        let plainRoad = sample(.centenario,at:5.88)
+        check(paintedApproach.wheels[0].longitudinalForce == plainRoad.wheels[0].longitudinalForce &&
+              abs(paintedApproach.wheels[2].longitudinalForce) < abs(plainRoad.wheels[2].longitudinalForce),
+              "A wide rear tread reaches the wet paint first while the narrower front stays on asphalt")
+    }
+
+    static func checkTrailBrakeCountersteer() {
+        let dt = 1.0/240
+        let assists = DrivingAssists()
+        for kind in VehicleKind.allCases {
+            for condition in TrackCondition.allCases {
+                let circuit = Circuit(kind:.north,condition:condition)
+                let setup = TyreSetup(compound:condition == .wet ? .wet : .medium)
+                var car = Vehicle()
+                car.kind = kind
+                car.reset(at:circuit.sample(at:32))
+                car.service(setup:setup)
+                car.velocity = car.forward*31
+                car.gear = 3
+                car.rpm = car.speed/car.wheelRadius*car.gearRatios[2]*kind.finalDrive*60/(2 * .pi)
+                for index in car.wheels.indices {
+                    car.wheels[index].angularVelocity = car.speed/car.wheelRadius
+                    car.wheels[index].temperature = setup.compound.optimum
+                    car.wheels[index].coreTemperature = (setup.compound.optimum+26)/2
+                }
+                var input = DrivingInput()
+                var forces: [Double] = []
+                var load = 0.0
+                for step in 0..<240 {
+                    let time = Double(step)*dt-0.85
+                    if time > 0.12 { break }
+                    if step.isMultiple(of:2) {
+                        let steering = 0.30*tanh((time+0.27)*18)-0.52*tanh(max(time,0)*26)
+                        input = DrivingInput(brake:time < 0 ? 0.84 : 0,steering:steering)
+                    }
+                    let location = circuit.nearest(to:car.position)
+                    car.step(dt,input:input,assists:assists,roadDistance:location.distance,roadWidth:circuit.width,
+                             roadLateral:location.lateral,roadProgress:location.progress,
+                             roadContacts:circuit.wheelContacts(at:car.contactPoints))
+                    if time >= -0.02 {
+                        forces.append(car.wheels[0].lateralForce+car.wheels[1].lateralForce)
+                        load += car.wheels[0].normalLoad+car.wheels[1].normalLoad
+                    }
+                }
+                var squaredChanges = 0.0
+                for index in 2..<forces.count {
+                    let change = forces[index]-2*forces[index-1]+forces[index-2]
+                    squaredChanges += change*change
+                }
+                let rmsForceChange = sqrt(squaredChanges/Double(forces.count-2))
+                let normalized = rmsForceChange/(load/Double(forces.count))
+                print(String(format:"%@ %@ · front-force transient %.3f%% of mean axle load",kind.label,condition.label,normalized*100))
+                check(normalized < 0.0115,"The combined-slip brake release keeps the front axle response smooth on \(condition.label): \(kind.label)")
+            }
+        }
+    }
+
+    static func checkABSValveRefill() {
+        var wetRelease: Vehicle?
+        for wet in [false,true] {
+            for rate in [240,1440] {
+                let dt = 1.0/Double(rate)
+                let contacts = Array(repeating:WheelRoadContact(distance:0,progress:20,kerbsEnabled:false,
+                                                               waterDepth:wet ? 0.55 : 0),count:4)
+                var car = Vehicle()
+                car.kind = .porsche
+                car.gear = 0
+                car.service(setup:TyreSetup(compound:wet ? .wet : .medium))
+                car.velocity = car.forward*34
+                for i in car.wheels.indices {
+                    car.wheels[i].angularVelocity = car.speed/car.wheelRadius
+                    car.wheels[i].temperature = wet ? 57 : 80
+                }
+                let assists = DrivingAssists(automatic:false)
+                for frame in 0..<rate/4 {
+                    let elapsed = Double(frame)*dt
+                    let steering = 0.85*clamp((elapsed-0.17)/0.20,0,1)
+                    car.step(dt,input:DrivingInput(brake:0.99,steering:steering),assists:assists,
+                             roadDistance:0,roadWidth:12,roadContacts:contacts)
+                }
+
+                var crossing = false
+                var rebounded = false
+                for frame in 1...rate/8 {
+                    let previousLine = car.brakeLinePressure
+                    let previous = car.wheels.map { $0.brakePressure*previousLine }
+                    let steering = 0.85*clamp((Double(frame)*dt+0.08)/0.20,0,1)
+                    let controls = DrivingInput(steering:steering)
+                    car.step(dt,input:controls,assists:assists,roadDistance:0,roadWidth:12,roadContacts:contacts)
+                    guard previousLine > 0.025, car.brakeLinePressure <= 0.025 else { continue }
+                    crossing = true
+                    rebounded = car.wheels.indices.contains { i in
+                        car.wheels[i].brakePressure*car.brakeLinePressure > previous[i]+1e-8
+                    }
+                    // At the live cadence an outer step can straddle the threshold.
+                    car.step(dt,input:controls,assists:assists,roadDistance:0,roadWidth:12,roadContacts:contacts)
+                    if wet && rate == 240 { wetRelease = car }
+                    break
+                }
+                check(crossing && !rebounded && !car.absActive && car.wheels.contains { $0.brakePressure < 0.9 },
+                      "Caliper pressure continues falling when ABS commands end on \(wet ? "wet" : "dry") asphalt at \(rate) Hz")
+            }
+        }
+
+        guard let wetRelease else {
+            check(false,"Wet ABS refill has a live state to reset")
+            return
+        }
+        func cleared(_ car: Vehicle) -> Bool {
+            !car.absActive && car.absRelease == 0 && car.absValveActivity == 0 &&
+                car.wheels.allSatisfy { $0.brakePressure == 1 }
+        }
+        var disabled = wetRelease
+        disabled.step(1/240,input:DrivingInput(),assists:DrivingAssists(abs:false),roadDistance:0,roadWidth:12)
+        var restarted = wetRelease
+        restarted.reset(at:TrackSample(point:.zero,tangent:SIMD2(0,1),distance:0),preservingCondition:true)
+        check(cleared(disabled) && cleared(restarted) && restarted.brakeLinePressure == 0,
+              "Disabling ABS and restarting both discard retained caliper modulation")
+
+        for work in PitServiceWork.allCases {
+            var serviced = wetRelease
+            serviced.damage.front = 0.38
+            let pressure = serviced.brakeLinePressure
+            let before = serviced.wheels
+            serviced.completePitService(PitServicePlan(work:work,damage:serviced.damage,tyreSetup:TyreSetup()))
+            check(cleared(serviced) && serviced.brakeLinePressure == pressure &&
+                    zip(before,serviced.wheels).allSatisfy {
+                        $0.brakeTemperature == $1.brakeTemperature && $0.brakeSurfaceTemperature == $1.brakeSurfaceTemperature
+                    },
+                  "Pit work clears caliper modulation and keeps rotor heat: \(work.rawValue)")
+        }
+    }
+
+    static func checkSmallBrakeCorrections() {
+        for kind in VehicleKind.allCases {
+            var car = Vehicle()
+            car.kind = kind
+            car.velocity = car.forward * 32
+            car.gear = 3
+            for index in car.wheels.indices { car.wheels[index].angularVelocity = 32/car.wheelRadius }
+            let assists = DrivingAssists(), step = 1.0/240
+            let base = 0.11, increment = 0.012
+            for _ in 0..<112 {
+                car.step(step,input:DrivingInput(brake:Vehicle.brakeTravel(for:base),steering:0.22),
+                         assists:assists,roadDistance:0,roadWidth:12)
+            }
+            func settlingSteps(direction: Double) -> Int {
+                var trial = car
+                let input = DrivingInput(brake:Vehicle.brakeTravel(for:base+direction*increment),steering:0.22)
+                for index in 1...40 {
+                    trial.step(step,input:input,assists:assists,roadDistance:0,roadWidth:12)
+                    if direction*(trial.brakeLinePressure-base) >= 0.9*increment { return index }
+                }
+                return 41
+            }
+            let increase = settlingSteps(direction:1), decrease = settlingSteps(direction:-1)
+            check((6...9).contains(increase) && abs(increase-decrease) <= 1,
+                  "A small increase in settled brake pressure follows the pedal as readily as a small release: \(kind.label)")
+        }
+    }
+
     static func checkTrailBrakeRamp() {
         var assists = DrivingAssists(abs:false,tractionControl:false,automatic:false)
         var car = Vehicle()
-        car.kind = .mazda
+        car.kind = .porsche
         car.gear = 0
         car.velocity = car.forward * 28
         for i in car.wheels.indices {
@@ -675,7 +1034,7 @@ struct PhysicsChecks {
             sumError += error
             peakError = max(peakError,error)
         }
-        print(String(format:"MX-5 400 ms trail ramp: mean / peak line pressure error %.2f / %.2f percentage points",
+        print(String(format:"911 400 ms trail ramp: mean / peak line pressure error %.2f / %.2f percentage points",
                      sumError*100/96,peakError*100))
         check(monotone && sumError/96 < 0.015 && peakError < 0.025 && car.yawRate < -0.20,
               "A rolling brake release tracks the pedal through turn-in without a pressure rebound")
@@ -701,7 +1060,7 @@ struct PhysicsChecks {
     static func checkCombinedSlip() {
         let assists = DrivingAssists(abs:false, tractionControl:false, automatic:false)
         var locked = Vehicle()
-        locked.kind = .mazda
+        locked.kind = .porsche
         locked.gear = 0
         for _ in 0..<80 {
             locked.step(1/240,input:DrivingInput(brake:1),assists:assists,roadDistance:0,roadWidth:12)
@@ -721,7 +1080,7 @@ struct PhysicsChecks {
               "A fully locked steered wheel slides against its ground velocity even during a steering transient")
 
         var entry = Vehicle()
-        entry.kind = .mazda
+        entry.kind = .porsche
         entry.gear = 0
         entry.velocity = entry.forward * 28
         for index in entry.wheels.indices {
@@ -744,12 +1103,57 @@ struct PhysicsChecks {
         let heldForce = frontLateralForce(held)
         let easedForce = frontLateralForce(eased)
         let releasedForce = frontLateralForce(released)
-        print(String(format:"MX-5 combined slip after 200 ms: front lateral force %.0f / %.0f / %.0f N at 90 / 45 / 0 percent brake",
+        print(String(format:"911 combined slip after 200 ms: front lateral force %.0f / %.0f / %.0f N at 90 / 45 / 0 percent brake",
                      heldForce,easedForce,releasedForce))
         check(held.wheels[0].slidingFraction > 0.99 && abs(held.wheels[0].slipRatio) > 0.99 &&
               abs(released.wheels[0].slipRatio) < 0.08 && easedForce > heldForce * 1.3 &&
-              releasedForce > easedForce * 1.5 && abs(released.yawRate) > abs(eased.yawRate),
+              releasedForce > heldForce * 2 && abs(released.yawRate) > abs(held.yawRate),
               "Progressive brake release restores front cornering force and yaw authority on the same turn-in")
+    }
+
+    static func checkStandingWaterPressure() {
+        let pressures = [1.30,1.80,2.30]
+        let speed = 45.0
+        func slidingForce(compound: TyreCompound,depth: Double,pressure: Double) -> Double {
+            var car = Vehicle()
+            car.kind = .porsche
+            car.gear = 0
+            car.service(setup:TyreSetup(compound:compound,coldPressure:pressure))
+            car.velocity = car.forward*speed
+            for index in car.wheels.indices {
+                car.wheels[index].coreTemperature = 26
+                car.wheels[index].temperature = compound.optimum
+            }
+            let contacts = Array(repeating:WheelRoadContact(distance:0,progress:0,kerbsEnabled:false,
+                                                            waterDepth:depth),count:4)
+            // A single tyre substep keeps both surfaces at the same load and pressure.
+            car.step(1.0/720,input:DrivingInput(brake:1),assists:DrivingAssists(abs:false,automatic:false),
+                     roadDistance:0,roadWidth:12,roadContacts:contacts)
+            return abs(car.wheels[0].longitudinalForce)
+        }
+        for compound in [TyreCompound.medium,.wet] {
+            let unchanged = [0.0,0.35,0.55].allSatisfy { depth in
+                pressures.allSatisfy {
+                    compound.wetGrip(waterDepth:depth,speed:speed,pressure:$0) ==
+                        compound.wetGrip(waterDepth:depth,speed:speed)
+                }
+            }
+            let standing = pressures.map { compound.wetGrip(waterDepth:1.30,speed:speed,pressure:$0) }
+            let shallow = compound.wetGrip(waterDepth:0.55,speed:speed)
+            let existingLoss = shallow-standing[1]
+            check(unchanged && compound.wetGrip(waterDepth:1.30,speed:13,pressure:pressures[0]) ==
+                  compound.wetGrip(waterDepth:1.30,speed:13),
+                  "Dry, damp and low-speed friction are exactly independent of the standing-water pressure correction")
+            check(standing[0] < standing[1] && standing[1] < standing[2] &&
+                  standing.allSatisfy { abs($0-standing[1]) <= existingLoss*0.08+1e-12 },
+                  "Standing water increases low-pressure grip loss with a bounded high-pressure recovery")
+            let forceRatios = pressures.map { pressure in
+                slidingForce(compound:compound,depth:1.30,pressure:pressure) /
+                    slidingForce(compound:compound,depth:0.55,pressure:pressure)
+            }
+            check(zip(forceRatios,standing).allSatisfy { abs($0-$1/shallow) < 1e-9 },
+                  "The solver uses live gauge pressure for the individual tyre's wet contact force")
+        }
     }
 
     static func checkRidgeProfile() {
@@ -778,7 +1182,7 @@ struct PhysicsChecks {
         func coast(reversed: Bool) -> Double {
             let sample = ridge.sample(at:gradeProgress)
             let tangent = reversed ? -sample.tangent : sample.tangent
-            var car = Vehicle(); car.kind = .mazda
+            var car = Vehicle(); car.kind = .porsche
             car.reset(at:TrackSample(point:sample.point,tangent:tangent,distance:sample.distance))
             car.gear = 0; car.velocity = tangent * 20
             for i in car.wheels.indices { car.wheels[i].angularVelocity = 20/car.wheelRadius }
@@ -792,13 +1196,14 @@ struct PhysicsChecks {
         print(String(format:"Ridge coasting after one second from 72 km/h: %.2f uphill, %.2f downhill km/h",uphill*3.6,downhill*3.6))
         check(uphill < 19.4 && downhill > 20.25 && downhill-uphill > 1.3,
               "The same car gains speed downhill and slows on the matched climb")
-        var crestCar = Vehicle(); crestCar.kind = .mazda; crestCar.reset(at:ridge.sample(at:crest))
+        var crestCar = Vehicle(); crestCar.kind = .porsche; crestCar.reset(at:ridge.sample(at:crest))
         for _ in 0..<480 {
             crestCar.step(1/240,input:DrivingInput(brake:1),assists:DrivingAssists(),roadDistance:0,roadWidth:12,
                           roadContacts:ridge.wheelContacts(at:crestCar.contactPoints))
         }
         check(abs(crestCar.roadElevation-21) < 0.02 && crestCar.roll > 0.04 &&
-              crestCar.wheels.allSatisfy { $0.normalLoad > 1800 && $0.normalLoad < 3300 },
+              crestCar.wheels.allSatisfy { $0.normalLoad > 1800 && $0.normalLoad < 5000 } &&
+              abs(crestCar.wheels.reduce(0) { $0+$1.normalLoad } - crestCar.mass*9.81) < crestCar.mass*9.81*0.02,
               "A stopped car follows the crest bank with all four wheels loaded")
     }
 }

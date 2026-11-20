@@ -30,7 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let size = NSSize(width: min(1440, screen.width - 50), height: min(900, screen.height - 55))
         let rect = NSRect(origin: .zero, size: size)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "APEX Lab — Circuit Test"
+        window.title = "APEX Lab"
         window.subtitle = "Mac 原生驾驶模拟 · 3.0 预览"
         window.contentMinSize = NSSize(width: 900, height: 664)
         window.backgroundColor = NSColor(rgb: 0x10191D)

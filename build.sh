@@ -9,10 +9,10 @@ mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 
 xcrun swiftc -swift-version 5 -O -whole-module-optimization \
   -module-cache-path "$module_cache" -target arm64-apple-macosx14.0 \
-  -framework AppKit -framework SceneKit -framework GameController \
+  -framework AppKit -framework SceneKit -framework MetalKit -framework GameController \
   -framework CoreHaptics -framework AVFoundation \
   Sources/Track.swift Sources/Vehicle.swift Sources/GLTF.swift Sources/Environment.swift Sources/World.swift \
-  Sources/HapticFeedback.swift Sources/InputHistory.swift Sources/ComputerDriving.swift Sources/Input.swift Sources/EngineSound.swift Sources/HUD.swift Sources/Game.swift Sources/main.swift \
+  Sources/HapticFeedback.swift Sources/InputHistory.swift Sources/ComputerDriving.swift Sources/RaceWeekend.swift Sources/RoadSound.swift Sources/RaceReplay.swift Sources/RaceFlags.swift Sources/Qualifying.swift Sources/DrivingLessons.swift Sources/Input.swift Sources/EngineSound.swift Sources/VehicleShowcase.swift Sources/DrivingViewport.swift Sources/HUD.swift Sources/Game.swift Sources/main.swift \
   -o "$app_path/Contents/MacOS/APEXLab"
 
 cat > "$app_path/Contents/Info.plist" <<'PLIST'
@@ -23,19 +23,21 @@ cat > "$app_path/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>studio.apexlab.firstdrive</string>
   <key>CFBundleName</key><string>APEX Lab</string>
   <key>CFBundleDisplayName</key><string>APEX Lab</string>
+  <key>CFBundleIconFile</key><string>APEXLab.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>3.0.0</string>
-  <key>CFBundleVersion</key><string>74</string>
-  <key>APEXReleaseStage</key><string>preview24</string>
+  <key>CFBundleVersion</key><string>110</string>
+  <key>APEXReleaseStage</key><string>preview60</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
-  <key>NSHumanReadableCopyright</key><string>APEX Lab — original driving prototype.</string>
+  <key>NSHumanReadableCopyright</key><string>APEX Lab — original racing game.</string>
 </dict></plist>
 PLIST
 
 python3 Tools/copy_assets.py Assets "$app_path/Contents/Resources/Assets"
+cp Resources/APEXLab.icns "$app_path/Contents/Resources/"
 codesign --force --sign - "$app_path"
 print "Built: $app_path"
 if [[ "${1:-}" == "--run" ]]; then

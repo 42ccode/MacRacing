@@ -118,13 +118,17 @@ enum TyreCompound: Int, CaseIterable {
     var wearRate: Double { [1.6, 1.0, 0.65, 1.35][rawValue] }
     var optimum: Double { [75, 85, 95, 57][rawValue] }
 
-    func wetGrip(waterDepth: Double, speed: Double) -> Double {
+    func wetGrip(waterDepth: Double, speed: Double, pressure: Double = 1.80) -> Double {
         let coverage = clamp(waterDepth / 0.55, 0, 1)
         let speedFactor = clamp((speed - 13) / 32, 0, 1)
         let waterLoss = self == .wet ? 0.12 + 0.16 * speedFactor : 0.32 + 0.30 * speedFactor
         let standingWater = clamp((waterDepth-0.55)/0.75,0,1)
         let extraLoss = standingWater * speedFactor * (self == .wet ? 0.10 : 0.18)
-        return 1 - coverage * waterLoss - extraLoss
+        guard extraLoss > 0 else { return 1 - coverage * waterLoss }
+        // Standing water supports a larger fraction of the footprint at
+        // lower inflation. Bound the correction to partial contact loss.
+        let pressureEffect = clamp(0.36*(1.80/max(pressure,0.85)-1),-0.08,0.08)
+        return 1 - coverage * waterLoss - extraLoss*(1+pressureEffect)
     }
 }
 
@@ -141,7 +145,51 @@ struct VehicleDamage {
     var worst: Double { ([front, rear, engine] + suspension).max() ?? 0 }
 }
 
+enum PitServiceWork: String, CaseIterable {
+    case tyres, repairs, both
+
+    var changesTyres: Bool { self != .repairs }
+    var repairsDamage: Bool { self != .tyres }
+}
+
+struct PitServicePlan {
+    static let tyreDuration = 12.0
+    static let repairLimit = 60.0
+
+    let work: PitServiceWork
+    let tyreSetup: TyreSetup?
+    let tyreSeconds: Double
+    let repairSeconds: Double
+
+    /// Tyre fitting and mechanical work can run in parallel.
+    var duration: Double { max(tyreSeconds,repairSeconds) }
+
+    init(work: PitServiceWork, damage: VehicleDamage, tyreSetup: TyreSetup) {
+        self.work = work
+        self.tyreSetup = work.changesTyres ? tyreSetup : nil
+        tyreSeconds = work.changesTyres ? Self.tyreDuration : 0
+        repairSeconds = work.repairsDamage ? Self.estimateRepairSeconds(for:damage) : 0
+    }
+
+    static func estimateRepairSeconds(for damage: VehicleDamage) -> Double {
+        func severity(_ value: Double) -> Double { value.isNaN ? 0 : clamp(value,0,1) }
+        let bodywork = 18*(severity(damage.front)+severity(damage.rear))
+        let suspension = 18*damage.suspension.prefix(4).reduce(0) { $0+severity($1) }
+        let powertrain = 35*severity(damage.engine)
+        let work = bodywork+suspension+powertrain
+        // Original game durations. Four seconds of setup for any actual repair.
+        return work > 0 ? min(repairLimit,ceil(4+work)) : 0
+    }
+}
+
 enum WheelSurface { case asphalt, kerb, grass }
+
+private struct BrakeThermalSpec {
+    let frontCapacity: Double, rearCapacity: Double // J/K per disc
+    let fadeStart: Double
+
+    func capacity(front: Bool) -> Double { front ? frontCapacity : rearCapacity }
+}
 
 struct VehicleRenderSample {
     let kind: VehicleKind
@@ -150,6 +198,7 @@ struct VehicleRenderSample {
     let heading: Double
     let attitude: SIMD3<Double>
     let steering: Double
+    let rearSteering: Double
     let roadElevation: Double
     let wheelRotations: SIMD4<Double>
     let wheelHeights: SIMD4<Double>
@@ -158,6 +207,7 @@ struct VehicleRenderSample {
 struct WheelState {
     var angularVelocity = 0.0
     var rotation = 0.0
+    fileprivate(set) var accumulatedRotation = 0.0
     var slipRatio = 0.0
     var slipAngle = 0.0
     var relaxedSlipAngle = 0.0 // contact-patch lateral response, radians
@@ -238,10 +288,29 @@ struct WheelState {
 
     mutating func preserveTread(from previous: WheelState) { treadTemperatures = previous.treadTemperatures }
     var brakeTemperature = 40.0
-    var brakeFadeFactor: Double { clamp(1-max(0,brakeTemperature-650)/700,0.55,1) }
+    fileprivate(set) var brakeSurfaceTemperature = 40.0
+
+    fileprivate func brakeFade(at threshold: Double) -> Double {
+        let interface = max(brakeTemperature,0.76*brakeSurfaceTemperature+0.24*brakeTemperature)
+        let excess = clamp((interface-threshold)/435,0,1)
+        return 1-0.45*excess*(2-excess)
+    }
+
+    fileprivate mutating func heatBrake(_ dt: Double, workRate: Double, capacity: Double,
+                                        speed: Double, waterDepth: Double) {
+        // Friction first heats the swept face, which conducts into the rotor.
+        let conduction = (brakeSurfaceTemperature-brakeTemperature)*capacity*0.039
+        let convection = capacity*(0.0026+0.00027*speed)*(1+0.18*clamp(waterDepth,0,1))
+        let surfaceLoss = (brakeSurfaceTemperature-26)*convection*0.36
+        let bulkLoss = (brakeTemperature-26)*convection*0.64
+        brakeSurfaceTemperature = clamp(brakeSurfaceTemperature +
+            (0.90*workRate-conduction-surfaceLoss)*dt/(capacity*0.22),26,1250)
+        brakeTemperature = clamp(brakeTemperature + (conduction-bulkLoss)*dt/(capacity*0.78),26,1100)
+    }
     var antiRollForce = 0.0
     var bumpStopForce = 0.0
     var brakePressure = 1.0
+    fileprivate var absPressureTarget = 1.0
     fileprivate var tractionTorqueScale = 1.0
     var surfaceHeight = 0.0
     fileprivate var localSurfaceHeight = 0.0 // kerb and tyre only
@@ -255,26 +324,28 @@ struct WheelState {
 /// Four contact patches, rotating wheels and sprung heave/roll/pitch states.
 /// Brush-style combined-slip tyres use explicit prototype parameters, not iRacing data.
 enum VehicleKind: Int, CaseIterable, Codable {
-    case concept, ferrari, porsche, bmw, mazda, centenario, lotus, honda
-    var label: String { ["Concept GT", "Ferrari 458", "Porsche 911 4S", "BMW M3 E30", "Mazda MX-5", "Lamborghini Centenario", "Lotus Elise", "Honda e"][rawValue] }
-    var assetName: String { ["CarConcept", "Ferrari458", "Porsche911", "BMWM3E30", "MazdaMX5", "Centenario", "LotusElise", "HondaE"][rawValue] }
-    // Experimental driving presets, not manufacturer-calibrated specifications.
-    var mass: Double { [1260, 1485, 1420, 1210, 1025, 1520, 900, 1540][rawValue] }
-    var wheelbase: Double { [2.80, 2.65, 2.44, 2.5911, 2.2597, 2.69175, 2.30, 2.50471][rawValue] }
-    var frontAxle: Double { [1.485, 1.325, 1.22, 1.2956, 1.1299, 1.345875, 1.15, 1.252355][rawValue] }
-    var distanceFromCGToFrontAxle: Double {
-        switch self {
-        case .ferrari: return wheelbase * 0.58
-        case .porsche: return wheelbase * 0.62
-        default: return frontAxle
-        }
-    }
+    // Persisted IDs are shared with earlier saves and telemetry.
+    case porsche = 2, centenario = 5
+
+    var alternate: Self { self == .porsche ? .centenario : .porsche }
+    var label: String { self == .porsche ? "Porsche 911 Carrera 4S" : "Lamborghini Centenario" }
+    var assetName: String { self == .porsche ? "Porsche911" : "Centenario" }
+    // The US 2020 Carrera 4S PDK specifies a 3,487-lb curb weight.
+    var mass: Double { self == .porsche ? 3_487 * 0.45359237 : 1520 }
+    // Experimental geometry and chassis parameters in SI units.
+    var wheelbase: Double { self == .porsche ? 2.44 : 2.69175 }
+    var frontAxle: Double { wheelbase / 2 }
+    var distanceFromCGToFrontAxle: Double { self == .porsche ? wheelbase * 0.62 : frontAxle }
     var centreOfGravityOffset: Double { frontAxle - distanceFromCGToFrontAxle }
-    var track: Double { [1.96, 1.66, 1.50, 1.4067, 1.4066, 1.697, 1.45, 1.438][rawValue] }
-    var radius: Double { [0.384, 0.359, 0.328, 0.3116, 0.3007, 0.37, 0.334, 0.325][rawValue] }
-    var centreOfGravityHeight: Double { [0.44, 0.46, 0.48, 0.51, 0.46, 0.42, 0.43, 0.50][rawValue] }
+    var track: Double { self == .porsche ? 1.50 : 1.697 }
+    var radius: Double { self == .porsche ? 0.328 : 0.37 }
+    var treadWidth: SIMD2<Double> { (self == .porsche ? SIMD2(0.245,0.305) : SIMD2(0.255,0.355)) * 0.88 }
+    var bodyEnvelope: SIMD3<Double> { self == .porsche ? SIMD3(0.93,2.20,2.08) : SIMD3(1.03,2.60,2.37) }
+    fileprivate var wheelInertias: SIMD2<Double> { self == .porsche ? SIMD2(1.42,1.83) : SIMD2(1.64,2.17) }
+    var steeringRatio: Double { self == .porsche ? 15 : 13.6 }
+    var centreOfGravityHeight: Double { self == .porsche ? 0.48 : 0.42 }
     fileprivate typealias BodyInertia = (roll: Double, pitch: Double, yaw: Double)
-    private static let bodyInertias: [BodyInertia] = allCases.map { kind in
+    private static func inertia(for kind: Self) -> BodyInertia {
         let lateralSpread = 0.30 * kind.track
         let verticalSpread = 0.58 * kind.centreOfGravityHeight
         let longitudinalSpread = 0.46 * kind.wheelbase
@@ -283,58 +354,75 @@ enum VehicleKind: Int, CaseIterable, Codable {
         let longitudinal = kind.mass * longitudinalSpread * longitudinalSpread
         return (lateral + vertical, longitudinal + vertical, longitudinal + lateral)
     }
-    fileprivate var bodyInertia: BodyInertia { Self.bodyInertias[rawValue] }
-    private var torqueScale: Double { [1, 1.55, 1.28, 0.86, 0.64, 1.82, 0.67, 1.01][rawValue] }
+    private static let porscheInertia = inertia(for:.porsche)
+    private static let centenarioInertia = inertia(for:.centenario)
+    fileprivate var bodyInertia: BodyInertia { self == .porsche ? Self.porscheInertia : Self.centenarioInertia }
+    private var torqueScale: Double { self == .porsche ? 1.28 : 1.82 }
     // Prototype effective crank and flywheel inertia (kg·m²) for unloaded ICE operation.
     var freeCrankInertia: Double { 0.06 + 0.12 * torqueScale }
-    var frontDriveShare: Double {
-        switch self {
-        case .porsche: return 0.30
-        case .centenario: return 0.35
-        default: return 0
-        }
+    var frontDriveShare: Double { self == .porsche ? 0.30 : 0.35 }
+    private struct Gearbox {
+        var ratios: [Double]
+        var reverse: Double
+        var finalDrive: Double
+        var redline: Double
+        var upshift: Double
+        var shiftDuration = 0.22
+        var shiftTorqueFloor = 0.35
     }
-    // Mazda North American Operations, 2005 MX-5 Miata specs, page 9.
-    // The naturally aspirated LS 6MT is a mechanical reference for this preset.
-    private static let prototypeGears = [3.20, 2.10, 1.52, 1.18, 0.95, 0.79]
-    private static let mazdaGears = [3.760, 2.269, 1.645, 1.257, 1.000, 0.843]
-    private static let electricReduction = [1.0]
-    var gearRatios: [Double] {
-        switch self {
-        case .mazda: return Self.mazdaGears
-        case .honda: return Self.electricReduction
-        default: return Self.prototypeGears
-        }
+    // Factory ratios and speed limits are cited in Preview 28's validation notes.
+    // Shift durations and torque overlap are simulation parameters.
+    private static let porscheGearbox = Gearbox(ratios:[4.89,3.17,2.15,1.56,1.18,0.94,0.76,0.61],
+        reverse:3.96, finalDrive:3.39*0.92, redline:7500, upshift:7275, shiftDuration:0.13, shiftTorqueFloor:0.64)
+    private static let centenarioGearbox = Gearbox(ratios:[3.909,2.438,1.810,1.458,1.185,0.967,0.844],
+        reverse:2.929, finalDrive:2.867, redline:8600, upshift:8425, shiftDuration:0.17, shiftTorqueFloor:0.30)
+    private var gearbox: Gearbox { self == .porsche ? Self.porscheGearbox : Self.centenarioGearbox }
+    var gearRatios: [Double] { gearbox.ratios }
+    var reverseRatio: Double { gearbox.reverse }
+    var finalDrive: Double { gearbox.finalDrive }
+    var redline: Double { gearbox.redline }
+    var upshiftRPM: Double { gearbox.upshift }
+    var shiftDuration: Double { gearbox.shiftDuration }
+    var shiftTorqueFloor: Double { gearbox.shiftTorqueFloor }
+    // Effective rotor masses and pad temperature limits are simulation estimates.
+    private static let porscheBrakes = BrakeThermalSpec(frontCapacity:5500,rearCapacity:4550,fadeStart:550)
+    private static let centenarioBrakes = BrakeThermalSpec(frontCapacity:6200,rearCapacity:5100,fadeStart:710)
+    fileprivate var braking: BrakeThermalSpec { self == .porsche ? Self.porscheBrakes : Self.centenarioBrakes }
+    fileprivate var launchRPM: Double { self == .porsche ? 2450 : 3200 }
+    fileprivate var maximumEngineBrake: Double { self == .porsche ? 43 : 72 }
+    fileprivate func coastTorque(at rpm: Double) -> Double {
+        return maximumEngineBrake * (0.42 + 0.58 * clamp(rpm/redline,0,1))
     }
-    var reverseRatio: Double { self == .honda ? 1.0 : (self == .mazda ? 3.564 : 2.80) }
-    var finalDrive: Double { [3.9, 4.22, 3.68, 4.10, 4.10, 3.58, 4.31, 6.30][rawValue] }
-    var redline: Double { self == .mazda ? 7000 : 7100 }
-    var upshiftRPM: Double { self == .mazda ? 6850 : 6500 }
-    // Peak torque and redline power are specified; the other samples are estimates.
-    private static let mazdaTorque: [(rpm: Double, nm: Double)] = [
-        (950, 101), (1500, 121), (2500, 145), (3500, 157),
-        (4500, 166), (5000, 169.48), (6000, 160), (7000, 144.46)
-    ]
+
+    private struct TorqueCurve {
+        var peakWatts: Double
+        var points: [(rpm: Double, nm: Double)]
+    }
+    private static func torque(watts: Double, at rpm: Double) -> Double { watts * 60/(rpm * 2 * .pi) }
+    // The published peak power and torque constrain the curve. The samples in between are estimates.
+    private static let porscheTorque = TorqueCurve(peakWatts:331_000, points:[(950,182),(1500,320),(2000,470),
+        (2300,530),(5000,530),(5800,515),(6500,torque(watts:331_000,at:6500)),(7500,400)])
+    private static let centenarioTorque = TorqueCurve(peakWatts:566_000, points:[(950,310),(2000,460),
+        (3500,582),(4800,664),(5500,690),(6500,680),(7400,666),(8500,torque(watts:566_000,at:8500)),(8600,622)])
     func fullThrottleTorque(at rpm: Double) -> Double {
-        if self == .honda { return min(310,110_000 / (rpm * 2 * .pi / 60)) }
-        guard self == .mazda else {
-            return torqueScale * (235 + 65 * sin(clamp((rpm - 1000) / 6500, 0, 1) * .pi))
+        let curve = self == .porsche ? Self.porscheTorque : Self.centenarioTorque
+        let points = curve.points
+        if rpm <= points[0].rpm { return points[0].nm }
+        let powerLimit = Self.torque(watts:curve.peakWatts,at:rpm)
+        for i in 1..<points.count where rpm <= points[i].rpm {
+            let low = points[i-1], high = points[i]
+            let fraction = (rpm - low.rpm) / (high.rpm - low.rpm)
+            return min(powerLimit, low.nm + (high.nm - low.nm) * fraction)
         }
-        let curve = Self.mazdaTorque
-        if rpm <= curve[0].rpm { return curve[0].nm }
-        for i in 1..<curve.count where rpm <= curve[i].rpm {
-            let low = curve[i-1], high = curve[i]
-            return low.nm + (high.nm - low.nm) * ((rpm - low.rpm) / (high.rpm - low.rpm))
-        }
-        return curve[curve.count-1].nm
+        return min(powerLimit, points[points.count-1].nm)
     }
-    var springScale: Double { [1, 1.15, 1.02, 0.78, 0.62, 1.24, 0.68, 0.92][rawValue] }
-    var antiRollScale: Double { [1, 1.16, 1.05, 0.81, 0.65, 1.25, 0.77, 0.96][rawValue] }
+    var springScale: Double { self == .porsche ? 1.02 : 1.24 }
+    var antiRollScale: Double { self == .porsche ? 1.05 : 1.25 }
     // Effective force coefficients in N/(m/s)², including air density.
-    var dragCoefficient: Double { [0.43, 0.45, 0.41, 0.44, 0.38, 0.52, 0.40, 0.43][rawValue] }
-    var downforceCoefficient: Double { [0.80, 0.40, 0.18, 0.10, 0.04, 0.88, 0.15, 0.06][rawValue] }
-    var frontAeroBalance: Double { [0.43, 0.43, 0.39, 0.47, 0.46, 0.42, 0.43, 0.44][rawValue] }
-    var credit: String { ["Eric Chadwick / DGG · CC BY 4.0", "vicent091036 · CC BY 4.0", "JK3Dstudios · CC BY 4.0", "Artem P · CC BY 4.0", "Lexyc16 · CC BY 4.0", "SDC PERFORMANCE · CC BY 4.0", "Stéphane Agullo · CC BY 4.0", "Alex Murias · CC BY 4.0"][rawValue] }
+    var dragCoefficient: Double { self == .porsche ? 0.41 : 0.52 }
+    var downforceCoefficient: Double { self == .porsche ? 0.18 : 0.88 }
+    var frontAeroBalance: Double { self == .porsche ? 0.39 : 0.42 }
+    var credit: String { self == .porsche ? "JK3Dstudios · CC BY 4.0" : "SDC PERFORMANCE · CC BY 4.0" }
 }
 
 /// Source measurements from the drivetrain's last completed physics substep.
@@ -342,6 +430,9 @@ struct PowertrainSound {
     var driveLoad = 0.0 // Delivered driving torque / full-throttle torque at this RPM.
     var overrun = 0.0 // Power driving the closed-throttle engine / its drag power at redline.
     var shaftRPM = 0.0 // Absolute crankshaft or traction motor speed, rev/min.
+    var inGear = false
+    var shiftEngagement = 1.0 // Existing combustion gearbox torque recovery ramp.
+    var regeneration = 0.0 // Recovered motor shaft power / simulated regeneration limit.
 }
 
 struct Vehicle {
@@ -350,6 +441,7 @@ struct Vehicle {
     var heading = 0.0
     var yawRate = 0.0
     var steeringAngle = 0.0
+    private(set) var rearSteeringAngle = 0.0
     var rpm = 950.0
     var gear = 1
     var lateralG = 0.0
@@ -361,6 +453,8 @@ struct Vehicle {
     var absActive = false
     var tcReduction = 0.0
     var absRelease = 0.0
+    private var absSampleClock = 0.0
+    private(set) var absValveActivity = 0.0
     var distanceTravelled = 0.0
     var damage = VehicleDamage()
     var coolantTemperature = 85.0
@@ -375,18 +469,22 @@ struct Vehicle {
     private var rollRate = 0.0
     private var pitchRate = 0.0
     private var shiftCooldown = 0.0
+    private var queuedForwardShift: (direction: Int, remaining: Double)?
     private var shiftingDown = false
     private var freeRevCut = false
-    private static let closedThrottleDrag = 23.0 // N·m at the engine, before the gearbox.
     private(set) var engineThrottle = 0.0
     private var shaftLoad = (drive: 0.0, overrun: 0.0)
     private var brakeTakeUp = 0.0
     private(set) var brakeLinePressure = 0.0
     private(set) var brakePedalTravel = 0.0
 
-    var kind = VehicleKind.concept {
+    var kind = VehicleKind.porsche {
         didSet {
-            if kind != oldValue { shaftLoad = (0, 0) }
+            if kind != oldValue {
+                shaftLoad = (0, 0)
+                rearSteeringAngle = 0
+                cancelQueuedShift()
+            }
         }
     }
     var mass: Double { kind.mass }
@@ -394,7 +492,7 @@ struct Vehicle {
     var wheelRadius: Double { kind.radius }
     var trackWidth: Double { kind.track }
     var gearRatios: [Double] { kind.gearRatios }
-    var gearLabel: String { gear == -1 ? "R" : (gear == 0 ? "N" : (kind == .honda ? "D" : String(gear))) }
+    var gearLabel: String { gear == -1 ? "R" : (gear == 0 ? "N" : String(gear)) }
     private var transmissionRatio: Double {
         if gear == -1 { return kind.reverseRatio }
         return (1...gearRatios.count).contains(gear) ? gearRatios[gear-1] : 0
@@ -405,8 +503,8 @@ struct Vehicle {
         return (front * kind.frontDriveShare + rear * (1 - kind.frontDriveShare)) / 2
     }
     var powertrainSound: PowertrainSound {
-        let shaftRPM = kind == .honda ? abs(drivenWheelOmega) * kind.finalDrive * 60 / (2 * .pi) : rpm
-        return PowertrainSound(driveLoad:shaftLoad.drive, overrun:shaftLoad.overrun, shaftRPM:shaftRPM)
+        return PowertrainSound(driveLoad:shaftLoad.drive, overrun:shaftLoad.overrun, shaftRPM:rpm,
+                               inGear:gear != 0, shiftEngagement:gear == 0 ? 1 : shiftEngagement)
     }
     enum ShiftResult { case shifted, busy, unavailable, stopAndBrake, overRev }
     var forward: SIMD2<Double> { SIMD2(sin(heading), cos(heading)) }
@@ -418,16 +516,18 @@ struct Vehicle {
     // Angular coordinates are positive about +Y (toward model-local +X).
     // With a +Z-facing car, that is left from the driver's seat.
     private var shiftEngagement: Double {
-        let release = clamp((0.155-shiftCooldown)/0.070,0,1)
+        let equivalentCooldown = shiftCooldown * (0.22/kind.shiftDuration)
+        let release = clamp((0.155-equivalentCooldown)/0.070,0,1)
         return release*release*(3-2*release)
     }
     var ignitionFraction: Double {
         if gear == 0 && freeRevCut { return 0 }
-        let shiftCut = 0.35+0.65*shiftEngagement
+        let shiftCut = kind.shiftTorqueFloor+(1-kind.shiftTorqueFloor)*shiftEngagement
         return rpm > kind.redline ? shiftCut * 0.10 : shiftCut
     }
     var driverG: SIMD2<Double> { SIMD2(-lateralG, longitudinalG) }
     var brakeLightsActive: Bool { brakePedalTravel > 0.075 || brakeLinePressure > 0.018 }
+    var brakeCapacityShare: Double { wheels.map { $0.brakeFade(at:kind.braking.fadeStart) }.min() ?? 1 }
     var kerbFeedback: Double { wheels.map(\.kerbFeedback).max() ?? 0 }
     var allWheelsOutside: Bool { wheels.allSatisfy { $0.surface == .grass } }
     var contactPoints: [SIMD2<Double>] {
@@ -441,7 +541,8 @@ struct Vehicle {
     /// lap timing always read the latest completed fixed step.
     var renderSample: VehicleRenderSample {
         VehicleRenderSample(kind:kind,position:position,velocity:velocity,heading:heading,
-                            attitude:SIMD3(heave,roll,pitch),steering:steeringAngle,roadElevation:roadElevation,
+                            attitude:SIMD3(heave,roll,pitch),steering:steeringAngle,rearSteering:rearSteeringAngle,
+                            roadElevation:roadElevation,
                             wheelRotations:SIMD4(wheels[0].rotation,wheels[1].rotation,wheels[2].rotation,wheels[3].rotation),
                             wheelHeights:SIMD4(wheels[0].surfaceHeight,wheels[1].surfaceHeight,wheels[2].surfaceHeight,wheels[3].surfaceHeight))
     }
@@ -462,6 +563,7 @@ struct Vehicle {
         result.roll = blend(previous.attitude.y,roll)
         result.pitch = blend(previous.attitude.z,pitch)
         result.steeringAngle = blend(previous.steering,steeringAngle)
+        result.rearSteeringAngle = blend(previous.rearSteering,rearSteeringAngle)
         result.roadElevation = blend(previous.roadElevation,roadElevation)
         for i in wheels.indices {
             result.wheels[i].rotation = angle(previous.wheelRotations[i],wheels[i].rotation)
@@ -470,9 +572,38 @@ struct Vehicle {
         return result
     }
 
+    /// Apply a recorded pose to a display-only vehicle.
+    mutating func applyReplayPose(_ sample: VehicleRenderSample, hasElevation: Bool, braking: Bool,
+                                  spray: SIMD4<Double>) {
+        kind = sample.kind
+        position = sample.position
+        velocity = sample.velocity
+        heading = sample.heading
+        heave = sample.attitude.x
+        roll = sample.attitude.y
+        pitch = sample.attitude.z
+        steeringAngle = sample.steering
+        rearSteeringAngle = sample.rearSteering
+        roadElevation = sample.roadElevation
+        roadElevationReady = hasElevation
+        brakePedalTravel = braking ? 1 : 0
+        brakeLinePressure = 0
+        for index in wheels.indices {
+            wheels[index].rotation = sample.wheelRotations[index]
+            wheels[index].surfaceHeight = sample.wheelHeights[index]
+            wheels[index].spray = spray[index]
+        }
+    }
+
     var steeringLimit: Double {
         let speed = abs(forwardSpeed) / 16.5
         return 0.52 / sqrt(1 + speed * speed * speed)
+    }
+
+    var handwheelAngle: Double {
+        let lockFraction = clamp(abs(steeringAngle)/0.52,0,1)
+        let ratio = kind == .porsche ? kind.steeringRatio-1.7*lockFraction*lockFraction : kind.steeringRatio
+        return steeringAngle*ratio
     }
 
     static func steeringResponse(_ input: Double, curve: SteeringCurve = .standard) -> Double {
@@ -499,10 +630,12 @@ struct Vehicle {
 
     func wheelSteer(_ index: Int) -> Double {
         let x = (index % 2 == 0 ? -1.0 : 1.0) * trackWidth / 2
-        // +X is driver-left. Inner and outer wheels share a turn centre at the
-        // rear axle, instead of being parallel and scrubbing at low speed.
-        let tangent = tan(steeringAngle)
-        let angle = index < 2 ? atan(wheelbase * tangent / (wheelbase - x * tangent)) : 0
+        let front = tan(steeringAngle)
+        let rear = tan(rearSteeringAngle)
+        // +X is driver-left. When both axles steer, their common centre of
+        // rotation follows the difference of the two axle directions.
+        let tangent = index < 2 ? front : rear
+        let angle = atan(wheelbase*tangent/(wheelbase-x*(front-rear)))
         return angle + damage.suspension[index] * (index % 2 == 0 ? -0.10 : 0.10)
     }
 
@@ -525,14 +658,38 @@ struct Vehicle {
         }
     }
 
-    /// Resolve the velocity of the point striking the wall. A shallow rub
-    /// dissipates less forward momentum than a frontal collision.
-    mutating func hitBarrier(outward normal: SIMD2<Double>) -> Double {
+    private func barrierPoint(outward normal: SIMD2<Double>) -> SIMD2<Double> {
         let forwardDot = simd_dot(forward,normal)
         let sideDot = simd_dot(modelX,normal)
-        let longitudinal = kind.wheelbase*0.67*clamp(forwardDot*3,-1,1)
-        let lateral = (kind.track/2+0.13)*clamp(sideDot*3,-1,1)
-        let arm = forward*(longitudinal - kind.centreOfGravityOffset) + modelX*lateral
+        let envelope = kind.bodyEnvelope
+        let corner = 0.20
+        let axleReach = (forwardDot < 0 ? envelope.z : envelope.y) - corner
+        let longitudinal = axleReach*clamp(forwardDot*6,-1,1)
+        let lateral = (envelope.x-corner)*clamp(sideDot*6,-1,1)
+        return forward*longitudinal+modelX*lateral+normal*corner
+    }
+
+    func projectedBodyReach(toward direction: SIMD2<Double>) -> Double {
+        simd_dot(barrierPoint(outward:direction),direction)
+    }
+
+    mutating func constrainToGuardRail(at location: TrackLocation) -> (normal: SIMD2<Double>, closingSpeed: Double, point: SIMD2<Double>)? {
+        guard location.distance > Circuit.guardRailInnerEdge-3 else { return nil }
+        let normal = (position-location.point)/location.distance
+        let point = barrierPoint(outward:normal)
+        let depth = location.distance + simd_dot(point,normal) - Circuit.guardRailInnerEdge
+        guard depth > 0 else { return nil }
+        position -= normal*(depth+0.001)
+        return (normal,hitBarrier(outward:normal,point:point),position+point)
+    }
+
+    /// Resolve the velocity at the striking part of the vehicle envelope.
+    mutating func hitBarrier(outward normal: SIMD2<Double>) -> Double {
+        hitBarrier(outward:normal,point:barrierPoint(outward:normal))
+    }
+
+    private mutating func hitBarrier(outward normal: SIMD2<Double>, point: SIMD2<Double>) -> Double {
+        let arm = point-forward*kind.centreOfGravityOffset
         let lever = arm.y*normal.x-arm.x*normal.y
         let closing = simd_dot(velocity,normal)+yawRate*lever
         guard closing > 0 else { return 0 }
@@ -549,10 +706,51 @@ struct Vehicle {
         return closing
     }
 
-    mutating func service(setup: TyreSetup) {
+    mutating func service(setup: TyreSetup,preservingBrakeHeat: Bool = false) {
+        cancelQueuedShift()
         damage = VehicleDamage()
         coolantTemperature = 85
-        wheels = (0..<4).map { _ in var w = WheelState(); w.setup = setup; return w }
+        fitTyres(setup,preservingBrakeHeat:preservingBrakeHeat)
+        resetABSModulation()
+    }
+
+    /// Apply the selected work at the end of a stopped pit service.
+    mutating func completePitService(_ plan: PitServicePlan) {
+        guard plan.duration > 0 else { return }
+        if let setup = plan.tyreSetup { fitTyres(setup,preservingBrakeHeat:true) }
+        if plan.repairSeconds > 0 { damage = VehicleDamage() }
+        resetABSModulation()
+    }
+
+    private mutating func resetABSModulation() {
+        absSampleClock = 0
+        absActive = false
+        absRelease = 0
+        absValveActivity = 0
+        for index in wheels.indices {
+            wheels[index].brakePressure = 1
+            wheels[index].absPressureTarget = 1
+        }
+    }
+
+    private mutating func fitTyres(_ setup: TyreSetup,preservingBrakeHeat: Bool) {
+        wheels = wheels.map { previous in
+            var fresh = WheelState()
+            fresh.setup = setup
+            if preservingBrakeHeat {
+                fresh.brakeTemperature = previous.brakeTemperature
+                fresh.brakeSurfaceTemperature = previous.brakeSurfaceTemperature
+            }
+            return fresh
+        }
+    }
+
+    mutating func coolStationaryBrakes(_ dt: Double) {
+        let brakes = kind.braking
+        for index in wheels.indices {
+            let capacity = brakes.capacity(front:index < 2)
+            wheels[index].heatBrake(dt,workRate:0,capacity:capacity,speed:0,waterDepth:0)
+        }
     }
 
     mutating func reset(at sample: TrackSample, preservingCondition: Bool = false) {
@@ -571,6 +769,7 @@ struct Vehicle {
                 wheels[i].punctured = oldWheels[i].punctured
                 wheels[i].airRetention = oldWheels[i].airRetention
                 wheels[i].brakeTemperature = oldWheels[i].brakeTemperature
+                wheels[i].brakeSurfaceTemperature = oldWheels[i].brakeSurfaceTemperature
                 wheels[i].surfaceContamination = oldWheels[i].surfaceContamination
             }
         }
@@ -581,7 +780,7 @@ struct Vehicle {
     private mutating func engageGear(_ next: Int) {
         shiftingDown = next > 0 && next < gear
         gear = next
-        shiftCooldown = next == 0 ? 0.12 : 0.22
+        shiftCooldown = next == 0 ? 0.12 : kind.shiftDuration
     }
 
     private mutating func integrateFreeCrank(_ dt: Double) {
@@ -591,7 +790,7 @@ struct Vehicle {
         if rpm >= kind.redline { freeRevCut = true }
         else if rpm <= kind.redline - 120 { freeRevCut = false }
 
-        let losses = Self.closedThrottleDrag * (0.5 + 1.5 * rpm / kind.redline)
+        let losses = kind.maximumEngineBrake * (0.5 + 1.5 * rpm / kind.redline)
         // The published curve is brake torque. Add back internal losses to
         // infer the firing torque, then apply friction even if ignition is cut.
         let fullFiringTorque = kind.fullThrottleTorque(at:rpm) * powerFactor + losses
@@ -600,11 +799,18 @@ struct Vehicle {
         rpm = clamp(rpm + (firingTorque-losses) / inertia * dt * rpmPerRadSecond, 0, kind.redline+300)
     }
 
-    mutating func requestShift(_ direction: Int, pedals: DrivingInput, automatic: Bool) -> ShiftResult {
+    mutating func cancelQueuedShift() { queuedForwardShift = nil }
+
+    mutating func requestShift(_ direction: Int, pedals: DrivingInput, automatic: Bool,
+                               queueIfBusy: Bool = false) -> ShiftResult {
+        if queueIfBusy { cancelQueuedShift() }
         guard direction == -1 || direction == 1 else { return .unavailable }
         let next = gear + direction
         guard (-1...gearRatios.count).contains(next), !automatic || (gear <= 1 && next <= 1) else { return .unavailable }
-        guard shiftCooldown <= 0 else { return .busy }
+        guard shiftCooldown <= 0 else {
+            if queueIfBusy && !automatic && gear > 0 && next > 0 { queuedForwardShift = (direction,0.16) }
+            return .busy
+        }
         let changesDirection = next == -1 || gear == -1 || (next == 1 && forwardSpeed < -0.75)
         if changesDirection || (automatic && next == 0) {
             guard speed < 0.75, pedals.brake >= 0.25, pedals.throttle < 0.08 else { return .stopAndBrake }
@@ -628,14 +834,66 @@ struct Vehicle {
         tcActive = false
         absActive = false
         tcReduction = 0; absRelease = 0
+        absValveActivity = 0
+        let lf = kind.distanceFromCGToFrontAxle, lr = wheelbase-lf
+        let halfTrack = trackWidth/2
+        let x = SIMD4(-halfTrack,halfTrack,-halfTrack,halfTrack)
+        let z = SIMD4(lf,lf,-lr,-lr)
+        let road = StepRoad(contacts:roadContacts, lateral:roadLateral ?? roadDistance,
+                            width:roadWidth, progress:roadProgress, kerbsEnabled:kerbsEnabled,
+                            x:x, z:z, cgOffset:kind.centreOfGravityOffset, treadWidth:kind.treadWidth)
         for _ in 0..<steps {
-            integrate(dt / Double(steps), input: input, assists: assists,
-                      lateral: roadLateral ?? roadDistance, roadWidth: roadWidth, progress: roadProgress, kerbsEnabled: kerbsEnabled, roadContacts: roadContacts)
+            integrate(dt / Double(steps), input:input, assists:assists, road:road, xs:x, zs:z)
+        }
+    }
+
+    // Road samples stay fixed through the three tyre solves. Keep the car's
+    // changing flat spots, rolling radius and suspension state in the substep.
+    private struct StepRoad {
+        let contacts: [WheelRoadContact]
+        let elevation: Double
+        var heights = SIMD4<Double>.zero
+        var grass = SIMD4<Double>.zero
+        var surfaceMu = SIMD4<Double>(repeating:1.24)
+        var dry = SIMD4<Double>.zero
+        var surfaces = [WheelSurface](repeating:.asphalt,count:4)
+
+        init(contacts provided: [WheelRoadContact]?, lateral: Double, width: Double, progress: Double,
+             kerbsEnabled: Bool, x: SIMD4<Double>, z: SIMD4<Double>, cgOffset: Double,
+             treadWidth: SIMD2<Double>) {
+            if let provided, provided.count == 4 { contacts = provided }
+            else {
+                contacts = (0..<4).map { i in
+                    WheelRoadContact(distance:abs(lateral+x[i]),progress:progress+z[i]+cgOffset,kerbsEnabled:kerbsEnabled)
+                }
+            }
+            elevation = contacts.reduce(0) { $0 + $1.elevation } / 4
+            let halfWidth = width/2
+            for i in contacts.indices {
+                let road = contacts[i]
+                let kerb = road.kerb
+                let grassEdge = halfWidth + kerb.width
+                let onGrass = road.distance > grassEdge
+                let onKerb = kerb.scale > 0 && road.distance > halfWidth && !onGrass
+                surfaces[i] = onGrass ? .grass : (onKerb ? .kerb : .asphalt)
+                let tread = treadWidth[i / 2]
+                func overlap(beyond edge: Double) -> Double {
+                    let t = clamp((road.distance-edge+0.5*tread)/tread,0,1)
+                    return t*t*(3-2*t)
+                }
+                let grassShare = overlap(beyond:grassEdge)
+                let paintShare = (overlap(beyond:halfWidth)-grassShare)*min(1,kerb.scale*3)
+                let paintLoss = (0.055+0.17*clamp(road.waterDepth/0.65,0,1))*paintShare
+                grass[i] = grassShare
+                surfaceMu[i] = 1.24-0.76*grassShare-paintLoss
+                dry[i] = (1-grassShare) * (1-clamp(road.waterDepth/0.75,0,1)) * (1-0.12*paintShare)
+                heights[i] = road.elevation - elevation + kerb.elevation(progress:road.progress,distanceFromEdge:road.distance-halfWidth)
+            }
         }
     }
 
     private mutating func integrate(_ dt: Double, input: DrivingInput, assists: DrivingAssists,
-                                    lateral: Double, roadWidth: Double, progress: Double, kerbsEnabled: Bool, roadContacts: [WheelRoadContact]?) {
+                                    road: StepRoad, xs: SIMD4<Double>, zs: SIMD4<Double>) {
         let throttle = clamp(input.throttle, 0, 1)
         let throttleRate = throttle >= engineThrottle ? 22+9*throttle : 42
         engineThrottle += (throttle-engineThrottle)*(1-exp(-dt*throttleRate))
@@ -647,21 +905,22 @@ struct Vehicle {
         brakeTakeUp += (takeUpTarget - brakeTakeUp) * (1 - exp(-dt * takeUpRate))
         let pressureTarget = demand * brakeTakeUp
         let delta = pressureTarget - brakeLinePressure
-        // Approximate return flow through the brake line by Δp = aQ + bQ².
-        // A small pressure correction sees the line's short compliance time;
-        // a large dump also encounters flow resistance.
-        let pressureRate = delta >= 0 ? 29 + 11 * pressureTarget
-            : (2 / 0.011) / (1 + sqrt(1 - delta / 0.16))
+        // A seated pad can take up a small increase through the filled line.
+        // A fresh stroke or a larger pressure change still builds at the slower rate.
+        let flowRate = (2 / 0.011) / (1 + sqrt(1 + abs(delta) / 0.16))
+        let initialRate = 29 + 11 * pressureTarget
+        let seated = clamp(1-delta/0.024,0,1)*BrakeCurve.takeUpTarget(for:brakeLinePressure)
+        let pressureRate = delta > 0 ? initialRate+(flowRate-initialRate)*seated*seated*(3-2*seated) : flowRate
         brakeLinePressure += delta * (1 - exp(-dt * pressureRate))
         if demand == 0 && brakeLinePressure < 0.0001 { brakeLinePressure = 0 }
         let brake = brakeLinePressure
+        let absEnabled = assists.abs && brake > 0.025
+        absSampleClock = absEnabled ? absSampleClock-dt : 0
+        let sampleABS = absEnabled && absSampleClock <= 1e-9
+        if sampleABS { absSampleClock += 1.0/120 }
         let vf = simd_dot(velocity, forward)
         let vl = simd_dot(velocity, modelX)
-        let lf = kind.distanceFromCGToFrontAxle
-        let lr = wheelbase - lf
-        let halfTrack = trackWidth / 2
-        let xs = [-halfTrack, halfTrack, -halfTrack, halfTrack]
-        let zs = [lf, lf, -lr, -lr]
+        let lf = zs[0], lr = -zs[2]
         let weight = mass * 9.81
         let airSpeed = max(0, vf)
         let aeroForce = airSpeed * airSpeed * kind.downforceCoefficient
@@ -672,43 +931,99 @@ struct Vehicle {
         let frontShare = kind.frontDriveShare
         let rearShare = 1 - frontShare
         let coupledRPM = abs(drivenWheelOmega) * ratio * 60 / (2 * .pi)
-        if gear == 0 && kind != .honda {
+        let roadRPM = max(0,vf) / wheelRadius * ratio * 60 / (2 * .pi)
+        let launchRPM = kind.launchRPM
+        // Open the starting clutch at rest. It takes up as the crank rises,
+        // and blends into ordinary shaft coupling over the first few metres.
+        let launchTravel = gear == 1 && launchRPM > 0 ? clamp((roadRPM-1100)/(launchRPM-850),0,1) : 1
+        let clutchSlip = 1 - launchTravel*launchTravel*(3-2*launchTravel)
+        if gear == 0 {
             integrateFreeCrank(dt)
         } else {
             freeRevCut = false
-            let targetRPM = gear == 0 ? 950 + throttle * (kind.redline - 750) :
-                clamp(coupledRPM, 950 + throttle * 450, kind.redline + 300)
-            let speedMatching = shiftingDown && shiftCooldown > 0 ? 32.0 : 20
+            let idleTarget = 950 + throttle * 450
+            let slipTarget = idleTarget + max(0,launchRPM-idleTarget) * engineThrottle * clutchSlip
+            let targetRPM = clamp(coupledRPM, slipTarget, kind.redline + 300)
+            let normalMatching = shiftingDown ? 32.0 : 20.0
+            let speedMatching = shiftCooldown > 0 ? normalMatching * (0.22/kind.shiftDuration) : 20
             rpm += (targetRPM-rpm)*(1-exp(-dt*speedMatching))
         }
         shiftCooldown = max(0, shiftCooldown - dt)
+        if let queued = queuedForwardShift {
+            if assists.automatic || queued.remaining <= dt {
+                cancelQueuedShift()
+            } else if shiftCooldown == 0 {
+                cancelQueuedShift()
+                // Reevaluate direction and over-rev interlocks against current speed.
+                _ = requestShift(queued.direction,pedals:input,automatic:false)
+            } else {
+                queuedForwardShift?.remaining -= dt
+            }
+        }
         if assists.automatic && gear > 0 && shiftCooldown <= 0 {
-            if rpm > kind.upshiftRPM && gear < gearRatios.count { engageGear(gear+1) }
-            else if rpm < 2450 && gear > 1 { engageGear(gear-1) }
+            // A stored gear may exceed the ratios in a newly selected car.
+            // Wheelspin alone cannot trigger a higher gear at low road speed.
+            if gear > gearRatios.count {
+                engageGear(gearRatios.count)
+            } else if rpm > kind.upshiftRPM && gear < gearRatios.count && roadRPM > kind.upshiftRPM*0.83 && brake < 0.22 {
+                engageGear(gear+1)
+            } else if gear > 1 {
+                let lowerRatio = gearRatios[gear-2]/gearRatios[gear-1]
+                let lowerRoadRPM = roadRPM*lowerRatio
+                // Prepare the exit gear under straight-line brake load.
+                // Once the chassis is loaded sideways, revert to the low
+                // road-speed threshold to avoid interrupting the corner.
+                let brakeLoad = clamp((brake-0.19)/0.42,0,1)
+                let cornerMargin = clamp((0.62-abs(lateralG))/0.36,0,1)
+                let preparation = gear > 2 ? brakeLoad*cornerMargin : 0
+                let brakingRPM = kind.redline*0.68/lowerRatio
+                let threshold = 2450 + max(0,brakingRPM-2450)*preparation
+                if rpm < threshold && lowerRoadRPM < kind.redline*0.88 { engageGear(gear-1) }
+            }
         }
         let ratedTorque = kind.fullThrottleTorque(at:rpm)
-        let engineTorque = ratedTorque*powerFactor*engineThrottle
+        let initialBite = clamp((rpm-950)/max(190,760*engineThrottle),0,1) * (1-clamp(brake/0.30,0,1))
+        let driveCoupling = 1-clutchSlip*(1-initialBite)
+        let engineTorque = ratedTorque*powerFactor*engineThrottle*driveCoupling
         // Thermostat restricts cooling below operating temperature; nose damage
         // reduces radiator capacity rather than cooling an idling engine to ambient.
         coolantTemperature += ((0.35 + throttle * 1.8 + damage.front * 0.6) -
             max(0, coolantTemperature - 80) * (0.085 + abs(vf) * 0.0025) * (1 - damage.front * 0.88)) * dt
         coolantTemperature = clamp(coolantTemperature, 26, 160)
         damage.engine = min(1, damage.engine + max(0, coolantTemperature - 125) * dt * 0.00015)
-        let clutch = shiftingDown ? 0.18+0.82*shiftEngagement : 1
-        let engineDrag = Self.closedThrottleDrag*clutch*clamp(1-engineThrottle/0.16,0,1)*clamp(abs(vf)/3,0,1)
+        let shiftClutch = shiftingDown ? 0.18+0.82*shiftEngagement : 1
+        let backdriveClutch = shiftClutch * (1-clutchSlip)
+        let engineDrag = kind.coastTorque(at:rpm)*backdriveClutch*clamp(1-engineThrottle/0.16,0,1)*clamp(abs(vf)/3,0,1)
         let driveDirection = gear < 0 ? -1.0 : 1.0
         let reverseLimit = gear < 0 ? clamp((8 + vf)/2, 0, 1) : 1
-        let drivingTorque = engineTorque * ignitionFraction * reverseLimit
         let transmissionEfficiency = 0.91
+        let availableDrive = engineTorque * ignitionFraction * reverseLimit
+        var drivingTorque = availableDrive
+        var freeCrankRise = 0.0
+        if gear == 1 && clutchSlip > 0 && availableDrive > 0 && drivenWheelOmega > 0 {
+            // Match the two clutch faces without propelling a shaft already spinning faster
+            // than the crank. The previous contact forces predict tyre resistance this substep.
+            let wheelInertia = kind.wheelInertias
+            let inverseCrank = 1/kind.freeCrankInertia
+            let inverseShaft = 0.5*ratio*ratio*transmissionEfficiency*(frontShare*frontShare/wheelInertia.x + rearShare*rearShare/wheelInertia.y)
+            let tyreReaction = 0.5*wheelRadius*ratio*(
+                frontShare*(wheels[0].longitudinalForce+wheels[1].longitudinalForce)/wheelInertia.x +
+                rearShare*(wheels[2].longitudinalForce+wheels[3].longitudinalForce)/wheelInertia.y)
+            let difference = rpm * (2 * .pi/60) - drivenWheelOmega*ratio
+            let synchronizingTorque = (difference/dt + availableDrive*inverseCrank + tyreReaction)/(inverseCrank+inverseShaft)
+            drivingTorque = clamp(synchronizingTorque,0,availableDrive)
+            freeCrankRise = (availableDrive-drivingTorque)*inverseCrank*dt*(60/(2 * .pi))
+        }
         let axleTorque = (driveDirection * drivingTorque - copysign(engineDrag, vf))
             * transmissionRatio * kind.finalDrive * transmissionEfficiency
         let diffStrength = gear == 0 ? 0 : 6 + throttle * 9
         let frontTransfer = clamp((wheels[1].angularVelocity - wheels[0].angularVelocity) * diffStrength, -350, 350) * frontShare
         let rearTransfer = clamp((wheels[3].angularVelocity - wheels[2].angularVelocity) * diffStrength, -350, 350) * rearShare
         let frontBrakeBias = DrivingAssists.validatedBrakeBias(assists.frontBrakeBias)
-        let brakeCapacity = 4050 * sqrt(mass / VehicleKind.concept.mass)
-        let driveTorques = [axleTorque * frontShare / 2 + frontTransfer, axleTorque * frontShare / 2 - frontTransfer,
-                            axleTorque * rearShare / 2 + rearTransfer, axleTorque * rearShare / 2 - rearTransfer]
+        let brakeCapacity = 4050 * sqrt(mass / 1260.0)
+        let braking = kind.braking
+        let frontTorque = axleTorque * frontShare / 2, rearTorque = axleTorque * rearShare / 2
+        let driveTorques = SIMD4(frontTorque+frontTransfer,frontTorque-frontTransfer,rearTorque+rearTransfer,rearTorque-rearTransfer)
         var totalFx = 0.0
         var deliveredAxleTorque = 0.0
         var totalFy = 0.0
@@ -732,13 +1047,16 @@ struct Vehicle {
         let speedLimit = 2.9 / (1 + abs(vf) * 0.008) + 1.2 * centering
         // A smooth rate limit keeps corrections and reversals on the same rack.
         steeringAngle += speedLimit * tanh(error * bandwidth / speedLimit) * dt
+        if kind == .centenario {
+            let blend = clamp((abs(vf)*3.6-32)/58,0,1)
+            let ratio = -0.19+0.30*blend*blend*(3-2*blend)
+            let targetRear = clamp(steeringAngle*ratio,-0.05236,0.05236)
+            rearSteeringAngle += (targetRear-rearSteeringAngle)*(1-exp(-dt*18))
+        }
 
         // Sample all four heights before solving loads, so the anti-roll coupling
         // is symmetric and cannot depend on left/right iteration order.
-        let contactRoads = (0..<4).map { i in
-            roadContacts?.count == 4 ? roadContacts![i] : WheelRoadContact(distance:abs(lateral+xs[i]),progress:progress+zs[i]+kind.centreOfGravityOffset,kerbsEnabled:kerbsEnabled)
-        }
-        let elevation = contactRoads.reduce(0) { $0 + $1.elevation } / 4
+        let elevation = road.elevation
         if roadElevationReady {
             // Keep the sprung body's world height continuous as the contact
             // reference changes. Spring compression remains in metres.
@@ -746,36 +1064,31 @@ struct Vehicle {
         }
         roadElevation = elevation
         roadElevationReady = true
-        let surfaceHeights = (0..<4).map { i -> Double in
-            let road=contactRoads[i], wheel=wheels[i]
-            let kerb = road.kerbsEnabled ? kerbElevation(progress:road.progress,distanceFromEdge:road.distance-roadWidth/2) : 0
-            return road.elevation - elevation + kerb-wheelRadius*(1-wheel.radiusScale)+wheel.flatSpot*0.003*cos(wheel.rotation)*min(abs(vf)/5,1)
+        let flatSpotSpeed = min(abs(vf)/5,1)
+        var surfaceHeights = road.heights
+        for i in 0..<4 {
+            let wheel = wheels[i]
+            surfaceHeights[i] = surfaceHeights[i]-wheelRadius*(1-wheel.radiusScale)
+                + wheel.flatSpot*0.003*cos(wheel.rotation)*flatSpotSpeed
         }
         let springScale = kind.springScale
-        let damperScale = sqrt(springScale * mass / VehicleKind.concept.mass)
+        let damperScale = sqrt(springScale * mass / 1260.0)
         let antiRollScale = kind.antiRollScale
         let previousBrakePressure = SIMD4(wheels[0].brakePressure,wheels[1].brakePressure,wheels[2].brakePressure,wheels[3].brakePressure)
-        func grassCoverage(_ road: WheelRoadContact) -> Double {
-            let edge = roadWidth/2 + (road.kerbsEnabled ? 0.85 : 0.35)
-            let overlap = clamp((road.distance-edge+0.11)/0.22,0,1)
-            return overlap*overlap*(3-2*overlap)
-        }
         for i in 0..<4 {
             var wheel = wheels[i]
             let x = xs[i]
             let z = zs[i]
-            let road = contactRoads[i]
-            let grassEdge = roadWidth / 2 + (road.kerbsEnabled ? 0.85 : 0.35)
-            let onGrass = road.distance > grassEdge
-            let onKerb = road.kerbsEnabled && road.distance > roadWidth / 2 && !onGrass
-            wheel.surface = onGrass ? .grass : (onKerb ? .kerb : .asphalt)
+            let state = road.contacts[i]
+            wheel.surface = road.surfaces[i]
+            let onGrass = wheel.surface == .grass, onKerb = wheel.surface == .kerb
             let surfaceHeight = surfaceHeights[i]
             let cornerVelocity = velocity + yawRate * (modelX * z - forward * x)
             // Smooth base-slope velocity comes from the analytic profile.
             // The finite difference handles kerbs and tyre radius changes.
-            let relativeSurfaceHeight = surfaceHeight - (road.elevation - elevation)
-            let roadVerticalSpeed = simd_dot(cornerVelocity,road.gradient) +
-                clamp((relativeSurfaceHeight-wheel.localSurfaceHeight)/dt,-0.7,0.7)
+            let relativeSurfaceHeight = surfaceHeight - (state.elevation - elevation)
+            let localSurfaceSpeed = clamp((relativeSurfaceHeight-wheel.localSurfaceHeight)/dt,-0.7,0.7)
+            let roadVerticalSpeed = simd_dot(cornerVelocity,state.gradient) + localSurfaceSpeed
             wheel.localSurfaceHeight = relativeSurfaceHeight
             wheel.surfaceHeight = surfaceHeight
             let staticLoad = weight * (i < 2 ? lr : lf) / wheelbase / 2
@@ -793,9 +1106,10 @@ struct Vehicle {
             wheel.normalLoad = load
             wheel.suspensionTravel = -deflection
             wheel.suspensionVelocity = -deflectionRate
+            // Smooth grade contributes to suspension motion, while the texture cue follows local relief.
             let excitation = onKerb && speed > 1 && load > 100
-                ? clamp(abs(roadVerticalSpeed) / 0.7 * 0.7 + 0.3 * abs(sin(road.progress * 7)), 0, 1)
-                    * min(speed / 8, 1) * min(load / staticLoad, 1.2) : 0
+                ? clamp(abs(localSurfaceSpeed) + 0.3 * abs(sin(state.progress * 7)), 0, 1)
+                    * min(speed / 8, 1) * min(load / staticLoad, 1.2) * state.kerb.scale : 0
             wheel.kerbFeedback += (clamp(excitation, 0, 1) - wheel.kerbFeedback) * (1 - exp(-dt * 28))
             verticalForce += load
             rollTorque += x * load
@@ -810,8 +1124,8 @@ struct Vehicle {
             let v = cornerLateral * c - cornerForward * s
             let loadSensitivity = pow(3100 / max(load, 100), 0.09)
             // Blend over roughly one tread width while the contact patch straddles the edge.
-            let grassShare = grassCoverage(road)
-            let waterDepth = road.waterDepth * (1 - grassShare)
+            let grassShare = road.grass[i]
+            let waterDepth = state.waterDepth * (1 - grassShare)
             // Mix the surfaces under each contact and use the actual tyre
             // load. A softer carcass or puncture adds rolling resistance.
             let pressureFlex = wheel.carcassFlex
@@ -820,8 +1134,8 @@ struct Vehicle {
             rollingDemand += load * (tyreDrag+grassShare*0.055+waterDrag+(wheel.punctured ? 0.072 : 0))
             wheel.waterFilm = waterDepth
             wheel.spray = clamp(waterDepth / 0.7,0,1) * clamp((abs(u) - 3) / 32,0,1) * clamp(load / 1800,0,1)
-            let wetGrip = wheel.setup.compound.wetGrip(waterDepth:waterDepth,speed:abs(u))
-            let peakMu = (1.24 - 0.76 * grassShare) * wheel.gripFactor * loadSensitivity * wetGrip
+            let wetGrip = wheel.setup.compound.wetGrip(waterDepth:waterDepth,speed:abs(u),pressure:wheel.pressure)
+            let peakMu = road.surfaceMu[i] * wheel.gripFactor * loadSensitivity * wetGrip
             let capacity = load * peakMu
             let slipAngle = atan2(v, max(abs(u), 1.5))
             // A softer casing or higher load takes more travelled distance
@@ -834,7 +1148,11 @@ struct Vehicle {
             let transientBlend = clamp(abs(u) / 3, 0, 1)
             let forceSlipAngle = slipAngle * (1 - transientBlend) + wheel.relaxedSlipAngle * transientBlend
             let slipDenominator = max(abs(u), 2)
-            let longitudinalLength = 0.12*(0.80+0.20*casing)*(0.95+0.05*loadRatio)
+            // The sliding part of the previously solved footprint retains
+            // less longitudinal shear. Keep finite carcass response even in
+            // full sliding and leave the steady friction envelope intact.
+            let longitudinalMemory = 1-0.28*wheel.slidingFraction
+            let longitudinalLength = 0.12*(0.80+0.20*casing)*(0.95+0.05*loadRatio)*longitudinalMemory
             let longitudinalResponse = 1-transientBlend*exp(-dt*max(abs(u),3)/longitudinalLength)
             let relaxedRatio = wheel.relaxedSlipRatio
             let stiffnessScale = pow(max(load, 1) / 3100, 0.82)
@@ -891,33 +1209,44 @@ struct Vehicle {
             }
             deliveredAxleTorque += driveTorque
             let rollingDirection = u < 0 ? -1.0 : 1.0
-            if assists.abs && brake > 0.025 {
-                let dryContact = (1-grassShare) * (1-clamp(waterDepth/0.75,0,1))
-                let opposite = contactRoads[i ^ 1]
-                let oppositeDry = (1-grassCoverage(opposite)) * (1-clamp(opposite.waterDepth/0.75,0,1))
-                // Run a higher slip target on a uniformly dry axle. Under
-                // braking in a corner, bring it down to save lateral grip.
-                let lateralUse = clamp(abs(linearY) / max(capacity,1),0,1)
-                let slipThreshold = assists.absSlipThreshold
-                    + min(dryContact,oppositeDry)*(0.012+Double(assists.absLevel)*0.006)
-                    - 0.020*lateralUse
-                let excessSlip = max(0, -wheel.slipRatio * rollingDirection - slipThreshold)
-                let absAuthority = clamp((abs(u) - 2.5) / 2.5, 0, 1)
-                let release = min(0.90, excessSlip * (9 + 2 * Double(assists.absLevel))) * absAuthority
-                // Reduce the dry-side pressure slightly if its partner is
-                // already dumping pressure on wet pavement or at the verge.
-                let imbalance = max(0,dryContact-oppositeDry) * (1-previousBrakePressure[i ^ 1])
-                let stabilityRelief = imbalance * clamp((brake-0.22)/0.38,0,1) * Double(assists.absLevel)*0.028
-                let pressureTarget = 1 - max(release, stabilityRelief*absAuthority)
-                let rate = pressureTarget < wheel.brakePressure ? 85.0 : 22.0
-                wheel.brakePressure += (pressureTarget - wheel.brakePressure) * min(1, dt * rate)
-                absRelease = max(absRelease,1-wheel.brakePressure)
-                absActive = absActive || wheel.brakePressure < 0.965
+            if assists.abs {
+                if !absEnabled {
+                    // End slip commands at low line pressure and retain the valve's refill time.
+                    wheel.absPressureTarget = 1
+                } else if sampleABS {
+                    let dryContact = road.dry[i]
+                    let oppositeDry = road.dry[i ^ 1]
+                    // Use a higher slip target on a dry axle and leave more
+                    // lateral grip for steering when the front tyres are loaded sideways.
+                    let lateralUse = clamp(abs(linearY) / max(capacity,1),0,1)
+                    let slipThreshold = assists.absSlipThreshold
+                        + min(dryContact,oppositeDry)*(0.012+Double(assists.absLevel)*0.006)
+                        - 0.020*lateralUse
+                    let excessSlip = max(0,-wheel.slipRatio*rollingDirection-slipThreshold)
+                    let authority = clamp((abs(u)-2.5)/2.5,0,1)
+                    let release = min(0.90,excessSlip*(9+2*Double(assists.absLevel)))*authority
+                    let imbalance = max(0,dryContact-oppositeDry)*(1-previousBrakePressure[i ^ 1])
+                    let stabilityRelief = imbalance*clamp((brake-0.22)/0.38,0,1)*Double(assists.absLevel)*0.028
+                    wheel.absPressureTarget = 1-max(release,stabilityRelief*authority)
+                }
+                let delta = wheel.absPressureTarget-wheel.brakePressure
+                let rate = delta < 0 ? 85.0 : 22.0
+                let movement = delta*min(1,dt*rate)
+                wheel.brakePressure += movement
+                if absEnabled {
+                    let flow = (movement < 0 ? -movement*0.045 : movement*0.030)/dt
+                    absValveActivity = max(absValveActivity,clamp(flow*min(1,brake*2.1),0,1))
+                    absRelease = max(absRelease,1-wheel.brakePressure)
+                    absActive = absActive || wheel.brakePressure < 0.965
+                }
             } else {
                 wheel.brakePressure = 1
+                wheel.absPressureTarget = 1
             }
-            let brakeTorque = brake * brakeCapacity * (i < 2 ? frontBrakeBias : 1-frontBrakeBias) * wheel.brakeFadeFactor * wheel.brakePressure
-            let inertia = 1.7
+            let hydraulic = brake * brakeCapacity * (i < 2 ? frontBrakeBias : 1-frontBrakeBias)
+                * wheel.brakeFade(at:braking.fadeStart) * wheel.brakePressure
+            let brakeTorque = hydraulic
+            let inertia = kind.wheelInertias[i / 2]
             let previousOmega = wheel.angularVelocity
             func balance(_ omega: Double) -> Double {
                 inertia * (omega - previousOmega) / dt - driveTorque + forces(omega).fx * radius
@@ -970,25 +1299,30 @@ struct Vehicle {
             wheel.aligningMoment = patchLength * contact.momentPerLength * clamp(u / 1.5, -1, 1)
             let available = capacity + (slidingGrip - capacity) * contact.slidingFraction
             wheel.gripUsage = available > 1 ? clamp(hypot(contact.fx, contact.fy) / available, 0, 1) : 0
-            let brakeWork = brakeTorque * abs((previousOmega+omega)/2)
-            wheel.brakeTemperature += (brakeWork/14500-(wheel.brakeTemperature-26)*(0.004+abs(u)*0.00025))*dt
-            wheel.brakeTemperature = clamp(wheel.brakeTemperature,26,1100)
+            let averageOmega = (previousOmega+omega)/2
+            let brakeWork = hydraulic * abs(averageOmega)
+            wheel.heatBrake(dt,workRate:brakeWork,capacity:braking.capacity(front:i < 2),speed:abs(u),waterDepth:waterDepth)
             wheel.angularVelocity = omega
-            wheel.rotation = (wheel.rotation + omega * dt).truncatingRemainder(dividingBy: 2 * .pi)
+            let rotationStep = omega * dt
+            wheel.rotation = (wheel.rotation + rotationStep).truncatingRemainder(dividingBy: 2 * .pi)
+            wheel.accumulatedRotation += rotationStep
             wheel.slipRatio = contact.ratio
             wheel.relaxedSlipRatio += (contact.ratio - relaxedRatio) * longitudinalResponse
             wheel.slipAngle = slipAngle
             wheel.longitudinalForce = contact.fx
             wheel.lateralForce = contact.fy
-            let heat = abs(contact.fx * (omega * radius - u)) + abs(contact.fy * v)
+            let treadWork = abs(contact.fx * (omega * radius - u)) + abs(contact.fy * v)
+            // Sliding dissipates heat. Most of the work in the adhering part
+            // is stored in elastic deflection, with a smaller hysteresis loss.
+            let heat = wheel.slidingPower + 0.20*max(0,treadWork-wheel.slidingPower)
             let workBias = clamp((contact.fy * (i.isMultiple(of:2) ? -1 : 1))/max(load,100),-1,1)
             wheel.evolve(dt, slipPower: heat, speed: abs(u), load: load,
                          locked: contact.ratio * rollingDirection < -0.8, grass: onGrass,
-                         surfaceTemperature: road.surfaceTemperature - 6 * grassShare, grassCoverage: grassShare,
+                         surfaceTemperature: state.surfaceTemperature - 6 * grassShare, grassCoverage: grassShare,
                          lateralWork:workBias,waterDepth:waterDepth)
             let fx = contact.fx * c - contact.fy * s
             let fy = contact.fx * s + contact.fy * c
-            let normalReaction = -road.gradient * load
+            let normalReaction = -state.gradient * load
             slopeReaction += normalReaction
             let worldFx = fx + simd_dot(normalReaction,forward)
             let worldFy = fy + simd_dot(normalReaction,modelX)
@@ -1003,10 +1337,9 @@ struct Vehicle {
         let reduction = transmissionRatio * kind.finalDrive
         let netShaftTorque = reduction > 0 ? deliveredAxleTorque * driveDirection / (reduction * transmissionEfficiency) : 0
         let backdriveRPM = max(0, wheelOmega * driveDirection) * reduction * 60 / (2 * .pi)
-        // An EV in neutral still turns its fixed reduction. Axle drag alone
-        // cannot tell whether energy is recovered, so it supplies no engine-braking voice.
         shaftLoad.drive = clamp(min(drivingTorque, netShaftTorque) / ratedTorque, 0, 1)
-        shaftLoad.overrun = kind == .honda ? 0 : clamp(min(-netShaftTorque, engineDrag) * backdriveRPM / (Self.closedThrottleDrag * kind.redline), 0, 1)
+        shaftLoad.overrun = clamp(min(-netShaftTorque, engineDrag) * backdriveRPM / (kind.maximumEngineBrake * kind.redline), 0, 1)
+        rpm = min(kind.redline+300,rpm+freeCrankRise)
         let drag = (kind.dragCoefficient*(1-wakeStrength*0.20) + damage.front*0.22 + damage.rear*0.13) * vf * abs(vf)
         let rolling = (vf >= 0 ? 1.0 : -1.0) * min(rollingDemand, abs(vf) * mass / dt)
         let groundLongitudinalForce = totalFx - simd_dot(slopeReaction,forward) - rolling
@@ -1076,10 +1409,11 @@ struct LapRecord: Codable {
     let ghost: [GhostFrame]
 
     static func key(vehicle: VehicleKind, circuit: CircuitKind, condition: TrackCondition = .dry,
-                    legacyLayout: Bool = false) -> String {
-        let key = "timing9-\(vehicle.rawValue)-\(circuit.rawValue)"
+                    legacyLayout: Bool = false, legacyPorscheMass: Bool = false) -> String {
+        let generation = vehicle == .porsche && !legacyPorscheMass ? "timing10" : "timing9"
+        let key = "\(generation)-\(vehicle.rawValue)-\(circuit.rawValue)"
         let surface = condition == .wet ? key + "-wet" : key
-        return circuit == .ridge && !legacyLayout ? surface + "-graded" : surface
+        return circuit.hasElevation && !legacyLayout ? surface + "-graded" : surface
     }
     var isValid: Bool {
         guard time.isFinite, time>15, time<=3600, sectors.count==3,
@@ -1101,32 +1435,37 @@ struct LapRecord: Codable {
 }
 
 struct LapInputs: Codable {
-    static let intervals = 200
+    static let intervals = 800
+    static let legacyIntervals = 200
     let throttle: Double
     let brake: Double
     let steering: Double
     let speedKPH: Double
     let linePressure: Double?
+    let handwheelDegrees: Double? // positive to the driver’s right
 
-    init(_ input: DrivingInput, speedKPH: Double, linePressure: Double? = nil) {
+    init(_ input: DrivingInput, speedKPH: Double, linePressure: Double? = nil,handwheelDegrees: Double? = nil) {
         throttle = input.throttle; brake = input.brake; steering = input.steering
         self.speedKPH = speedKPH
         self.linePressure = linePressure
+        self.handwheelDegrees = handwheelDegrees
     }
 
     var isValid: Bool {
         (0...1).contains(throttle) && (0...1).contains(brake)
             && (-1...1).contains(steering) && (0...1000).contains(speedKPH)
             && (linePressure.map { (0...1).contains($0) } ?? true)
+            && (handwheelDegrees.map { (-720...720).contains($0) } ?? true)
     }
 
     func interpolated(to next: Self, share: Double) -> Self {
         let share = clamp(share, 0, 1)
         let pressure = linePressure.flatMap { a in next.linePressure.map { a+($0-a)*share } }
+        let wheel = handwheelDegrees.flatMap { a in next.handwheelDegrees.map { a+($0-a)*share } }
         return Self(DrivingInput(throttle: throttle + (next.throttle - throttle) * share,
             brake: brake + (next.brake - brake) * share,
             steering: steering + (next.steering - steering) * share),
-            speedKPH: speedKPH + (next.speedKPH - speedKPH) * share,linePressure:pressure)
+            speedKPH: speedKPH + (next.speedKPH - speedKPH) * share,linePressure:pressure,handwheelDegrees:wheel)
     }
 }
 
@@ -1146,8 +1485,18 @@ struct AnalysedLap: Codable {
     let inputs: [LapInputs]
 
     var isValid: Bool {
-        summary.isValid && inputs.count == LapInputs.intervals + 1 && inputs.allSatisfy(\.isValid)
+        summary.isValid && (inputs.count == LapInputs.intervals+1 || inputs.count == LapInputs.legacyIntervals+1)
+            && inputs.allSatisfy(\.isValid)
     }
+
+    /// The two recordings may have different spacing. Compare observations at the same distance.
+    func input(at fraction: Double) -> LapInputs {
+        let position = clamp(fraction,0,1)*Double(inputs.count-1)
+        let first = Int(position)
+        if position == Double(first) || first == inputs.count-1 { return inputs[first] }
+        return inputs[first].interpolated(to:inputs[first+1],share:position-Double(first))
+    }
+
 }
 
 struct PracticeAnalysis: Codable {
@@ -1260,7 +1609,8 @@ struct RaceSession {
         newBest=false
         analysedLap = nil
         let fraction=clamp(location.progress/trackLength,0,1)
-        let controls = LapInputs(input,speedKPH:vehicle.speedKPH,linePressure:vehicle.brakeLinePressure)
+        let controls = LapInputs(input,speedKPH:vehicle.speedKPH,linePressure:vehicle.brakeLinePressure,
+                                 handwheelDegrees:-vehicle.handwheelAngle*180 / .pi)
         let pose = GhostFrame(time:0,x:vehicle.position.x,z:vehicle.position.y,heading:vehicle.heading)
         let lastPose = previousPose ?? pose
         defer { previousPose = pose }

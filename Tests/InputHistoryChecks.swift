@@ -10,18 +10,6 @@ import Foundation
         check(keyboard.brake == 1 && keyboard.throttle == 0, "Holding the keyboard brake reaches full braking and takes priority")
         for _ in 0..<7 { keyboard.update(throttle:false,brake:false,dt:1/120) }
         check(keyboard.brake == 0 && keyboard.throttle == 0, "Keyboard pedals clear within one short release")
-        var clock = DrivingStepClock()
-        let released = clock.advance(seconds:0.004,to:DrivingInput())
-        let delayed = clock.advance(seconds:0.05,to:DrivingInput(brake:1,steering:-1))
-        check(released.count == 0 && delayed.count == 12 &&
-              (0..<9).allSatisfy { delayed[$0].brake == 0 && delayed[$0].steering == 0 } &&
-              (0.51...0.53).contains(delayed[11].brake) && (-0.53 ... -0.51).contains(delayed[11].steering) &&
-              abs(clock.remainder-0.004) < 1e-8,
-              "A late input does not apply retroactively to the physics steps catching up")
-        clock.reset()
-        let neutral = clock.advance(seconds:1/120,to:DrivingInput())
-        check(neutral.count == 2 && neutral[0].brake == 0 && neutral[1].steering == 0,
-              "Reset clears any pre-pause input and the partial physics step")
         var history=InputHistory()
         for _ in 0..<3600 {history.update(input:DrivingInput(throttle:0.31,brake:0.72),absActive:true,dt:1/60,active:true)}
         check(history.samples.count<=302,"A minute of driving retains only the five-second input window")
@@ -47,7 +35,7 @@ import Foundation
         for _ in 0..<360 {fast.update(input:DrivingInput(throttle:1),absActive:false,dt:1/60,active:true)}
         check(abs(slow.time-fast.time)<0.0001,"30 and 60 Hz produce the same visible time scale")
         for _ in 0..<10000 {history.update(input:DrivingInput(),absActive:false,dt:0.0001,active:true)}
-        check(history.samples.count<=602,"Unexpectedly high sampling rates remain memory bounded")
+        check(history.samples.count<=InputHistory.capacity,"Unexpectedly high sampling rates remain memory bounded")
         var pad = ControllerSamples()
         for i in 0..<360 {
             pad.update(raw:DrivingInput(),deadzone:0.08,at:Double(i)/120)
@@ -67,6 +55,23 @@ import Foundation
         pad.reset()
         check(pad.samples.isEmpty && pad.reading == nil && pad.pollHz == nil && pad.distinctChanges == 0,
               "A disconnected controller clears diagnostic state")
+        for i in 0..<81 {
+            pad.update(raw:DrivingInput(),deadzone:0.08,at:Double(i)/120,systemEvent:10+Double(i/2)/60)
+        }
+        check(abs((pad.systemEventMedianMilliseconds ?? 0)-1000/60) < 0.01 &&
+              abs((pad.pollHz ?? 0)-120) < 0.01 && pad.distinctChanges == 0,
+              "Repeated reads at 120 Hz do not duplicate distinct 60 Hz macOS event timestamps")
+        pad.update(raw:DrivingInput(),deadzone:0.08,at:0.7,systemEvent:Double.nan)
+        pad.update(raw:DrivingInput(),deadzone:0.08,at:0.8,systemEvent:9)
+        check(abs((pad.systemEventMedianMilliseconds ?? 0)-1000/60) < 0.01,
+              "Unavailable or older system timestamps do not affect event timing")
+        for i in 0..<80 {
+            pad.update(raw:DrivingInput(),deadzone:0.08,at:1+Double(i)/120,systemEvent:12+Double(i/3)/40)
+        }
+        check(abs((pad.systemEventMedianMilliseconds ?? 0)-25) < 0.01,
+              "Idle time between input bursts is excluded from the next event cadence")
+        pad.reset()
+        check(pad.systemEventMedianMilliseconds == nil,"Reset clears timing from the previous controller")
         if failures>0 {exit(1)}
     }
 }

@@ -130,14 +130,34 @@ final class GLTFAsset {
     }
 
     private func source(_ accessorIndex: Int, semantic: SCNGeometrySource.Semantic) throws -> SCNGeometrySource {
+        guard accessors.indices.contains(accessorIndex) else { throw GLTFError.invalid("Missing vertex accessor") }
         let a = accessors[accessorIndex]
-        guard let viewIndex = a["bufferView"] as? Int, a["componentType"] as? Int == 5126 else { throw GLTFError.invalid("Unsupported vertex encoding") }
+        guard let viewIndex = a["bufferView"] as? Int, views.indices.contains(viewIndex),
+              a["componentType"] as? Int == 5126, let count = a["count"] as? Int, count >= 0 else {
+            throw GLTFError.invalid("Unsupported vertex encoding")
+        }
         let view = views[viewIndex]
         let components = ["VEC2": 2, "VEC3": 3, "VEC4": 4][a["type"] as? String ?? ""] ?? 3
-        return SCNGeometrySource(data: binary, semantic: semantic, vectorCount: a["count"] as! Int,
-            usesFloatComponents: true, componentsPerVector: components, bytesPerComponent: 4,
-            dataOffset: (view["byteOffset"] as? Int ?? 0) + (a["byteOffset"] as? Int ?? 0),
-            dataStride: view["byteStride"] as? Int ?? components * 4)
+        let vectorSize = components*4
+        let stride = view["byteStride"] as? Int ?? vectorSize
+        let viewOffset = view["byteOffset"] as? Int ?? 0
+        let accessorOffset = a["byteOffset"] as? Int ?? 0
+        guard let viewLength = view["byteLength"] as? Int,
+              (0...binary.count).contains(viewOffset), (0...(binary.count-viewOffset)).contains(viewLength),
+              (0...viewLength).contains(accessorOffset), stride >= vectorSize else {
+            throw GLTFError.invalid("Vertex buffer view is out of range")
+        }
+        let available = viewLength-accessorOffset
+        guard count == 0 || (available >= vectorSize && count-1 <= (available-vectorSize)/stride) else {
+            throw GLTFError.invalid("Vertex accessor exceeds its buffer view")
+        }
+        let bytes = count == 0 ? 0 : (count-1)*stride+vectorSize
+        let start = viewOffset+accessorOffset
+        // SceneKit uploads the source's backing data. Keep only the bytes
+        // needed by this accessor, including gaps in interleaved streams.
+        return SCNGeometrySource(data:binary.subdata(in:start..<(start+bytes)),semantic:semantic,
+            vectorCount:count,usesFloatComponents:true,componentsPerVector:components,bytesPerComponent:4,
+            dataOffset:0,dataStride:stride)
     }
 
     private func geometry(_ primitive: [String: Any]) throws -> SCNGeometry {
@@ -160,7 +180,7 @@ final class GLTFAsset {
         return geometry
     }
 
-    func makeScene() throws -> SCNNode {
+    func makeScene(identifyPrimitives: Bool = false) throws -> SCNNode {
         let nodes = document["nodes"] as? [[String: Any]] ?? []
         let meshes = document["meshes"] as? [[String: Any]] ?? []
         func node(_ index: Int) throws -> SCNNode {
@@ -177,8 +197,11 @@ final class GLTFAsset {
                 if let s = (data["scale"] as? [NSNumber])?.map(\.floatValue) { result.simdScale = SIMD3(s[0], s[1], s[2]) }
             }
             if let mesh = data["mesh"] as? Int {
-                for primitive in meshes[mesh]["primitives"] as? [[String: Any]] ?? [] {
-                    result.addChildNode(SCNNode(geometry: try geometry(primitive)))
+                let primitives = meshes[mesh]["primitives"] as? [[String: Any]] ?? []
+                for (part, primitive) in primitives.enumerated() {
+                    let surface = SCNNode(geometry: try geometry(primitive))
+                    if identifyPrimitives { surface.name = "\(index).\(part)" }
+                    result.addChildNode(surface)
                 }
             }
             for child in data["children"] as? [Int] ?? [] { result.addChildNode(try node(child)) }
@@ -189,5 +212,60 @@ final class GLTFAsset {
         let sceneIndex = document["scene"] as? Int ?? 0
         for index in scenes[sceneIndex]["nodes"] as? [Int] ?? [] { root.addChildNode(try node(index)) }
         return root
+    }
+
+    static func applyCabinMaterials(to model: SCNNode, kind: VehicleKind) {
+        model.enumerateChildNodes { node, _ in
+            guard let geometry = node.geometry, let original = geometry.firstMaterial,
+                  let name = node.parent?.name else { return }
+            let roughness: Double
+            switch (kind,name) {
+            case (.porsche,"Object_16"), (.centenario,"Object_31"):
+                roughness = 0.76
+            case (.centenario,"Object_42"), (.centenario,"Object_69"), (.centenario,"Object_81"):
+                roughness = 0.57
+            default:
+                return
+            }
+            // The original maps and UV bindings are shared with exterior panels.
+            guard let material = original.copy() as? SCNMaterial else { return }
+            material.metalness.contents = 0
+            material.roughness.contents = roughness
+            material.clearCoat.contents = 0
+            geometry.firstMaterial = material
+        }
+    }
+
+    static let porscheWindshieldLinerName = "PorscheWindshieldLiner"
+
+    /// Object_26 carries an opaque liner almost coincident with the separate
+    /// windshield. Keep the source faces available outside the driver's view.
+    static func separatePorscheWindshieldLiner(from vehicle: SCNNode) -> SCNNode? {
+        guard let parent = vehicle.childNode(withName: "Object_26", recursively: true),
+              let body = parent.childNodes.first, let stock = body.geometry,
+              let element = stock.elements.first, element.primitiveType == .triangles,
+              element.primitiveCount == 38_550 else { return nil }
+        let linerFaces = 8_928..<12_224
+        let faceSize = element.bytesPerIndex * 3
+        let indices = element.data
+        let start = linerFaces.lowerBound * faceSize
+        let end = linerFaces.upperBound * faceSize
+        var remainder = indices.subdata(in: 0..<start)
+        remainder.append(indices.subdata(in: end..<indices.count))
+        func geometry(_ data: Data) -> SCNGeometry {
+            let faces = SCNGeometryElement(data: data, primitiveType: .triangles,
+                primitiveCount: data.count / faceSize, bytesPerIndex: element.bytesPerIndex)
+            let part = SCNGeometry(sources: stock.sources, elements: [faces])
+            part.materials = stock.materials
+            return part
+        }
+        body.geometry = geometry(remainder)
+        let liner = SCNNode(geometry: geometry(indices.subdata(in: start..<end)))
+        liner.name = porscheWindshieldLinerName
+        liner.transform = body.transform
+        liner.castsShadow = body.castsShadow
+        liner.renderingOrder = body.renderingOrder
+        parent.addChildNode(liner)
+        return liner
     }
 }

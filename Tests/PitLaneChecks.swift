@@ -8,7 +8,110 @@ import Foundation
         if !result { failures += 1 }
     }
 
+    static func checkIndependentService() {
+        let requested = TyreSetup(compound:.hard,coldPressure:1.95)
+        let empty = PitServicePlan(work:.repairs,damage:VehicleDamage(),tyreSetup:requested)
+        let small = VehicleDamage(front:0.38)
+        let singleCorner = VehicleDamage(suspension:[0.55,0,0,0])
+        let engine = VehicleDamage(engine:0.9)
+        let excessive = VehicleDamage(front:2,rear:3,engine:4,suspension:[2,2,2,2])
+        check(empty.duration == 0 && empty.tyreSetup == nil && empty.repairSeconds == 0,
+              "Repairs are unavailable on an undamaged car")
+        check(PitServicePlan.estimateRepairSeconds(for:small) == 11 &&
+              PitServicePlan.estimateRepairSeconds(for:singleCorner) == 14 &&
+              PitServicePlan.estimateRepairSeconds(for:engine) == 36 &&
+              PitServicePlan.estimateRepairSeconds(for:excessive) == PitServicePlan.repairLimit,
+              "Repair estimates increase with body, suspension and engine damage and cap at 60 seconds")
+        let zeroAndInvalid = VehicleDamage(front:-1,rear:.nan,engine:.nan,suspension:[-2,0,0,0,1])
+        check(PitServicePlan.estimateRepairSeconds(for:zeroAndInvalid) == 0,
+              "The pit estimate ignores invalid negative severity and unmodelled suspension entries")
+        let mildBoth = PitServicePlan(work:.both,damage:small,tyreSetup:requested)
+        let heavyBoth = PitServicePlan(work:.both,damage:engine,tyreSetup:requested)
+        check(mildBoth.tyreSeconds == 12 && mildBoth.repairSeconds == 11 && mildBoth.duration == 12 &&
+              heavyBoth.duration == 36,
+              "Parallel tyre and repair work keeps the longer service duration")
+
+        var parked = Vehicle()
+        parked.kind = .porsche
+        parked.service(setup:TyreSetup(compound:.wet,coldPressure:1.7))
+        parked.gear = 0
+        parked.velocity = parked.forward*28
+        for index in parked.wheels.indices { parked.wheels[index].angularVelocity = 28/parked.wheelRadius }
+        for _ in 0..<2880 where parked.speed > 0.035 {
+            parked.step(1.0/240,input:DrivingInput(brake:1),assists:DrivingAssists(),roadDistance:0,roadWidth:12)
+        }
+        parked.damage = VehicleDamage(front:0.38,rear:0.18,engine:0.10,suspension:[0.2,0,0.15,0])
+        parked.coolantTemperature = 119
+        for index in parked.wheels.indices {
+            parked.wheels[index].evolve(0.15,slipPower:0,speed:16,load:3300,locked:false,grass:true)
+            parked.wheels[index].wear = 0.22+Double(index)*0.1
+            parked.wheels[index].flatSpot = 0.18
+            parked.wheels[index].temperature = 60+Double(index)
+            parked.wheels[index].coreTemperature = 53
+            parked.wheels[index].airRetention = 0.83
+        }
+        parked.wheels[1].punctured = true
+        func damageState(_ car: Vehicle) -> [Double] {
+            [car.damage.front,car.damage.rear,car.damage.engine]+car.damage.suspension
+        }
+        func tyreState(_ wheel: WheelState) -> [Double] {
+            [wheel.wear,wheel.flatSpot,wheel.airRetention,wheel.surfaceContamination,wheel.coreTemperature,
+             wheel.treadTemperatures.x,wheel.treadTemperatures.y,wheel.treadTemperatures.z,
+             Double(wheel.setup.compound.rawValue),wheel.setup.coldPressure,wheel.punctured ? 1 : 0]
+        }
+        func brakeState(_ car: Vehicle) -> [[Double]] {
+            car.wheels.map { [$0.brakeTemperature,$0.brakeSurfaceTemperature] }
+        }
+        let hot = brakeState(parked)
+        for _ in 0..<2880 { parked.coolStationaryBrakes(1.0/240) }
+        let cooled = brakeState(parked)
+        check(parked.speed < 0.55 && hot != cooled && cooled.contains { $0[0] > 40 },
+              "A parked stop follows normal rotor cooling and keeps residual brake heat")
+
+        var tyresOnly = parked
+        var chosen = requested
+        let tyrePlan = PitServicePlan(work:.tyres,damage:tyresOnly.damage,tyreSetup:chosen)
+        chosen.compound = .soft
+        tyresOnly.completePitService(tyrePlan)
+        check(tyrePlan.duration == 12 && tyrePlan.repairSeconds == 0 &&
+              tyresOnly.wheels.allSatisfy { $0.setup == requested && $0.wear == 0 && $0.flatSpot == 0 &&
+                  !$0.punctured && $0.airRetention == 1 && $0.surfaceContamination == 0 },
+              "Tyres-only service fits the captured set and resets tyre wear, punctures and contamination")
+        check(damageState(tyresOnly) == damageState(parked) &&
+              tyresOnly.coolantTemperature == parked.coolantTemperature && brakeState(tyresOnly) == cooled,
+              "Tyres-only service preserves vehicle damage, coolant and both rotor temperatures")
+
+        var repairsOnly = parked
+        let repairPlan = PitServicePlan(work:.repairs,damage:repairsOnly.damage,tyreSetup:requested)
+        repairsOnly.completePitService(repairPlan)
+        check(repairPlan.duration > 12 && repairPlan.tyreSeconds == 0 && repairPlan.tyreSetup == nil &&
+              repairsOnly.damage.worst == 0 && repairsOnly.wheels.map(tyreState) == parked.wheels.map(tyreState),
+              "Repairs remove all vehicle damage and preserve the installed tyres and their condition")
+        check(repairsOnly.coolantTemperature == parked.coolantTemperature && brakeState(repairsOnly) == cooled,
+              "Repairs-only service preserves coolant and both rotor temperatures")
+
+        var both = parked
+        both.completePitService(PitServicePlan(work:.both,damage:both.damage,tyreSetup:requested))
+        check(both.damage.worst == 0 && both.wheels.map(tyreState) == tyresOnly.wheels.map(tyreState) &&
+              both.coolantTemperature == parked.coolantTemperature && brakeState(both) == cooled,
+              "A combined service repairs and fits its tyres while keeping all thermal carryover")
+
+        var undamaged = repairsOnly
+        undamaged.completePitService(empty)
+        check(damageState(undamaged) == damageState(repairsOnly) &&
+              undamaged.wheels.map(tyreState) == repairsOnly.wheels.map(tyreState) &&
+              brakeState(undamaged) == cooled && undamaged.coolantTemperature == parked.coolantTemperature,
+              "A zero-work repair plan cannot reset or replace any component")
+
+        parked.service(setup:requested)
+        check(parked.damage.worst == 0 && parked.coolantTemperature == 85 &&
+              brakeState(parked).allSatisfy { $0 == [40,40] } &&
+              parked.wheels.allSatisfy { $0.setup == requested && $0.wear == 0 },
+              "Fresh-start service retains its full damage, coolant, brake and tyre reset")
+    }
+
     static func main() {
+        checkIndependentService()
         for kind in CircuitKind.allCases {
             let circuit = Circuit(kind: kind)
             let lane = circuit.pitLane
@@ -68,7 +171,7 @@ import Foundation
         let circuit = Circuit()
         let lane = circuit.pitLane
         var approaching = Vehicle()
-        approaching.kind = .mazda
+        approaching.kind = .porsche
         approaching.gear = 2
         approaching.velocity = approaching.forward*25
         for index in approaching.wheels.indices { approaching.wheels[index].angularVelocity = 25/approaching.wheelRadius }

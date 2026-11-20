@@ -25,7 +25,8 @@ enum CircuitKind: Int, CaseIterable, Codable {
     case north, sprint, technical, grand, ridge, valley
     var name: String { ["NORTH LOOP", "CLUB SPRINT", "TECHNICAL PARK", "GRAND CIRCUIT", "RIDGE RING", "VALLEY CIRCUIT"][rawValue] }
     var label: String { ["北环赛道", "俱乐部短环", "技术公园", "大奖赛长环", "高原高速环", "河谷环线"][rawValue] }
-    var detail: String { ["均衡弯道 · 基础练习", "短直道 · 连续中速弯", "发卡与变向 · 制动练习", "长直道 · 高速弯与减速弯", "高低起伏 · 带横坡高速弯", "连续变向 · 回头弯"][rawValue] }
+    var detail: String { ["均衡弯道 · 基础练习", "短直道 · 连续中速弯", "发卡与变向 · 制动练习", "长直道 · 高速弯与减速弯", "高低起伏 · 带横坡高速弯", "起伏与连续变向 · 回头弯"][rawValue] }
+    var hasElevation: Bool { self == .ridge || self == .valley }
     var controls: [SIMD2<Double>] {
         switch self {
         case .north: return [
@@ -57,6 +58,71 @@ enum CircuitKind: Int, CaseIterable, Codable {
     }
 }
 
+struct CornerLandmark {
+    enum Form { case marshalPost, wall, lightRig, observationDeck, shelter, mast }
+
+    let corner: Double
+    let station: Double
+    let offset: Double
+    let form: Form
+    let name: String
+    let accent: UInt32
+
+    init(_ corner: Double,_ station: Double,_ offset: Double,_ form: Form,_ name: String,_ accent: UInt32) {
+        self.corner = corner
+        self.station = station
+        self.offset = offset
+        self.form = form
+        self.name = name
+        self.accent = accent
+    }
+}
+
+extension CircuitKind {
+    // Scenery positions behind the catch fence. The corner and station
+    // identify the braking approach and the landmark independently.
+    var landmarks: [CornerLandmark] {
+        switch self {
+        case .north:
+            return [
+                .init(340,314,23.0,.marshalPost,"PINE POST",0x496E5C),
+                .init(570,547,-23.8,.wall,"STONE BANK",0x95754E),
+                .init(1380,1356,23.5,.lightRig,"NORTH LIGHTS",0x567587)
+            ]
+        case .sprint:
+            return [
+                .init(370,338,23.7,.observationDeck,"CLUB STAND",0x935F49),
+                .init(570,514,-23.8,.shelter,"CUTTING",0x667752),
+                .init(1180,1165,23.0,.marshalPost,"PADDOCK",0x56748D)
+            ]
+        case .technical:
+            return [
+                .init(290,266,23.0,.mast,"SERVICE MAST",0xA46D41),
+                .init(540,508,24.5,.wall,"PANEL WALL",0x558185),
+                .init(1450,1427,23.2,.lightRig,"EAST RIG",0xA38346)
+            ]
+        case .grand:
+            return [
+                .init(660,639,23.8,.observationDeck,"EAST STAND",0xA36A51),
+                .init(1260,1212,23.7,.shelter,"CROSSING",0x546F82),
+                .init(1850,1826,24.0,.wall,"WEST WALL",0x777A61)
+            ]
+        case .ridge:
+            return [
+                .init(890,866,23.0,.mast,"SUMMIT",0xB06553),
+                .init(1330,1304,23.7,.wall,"QUARRY",0x927858),
+                .init(1950,1924,23.3,.lightRig,"LOWER RIG",0x5E7481)
+            ]
+        case .valley:
+            return [
+                .init(330,307,23.0,.marshalPost,"PUMP HOUSE",0x547882),
+                .init(720,691,-23.7,.shelter,"MILL SHELTER",0x805E50),
+                .init(1370,1348,23.9,.observationDeck,"VALLEY DECK",0x577C62)
+            ]
+        }
+    }
+}
+
 struct WheelRoadContact {
     var distance: Double
     var progress: Double
@@ -65,12 +131,93 @@ struct WheelRoadContact {
     var waterDepth = 0.0 // millimetres
     var elevation = 0.0 // metres, excluding the kerb
     var gradient = SIMD2<Double>.zero // vertical rise per horizontal metre, world X/Z
+    var kerbScale = 1.0
+
+    var kerb: RoadKerb { RoadKerb(scale:kerbsEnabled ? kerbScale : 0) }
+}
+
+struct RoadKerb {
+    let scale: Double
+    var width: Double { 0.35 + 0.50 * scale }
+
+    func elevation(progress: Double, distanceFromEdge: Double) -> Double {
+        guard scale > 0 else { return 0 }
+        return scale * kerbElevation(progress:progress, distanceFromEdge:distanceFromEdge * (0.85/width))
+    }
 }
 
 enum TrackCondition: Int, CaseIterable {
     case dry, wet
 
     var label: String { self == .dry ? "干地" : "湿地" }
+}
+
+/// A wet circuit after rain has stopped. Main-track traffic clears its own paths,
+/// while local runoff slowly fills the cleared tread marks from adjacent water.
+struct TrackDrying {
+    static let interval = 0.05
+    private static let lateralCount = 13
+    private let length: Double
+    private let width: Double
+    private let stationCount: Int
+    private var cleared: [Float]
+    private(set) var elapsed = 0.0
+
+    init(circuit: Circuit) {
+        length = circuit.length
+        width = circuit.width
+        stationCount = Int(ceil(length / 5))
+        cleared = [Float](repeating:0,count:stationCount*Self.lateralCount)
+    }
+
+    mutating func advance(_ dt: Double) {
+        guard dt.isFinite && dt > 0 else { return }
+        elapsed += dt
+        let runoff = Float(exp(-dt/115))
+        for index in cleared.indices { cleared[index] *= runoff }
+    }
+
+    mutating func displace(at progress: Double, lateral: Double, travelled: Double,
+                           speed: Double, load: Double, treadWidth: Double) {
+        let speedShare = clamp((speed-3)/19,0,1)
+        let loadShare = clamp(load/2900,0,1.15)
+        let treadShare = clamp(treadWidth/0.22,0.65,1.40)
+        let swept = travelled * Double(stationCount) / length
+        let pass = 0.072*swept*speedShare*loadShare*treadShare
+        guard pass.isFinite && pass > 0, let point = cell(at:progress,lateral:lateral) else { return }
+        let across = Self.lateralCount
+        for (line,share) in [(point.station,1-point.along),(point.nextStation,point.along)] {
+            let left = line*across+point.slot
+            let contribution = Float(pass*share)
+            cleared[left] = min(0.73,cleared[left]+(1-cleared[left])*contribution*Float(1-point.cross))
+            cleared[left+1] = min(0.73,cleared[left+1]+(1-cleared[left+1])*contribution*Float(point.cross))
+        }
+    }
+
+    func depth(from initial: Double, at progress: Double, lateral: Double) -> Double {
+        guard elapsed > 0, let point = cell(at:progress,lateral:lateral) else { return initial }
+        let start = point.station*Self.lateralCount+point.slot
+        let end = point.nextStation*Self.lateralCount+point.slot
+        let a = Double(cleared[start])*(1-point.cross)+Double(cleared[start+1])*point.cross
+        let b = Double(cleared[end])*(1-point.cross)+Double(cleared[end+1])*point.cross
+        let displaced = a+(b-a)*point.along
+        // Shallower films evaporate more quickly. Deep pockets remain wet
+        // where they are not mechanically cleared.
+        let evaporated = elapsed*(0.00016+max(0,0.50-initial)*0.00028)
+        return max(0.035,(initial-evaporated)*(1-displaced))
+    }
+
+    private func cell(at progress: Double, lateral: Double)
+        -> (station: Int,nextStation: Int,along: Double,slot: Int,cross: Double)? {
+        let edge = width/2
+        guard progress.isFinite, lateral.isFinite, abs(lateral) <= edge else { return nil }
+        let lap = progress/length
+        let along = (lap-floor(lap))*Double(stationCount)
+        let station = min(Int(along),stationCount-1)
+        let cross = (lateral+edge)/width*Double(Self.lateralCount-1)
+        let slot = min(Int(cross),Self.lateralCount-2)
+        return (station,(station+1)%stationCount,along-Double(station),slot,cross-Double(slot))
+    }
 }
 
 /// A closed, original circuit. World coordinates are metres in the X/Z plane.
@@ -83,41 +230,64 @@ final class Circuit {
         let inverseSquaredLength: Double
         let progress: Double
     }
+    private struct ElevationWave {
+        let amplitude: Double
+        let start: Double
+        let peak: Double
+        let end: Double
+
+        init(_ amplitude: Double, _ start: Double, _ peak: Double, _ end: Double) {
+            self.amplitude = amplitude; self.start = start; self.peak = peak; self.end = end
+        }
+
+        func evaluate(_ t: Double) -> SIMD2<Double> {
+            guard t > start && t < end else { return .zero }
+            let rising = t < peak
+            let span = rising ? peak-start : end-peak
+            let u = rising ? (t-start)/span : (end-t)/span
+            let value = u*u*u*(10+u*(-15+6*u))
+            let slope = (rising ? 1 : -1) * 30*u*u*(1-u)*(1-u)/span
+            return SIMD2(value,slope)*amplitude
+        }
+    }
+    private static let ridgeGrades = [ElevationWave(21,0.087,0.300,0.510),ElevationWave(-12,0.45,0.66,0.93)]
+    private static let ridgeBanks = [ElevationWave(0.062,0.255,0.300,0.357),ElevationWave(0.048,0.515,0.553,0.61),
+                                    ElevationWave(-0.045,0.641,0.679,0.718)]
+    private static let valleyGrades = [ElevationWave(7.4,0.125,0.305,0.480),ElevationWave(-5.1,0.510,0.661,0.910)]
+    private static let valleyBanks = [ElevationWave(0.037,0.232,0.285,0.326),ElevationWave(-0.053,0.340,0.401,0.457),
+                                     ElevationWave(0.045,0.488,0.529,0.578)]
     private let segments: [Segment]
     private let nearbySegments: [SIMD2<Int>: [Int]]
+    private var kerbStations: [SIMD2<Double>] = [] // negative and positive lateral edges
     private static let bucketSize = 24.0
+    static let guardRailOffset = 15.8
+    static let guardRailCorrugation = 0.08
+    static let guardRailInnerEdge = guardRailOffset - guardRailCorrugation
     let width: Double = 12
     let samples: [TrackSample]
     let length: Double
     let kind: CircuitKind
     let condition: TrackCondition
     var name: String { kind.name }
-    var hasElevation: Bool { kind == .ridge }
+    var hasElevation: Bool { kind.hasElevation }
 
-    /// Continuous surveyed-style profile for the fictional Ridge Ring.
+    /// Continuous grade and banking profiles for the fictional circuits.
     /// The grid and the full pit entry/exit remain level.
     func roadProfile(at progress: Double, lateral: Double = 0) -> (height: Double, grade: Double, crossfall: Double) {
         guard hasElevation else { return (0,0,0) }
-        let t = progress / length - floor(progress / length)
-        func window(_ start: Double, _ peak: Double, _ end: Double) -> (value: Double, derivative: Double) {
-            guard t > start && t < end else { return (0,0) }
-            let rising = t < peak
-            let span = rising ? peak - start : end - peak
-            let u = rising ? (t - start)/span : (end - t)/span
-            return (u*u*u*(10+u*(-15+6*u)), (rising ? 1 : -1) * 30*u*u*(1-u)*(1-u)/span)
-        }
-        let crest = window(0.087,0.300,0.510), hollow = window(0.45,0.66,0.93)
-        let outerTurn = window(0.255,0.300,0.357), farTurn = window(0.515,0.553,0.61)
-        let switchback = window(0.641,0.679,0.718)
-        let bank = 0.062*outerTurn.value + 0.048*farTurn.value - 0.045*switchback.value
-        let bankDerivative = 0.062*outerTurn.derivative + 0.048*farTurn.derivative - 0.045*switchback.derivative
+        let lap = progress/length
+        let t = lap-floor(lap)
+        let gradeWaves = kind == .ridge ? Self.ridgeGrades : Self.valleyGrades
+        let bankWaves = kind == .ridge ? Self.ridgeBanks : Self.valleyBanks
+        let grade = gradeWaves.reduce(SIMD2<Double>.zero) { $0+$1.evaluate(t) }
+        let bank = bankWaves.reduce(SIMD2<Double>.zero) { $0+$1.evaluate(t) }
         let u = clamp((abs(lateral)-7)/14,0,1)
         let blend = 1 - u*u*(3-2*u)
         let blendDerivative = -copysign(6*u*(1-u)/14,lateral)
         let shoulder = lateral*blend
-        return (21*crest.value - 12*hollow.value + bank*shoulder,
-                (21*crest.derivative - 12*hollow.derivative + bankDerivative*shoulder)/length,
-                bank*(blend+lateral*blendDerivative))
+        return (grade.x + bank.x*shoulder,
+                (grade.y + bank.y*shoulder)/length,
+                bank.x*(blend+lateral*blendDerivative))
     }
 
     func roadHeight(at location: TrackLocation) -> Double {
@@ -143,20 +313,24 @@ final class Circuit {
         return clamp(0.55 + 0.22*sin(phase*3) + 0.15*cos(phase*7) - shallow + pocket + drainage,0.08,1.30)
     }
 
-    func wheelContacts(at points: [SIMD2<Double>]) -> [WheelRoadContact] {
+    func wheelContacts(at points: [SIMD2<Double>], drying: TrackDrying? = nil) -> [WheelRoadContact] {
         points.map { point in
             let contact = nearest(to: point)
             let profile = roadProfile(at:contact.progress,lateral:contact.lateral)
             let right = SIMD2(contact.tangent.y,-contact.tangent.x)
             let gradient = contact.tangent*profile.grade + right*profile.crossfall
+            let temperature = surfaceTemperature(at:contact.progress)
+            let water = waterDepth(at:contact.progress,lateral:contact.lateral)
             if pitLane.hasAsphalt(at: contact) {
                 return WheelRoadContact(distance:0,progress:contact.progress,kerbsEnabled:false,
-                                        surfaceTemperature:surfaceTemperature(at:contact.progress),waterDepth:waterDepth(at:contact.progress,lateral:contact.lateral),
+                                        surfaceTemperature:temperature,waterDepth:water,
                                         elevation:profile.height,gradient:gradient)
             }
+            let kerb = kerb(at:contact.progress,side:contact.lateral)
+            let film = condition == .wet ? drying?.depth(from:water,at:contact.progress,lateral:contact.lateral) ?? water : water
             return WheelRoadContact(distance:contact.distance,progress:contact.progress,
-                                    kerbsEnabled:hasKerb(at:contact.progress),surfaceTemperature:surfaceTemperature(at:contact.progress),
-                                    waterDepth:waterDepth(at:contact.progress,lateral:contact.lateral),elevation:profile.height,gradient:gradient)
+                                    kerbsEnabled:kerb.scale > 0,surfaceTemperature:temperature,
+                                    waterDepth:film,elevation:profile.height,gradient:gradient,kerbScale:kerb.scale)
         }
     }
 
@@ -221,6 +395,7 @@ final class Circuit {
             }
         }
         self.nearbySegments = nearbySegments
+        kerbStations = buildKerbStations()
     }
 
     func nearest(to position: SIMD2<Double>, useSpatialIndex: Bool = true) -> TrackLocation {
@@ -274,10 +449,49 @@ final class Circuit {
                            tangent: simd_normalize(a.tangent + (b.tangent - a.tangent) * t), distance: wrapped)
     }
 
+    private func buildKerbStations() -> [SIMD2<Double>] {
+        let count = Int(ceil(length))
+        let spacing = length / Double(count)
+        func angle(at progress: Double) -> Double {
+            let a = sample(at:progress-9).tangent, b = sample(at:progress+9).tangent
+            return atan2(a.x*b.y-a.y*b.x,simd_dot(a,b))
+        }
+        func smooth(_ value: Double) -> Double {
+            let t = clamp(value,0,1)
+            return t*t*(3-2*t)
+        }
+        return (0..<count).map { i in
+            let progress = Double(i) * spacing
+            let current = angle(at:progress), prior = angle(at:progress-18)
+            let inside = smooth((abs(current)-0.075)/0.075)
+            let exit = 0.82 * smooth((abs(prior)-0.11)/0.065) * smooth((abs(prior)-abs(current)-0.025)/0.10)
+            var edges = SIMD2(current >= 0 ? inside : 0,current < 0 ? inside : 0)
+            let outsideIndex = prior >= 0 ? 1 : 0
+            edges[outsideIndex] = max(edges[outsideIndex],exit)
+
+            // A flush merge replaces the inside kerb where the pit pavement
+            // crosses the track edge. Taper the transition into the verge.
+            let local = pitLane.localProgress(progress)
+            let pitWeight = smooth(min(local-PitLane.entry+7.5,PitLane.exit+7.5-local)/6)
+            let pitClearance = abs(-width/2-0.28-pitLane.lateral(at:local))-PitLane.halfWidth
+            edges.x *= 1-pitWeight*(1-smooth(pitClearance/1.25))
+            return edges
+        }
+    }
+
+    func kerb(at progress: Double, side: Double) -> RoadKerb {
+        guard progress.isFinite else { return RoadKerb(scale:0) }
+        let lap = progress/length
+        let station = (lap-floor(lap))*Double(kerbStations.count)
+        let index = min(Int(station),kerbStations.count-1)
+        let fraction = station-Double(index)
+        let axis = side < 0 ? 0 : 1
+        let low = kerbStations[index][axis], high = kerbStations[(index+1)%kerbStations.count][axis]
+        return RoadKerb(scale:low+(high-low)*fraction)
+    }
+
     func hasKerb(at distance: Double) -> Bool {
-        let a = sample(at: distance - 9).tangent
-        let b = sample(at: distance + 9).tangent
-        return abs(a.x * b.y - a.y * b.x) > 0.085
+        kerb(at:distance,side:-1).scale > 0 || kerb(at:distance,side:1).scale > 0
     }
 
     var cornerDistances: [Double] {
@@ -359,6 +573,39 @@ struct RacingLine {
             let old=offsets
             for i in 0..<count {offsets[i]=old[i]*0.6+(old[(i+count-1)%count]+old[(i+1)%count])*0.2}
         }
+        func wetExposure(at progress: Double, offset: Double) -> Double {
+            let left = circuit.waterDepth(at:progress,lateral:offset-0.78)
+            let right = circuit.waterDepth(at:progress,lateral:offset+0.78)
+            return 0.35*min(left,right)+0.65*max(left,right)
+        }
+        if circuit.condition == .wet {
+            let deviations = [-1.25,-0.85,-0.40,0,0.40,0.85,1.25]
+            var shifts = samples.indices.map { index -> Double in
+                let station = samples[index].distance
+                let original = offsets[index]
+                var bestShift = 0.0
+                var bestCost = wetExposure(at:station,offset:original)
+                for deviation in deviations {
+                    let candidate = clamp(original+deviation,-margin,margin)
+                    let shift = candidate-original
+                    let cost = wetExposure(at:station,offset:candidate)+0.073*shift*shift
+                    if cost < bestCost {
+                        bestCost = cost
+                        bestShift = shift
+                    }
+                }
+                return bestShift
+            }
+            // Spread a correction over several car lengths so one short
+            // puddle cannot turn the guide into a last-second lane change.
+            for _ in 0..<20 {
+                let previous = shifts
+                for i in shifts.indices {
+                    shifts[i] = 0.5*previous[i]+0.25*(previous[(i+count-1)%count]+previous[(i+1)%count])
+                }
+            }
+            for i in offsets.indices { offsets[i] = clamp(offsets[i]+shifts[i],-margin,margin) }
+        }
         let positions=samples.indices.map {samples[$0].point+samples[$0].right*offsets[$0]}
         var speeds=(0..<count).map { i -> Double in
             let a=positions[(i+count-1)%count], b=positions[i], c=positions[(i+1)%count]
@@ -367,7 +614,7 @@ struct RacingLine {
             let profile = circuit.roadProfile(at:samples[i].distance,lateral:offsets[i])
             let bankSupport = abs(curvature) > 0.0001 ? copysign(1,curvature)*profile.crossfall*9.81 : 0
             let wetScale = circuit.condition == .wet ?
-                clamp(0.89 - 0.14*circuit.waterDepth(at:samples[i].distance,lateral:offsets[i]),0.72,0.89) : 1
+                clamp(0.89 - 0.14*wetExposure(at:samples[i].distance,offset:offsets[i]),0.72,0.89) : 1
             return min(72,sqrt((6.5+bankSupport)/max(abs(curvature),0.0001))) * wetScale
         }
         // Closed-loop passes propagate braking upstream, including past the

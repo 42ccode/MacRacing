@@ -2,21 +2,45 @@ import AppKit
 import GameController
 import CoreHaptics
 
+enum HapticRoute: Int, CaseIterable {
+    case automatic, handles, split, all
+
+    var label: String {
+        switch self {
+        case .automatic: return "自动"
+        case .handles: return "合并握把"
+        case .split: return "左右分离"
+        case .all: return "全手柄"
+        }
+    }
+
+    var next: Self { Self(rawValue:(rawValue+1)%Self.allCases.count) ?? .automatic }
+}
+
 final class InputManager {
     var keys: Set<UInt16> = []
     var onAction: ((String) -> Void)?
     private(set) var controller: GCController?
     private(set) var samples = ControllerSamples()
     private var heldButtons: Set<String> = []
+    private enum ConfirmMode: Equatable { case menu, driving, inactive }
+    private var confirmMode: ConfirmMode?
+    private var confirmPress: Double?
+    private var confirmDown = false
+    private var confirmCanReset = false
     private var resetHold = 0.0
     private var resetFired = false
-    private var heldMenuConfirm = false
+    private var menuStickArmed = false
+    private var lastControllerPoll: Double?
+    private static let buttonEdgeLifetime = 0.18
+    private var shiftPresses: [(drive: String, menu: String?, time: Double)] = []
     private var observers: [NSObjectProtocol] = []
-    private var keyboardPedals = KeyboardPedals()
+    var keyboard = KeyboardDrivingTimeline()
     private final class HapticChannel {
         let locality: GCHapticsLocality
         let engine: CHHapticEngine
         private var continuous: CHHapticPatternPlayer?
+        private var continuousSpan = 1.10
         private var legacyPlayers: [Int: CHHapticPatternPlayer] = [:]
         private var activePlayer: CHHapticPatternPlayer?
         private var legacyKey: Int?
@@ -28,15 +52,19 @@ final class InputManager {
         init(locality: GCHapticsLocality, engine: CHHapticEngine) throws {
             self.locality = locality
             self.engine = engine
-            let event = Self.event(strength: 1, sharpness: 0.35, duration: 0.24)
-            let silentStart = CHHapticDynamicParameter(parameterID:.hapticIntensityControl,value:0,relativeTime:0)
             do {
-                continuous = try engine.makePlayer(with:CHHapticPattern(events:[event],parameters:[silentStart]))
+                continuous = try makeContinuousPlayer()
             } catch {
-                // Some controllers can play the basic event even if they
-                // reject parameters in the continuous pattern.
-                legacyPlayers[12] = try makeLegacyPlayer(level:12,sharp:false)
+                continuousSpan = 0.24
+                continuous = try? makeContinuousPlayer()
+                if continuous == nil { legacyPlayers[12] = try makeLegacyPlayer(level:12,sharp:false) }
             }
+        }
+
+        private func makeContinuousPlayer() throws -> CHHapticPatternPlayer {
+            let event = Self.event(strength:1,sharpness:0.35,duration:continuousSpan)
+            let silentStart = CHHapticDynamicParameter(parameterID:.hapticIntensityControl,value:0,relativeTime:0)
+            return try engine.makeAdvancedPlayer(with:CHHapticPattern(events:[event],parameters:[silentStart]))
         }
 
         private static func event(strength: Float,sharpness: Float,duration: Double) -> CHHapticEvent {
@@ -49,14 +77,14 @@ final class InputManager {
         func play(_ value: Double, sharpness: Double, now: Double) throws {
             guard value >= (activePlayer == nil ? 0.014 : 0.009) else { stop(); return }
             let strength = clamp(value,0,0.8)
-            if let continuous {
+            while let continuous {
                 let renew = activePlayer == nil || now >= refreshAt
                 do {
                     if renew {
                         stop()
                         try continuous.start(atTime:CHHapticTimeImmediate)
                         activePlayer = continuous
-                        refreshAt = now + 0.18
+                        refreshAt = now + continuousSpan - 0.06
                     }
                     if renew || abs(strength-lastValue) >= 0.003 || abs(sharpness-lastSharpness) >= 0.02 {
                         try continuous.sendParameters([
@@ -69,7 +97,10 @@ final class InputManager {
                     return
                 } catch {
                     stop()
-                    self.continuous = nil
+                    if continuousSpan > 0.24 {
+                        continuousSpan = 0.24
+                        self.continuous = try? makeContinuousPlayer()
+                    } else { self.continuous = nil }
                 }
             }
             try playLegacy(strength,sharpness:sharpness,now:now)
@@ -112,10 +143,11 @@ final class InputManager {
     private var hapticRetry = 0.0
     private var hapticGeneration = 0
     private var preferCombinedHaptics = false
-    private var usingCombinedHaptics = false
+    private var failedHapticLocalities: Set<GCHapticsLocality> = []
     private var testTime: Double? = nil
     private(set) var hapticError: String?
     var hapticLevel = 3
+    private(set) var hapticRoute = HapticRoute.automatic
     var hapticsAvailable: Bool { !hapticChannels.isEmpty }
     private(set) var hapticStatus = "未连接手柄"
     var controllerName: String? { controller?.vendorName ?? controller?.productCategory }
@@ -134,67 +166,148 @@ final class InputManager {
 
     deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
+        if let pad = controller?.extendedGamepad { Self.detachButtons(pad) }
         stopHaptics()
         if !observers.isEmpty { GCController.stopWirelessControllerDiscovery() }
     }
 
     private func refreshController() {
-        let selected = GCController.controllers().first(where: { $0.extendedGamepad != nil })
+        selectController(GCController.controllers().first(where: { $0.extendedGamepad != nil }))
+    }
+
+    func selectController(_ selected: GCController?) {
         guard selected !== controller else { return }
         let lostController = controller != nil
-        controller?.extendedGamepad?.buttonMenu.pressedChangedHandler = nil
+        if let pad = controller?.extendedGamepad { Self.detachButtons(pad) }
         controller = selected
         samples.reset()
         heldButtons = []
-        heldMenuConfirm = false
-        resetHold = 0
-        resetFired = false
+        shiftPresses.removeAll(keepingCapacity:true)
+        clearConfirmAndMenuStick()
         releaseHaptics()
         hapticError = nil
+        failedHapticLocalities.removeAll()
         preferCombinedHaptics = selected?.productCategory.localizedCaseInsensitiveContains("Xbox") == true
         hapticStatus = selected == nil ? "未连接手柄" : "正在检测震动"
-        if let controller {
+        if let controller, let pad = controller.extendedGamepad {
             controller.playerIndex = .index1
-            controller.extendedGamepad?.buttonMenu.pressedChangedHandler = { [weak self] _, _, pressed in
-                if pressed { DispatchQueue.main.async { self?.onAction?("pause") } }
+            controller.handlerQueue = .main
+            pad.buttonMenu.pressedChangedHandler = { [weak self, weak controller] _, _, pressed in
+                guard pressed, let self, let controller, self.controller === controller else { return }
+                self.onAction?("pause")
+            }
+            pad.buttonA.pressedChangedHandler = { [weak self, weak controller] _, _, pressed in
+                guard let self, let controller, self.controller === controller else { return }
+                self.observeConfirm(pressed:pressed,now:ProcessInfo.processInfo.systemUptime)
+            }
+            for (button,drive,menu) in Self.shiftButtons(pad) {
+                button.pressedChangedHandler = { [weak self, weak controller] _, _, pressed in
+                    guard pressed, let self, let controller, self.controller === controller else { return }
+                    if self.shiftPresses.count == 8 { self.shiftPresses.removeFirst() }
+                    self.shiftPresses.append((drive,menu,ProcessInfo.processInfo.systemUptime))
+                }
             }
             prepareHaptics(controller)
         }
         if lostController { onAction?("controllerDisconnected") }
     }
 
+    private static func shiftButtons(_ pad: GCExtendedGamepad) -> [(GCControllerButtonInput,String,String?)] {
+        [(pad.buttonB,"upshift","menuBack"),(pad.buttonX,"downshift",nil),
+         (pad.leftShoulder,"downshift","menuPrevious"),(pad.rightShoulder,"upshift","menuNext")]
+    }
+
+    private static func detachButtons(_ pad: GCExtendedGamepad) {
+        pad.buttonMenu.pressedChangedHandler = nil
+        pad.buttonA.pressedChangedHandler = nil
+        for (button,_,_) in shiftButtons(pad) { button.pressedChangedHandler = nil }
+    }
+
     private func releaseHaptics() {
         hapticGeneration += 1
-        stopHaptics()
-        for channel in hapticChannels {
-            channel.engine.resetHandler = {}; channel.engine.stoppedHandler = { _ in }
-            channel.engine.stop(completionHandler:nil)
-        }
+        testTime = nil; hapticClock = 0
+        for channel in hapticChannels { Self.shutdownHapticChannel(channel) }
         hapticChannels = []
-        usingCombinedHaptics = false
+    }
+
+    private static func shutdownHapticChannel(_ channel: HapticChannel) {
+        channel.stop()
+        channel.engine.resetHandler = {}
+        channel.engine.stoppedHandler = { _ in }
+        channel.engine.stop(completionHandler:nil)
+    }
+
+    private var hasHapticGrip: Bool {
+        hapticChannels.contains { channel in
+            channel.locality != .leftTrigger && channel.locality != .rightTrigger
+        }
+    }
+
+    func selectHapticRoute(_ route: HapticRoute) {
+        guard route != hapticRoute else { return }
+        hapticRoute = route
+        failedHapticLocalities.removeAll()
+        hapticRetry = 0
+        if let controller { prepareHaptics(controller) }
+    }
+
+    private func updateHapticStatus() {
+        let sides = Set(hapticChannels.map(\.locality))
+        if sides.contains(.leftHandle), sides.contains(.rightHandle) {
+            let left = sides.contains(.leftTrigger), right = sides.contains(.rightTrigger)
+            hapticStatus = left && right ? "左右马达 + LT / RT" :
+                (left ? "左右马达 + LT" : (right ? "左右马达 + RT" : "左右马达"))
+        } else if sides.contains(.leftHandle) {
+            hapticStatus = "左握把震动 · 兼容模式"
+        } else if sides.contains(.rightHandle) {
+            hapticStatus = "右握把震动 · 兼容模式"
+        } else if sides.contains(.all) {
+            hapticStatus = "全手柄通道 · 兼容模式"
+        } else if sides.contains(.handles) {
+            hapticStatus = "合并握把通道 · 兼容模式"
+        } else {
+            hapticStatus = "默认震动通道 · 兼容模式"
+        }
     }
 
     private func prepareHaptics(_ controller: GCController) {
         releaseHaptics()
+        hapticError = nil
         guard let haptics = controller.haptics else { hapticStatus = "macOS 未提供此手柄的震动"; return }
         let supported = haptics.supportedLocalities
+        var attempted: Set<GCHapticsLocality> = []
         func prepare(_ locality: GCHapticsLocality) -> Bool {
+            guard supported.contains(locality), !failedHapticLocalities.contains(locality),
+                  attempted.insert(locality).inserted else { return false }
             let generation = hapticGeneration
             do {
                 guard let engine = haptics.createEngine(withLocality:locality) else { throw NSError(domain:"Haptics",code:1) }
-                do {
-                    try engine.start()
-                    hapticChannels.append(try HapticChannel(locality:locality,engine:engine))
-                    let recover: () -> Void = { [weak self] in
-                        DispatchQueue.main.async {
-                            guard let self, self.hapticGeneration == generation else { return }
-                            self.releaseHaptics(); self.hapticRetry = 1
+                let recover: (Bool) -> Void = { [weak self, weak engine] routeFailed in
+                    DispatchQueue.main.async { [weak self, weak engine] in
+                        guard let self, let engine, self.hapticGeneration == generation,
+                              let index = self.hapticChannels.firstIndex(where: { $0.engine === engine }) else { return }
+                        if routeFailed { self.failedHapticLocalities.insert(locality) }
+                        Self.shutdownHapticChannel(self.hapticChannels.remove(at:index))
+                        if self.hasHapticGrip {
+                            self.updateHapticStatus()
+                        } else {
+                            self.releaseHaptics()
+                            self.hapticRetry = 1
                             self.hapticStatus = "震动中断 · 等待恢复"
                         }
                     }
-                    engine.resetHandler = recover
-                    engine.stoppedHandler = { _ in recover() }
-                } catch { engine.stop(completionHandler:nil); throw error }
+                }
+                engine.resetHandler = { recover(false) }
+                engine.stoppedHandler = { recover($0 == .systemError) }
+                do {
+                    try engine.start()
+                    hapticChannels.append(try HapticChannel(locality:locality,engine:engine))
+                } catch {
+                    engine.resetHandler = {}
+                    engine.stoppedHandler = { _ in }
+                    engine.stop(completionHandler:nil)
+                    throw error
+                }
                 return true
             } catch {
                 let issue = error as NSError
@@ -202,25 +315,30 @@ final class InputManager {
                 return false
             }
         }
-        func combined() -> Bool {
-            guard prepare(.default) || (supported.contains(.handles) && prepare(.handles)) else { return false }
-            usingCombinedHaptics = true
-            hapticStatus = "握把震动 · 兼容模式"
-            hapticError = nil
+        func combined() -> Bool { prepare(.default) || prepare(.handles) }
+        func split() -> Bool {
+            let left = prepare(.leftHandle), right = prepare(.rightHandle)
+            guard left || right else { return false }
+            if left && right {
+                _ = prepare(.leftTrigger)
+                _ = prepare(.rightTrigger)
+            }
             return true
         }
-        hapticError = nil
-        if preferCombinedHaptics && combined() { return }
-        if supported.contains(.leftHandle), supported.contains(.rightHandle),
-           prepare(.leftHandle), prepare(.rightHandle) {
-            let left = supported.contains(.leftTrigger) && prepare(.leftTrigger)
-            let right = supported.contains(.rightTrigger) && prepare(.rightTrigger)
-            hapticStatus = left && right ? "左右马达 + LT / RT" :
-                (left ? "左右马达 + LT" : (right ? "左右马达 + RT" : "左右马达"))
+
+        let preferred: Bool
+        switch hapticRoute {
+        case .automatic: preferred = false
+        case .handles: preferred = prepare(.handles)
+        case .split: preferred = split()
+        case .all: preferred = prepare(.all)
+        }
+        if preferred || (preferCombinedHaptics ? (combined() || split()) : (split() || combined())) || prepare(.all) {
+            updateHapticStatus()
             return
         }
-        releaseHaptics()
-        if !preferCombinedHaptics && combined() { return }
+        // A later retry starts a new pass through the routes after every option was exhausted.
+        failedHapticLocalities.removeAll()
         hapticRetry = 2
         hapticStatus = "震动启动失败 · 将重试"
     }
@@ -266,29 +384,46 @@ final class InputManager {
     }
 
     @discardableResult private func playHaptics(_ output: HapticOutput) -> Bool {
+        guard hasHapticGrip else { return false }
         let now = ProcessInfo.processInfo.systemUptime
-        do {
-            for channel in hapticChannels {
-                let value: Double
-                switch channel.locality {
-                case .leftHandle: value = output.left + (hapticChannels.contains { $0.locality == .leftTrigger } ? 0 : output.brake*0.45)
-                case .rightHandle: value = output.right + (hapticChannels.contains { $0.locality == .rightTrigger } ? 0 : output.throttle*0.45)
-                case .leftTrigger: value = output.brake
-                case .rightTrigger: value = output.throttle
-                default: value = output.combinedGrip
-                }
-                try channel.play(value,sharpness:output.sharpness,now:now)
+        let localities = Set(hapticChannels.map(\.locality))
+        var merged = output
+        if localities.contains(.leftTrigger) { merged.brake = 0 }
+        if localities.contains(.rightTrigger) { merged.throttle = 0 }
+        var failures: [HapticChannel] = []
+        for channel in hapticChannels {
+            let value: Double
+            switch channel.locality {
+            case .leftHandle:
+                value = localities.contains(.rightHandle) ? output.left + merged.brake*0.45 : merged.combinedGrip
+            case .rightHandle:
+                value = localities.contains(.leftHandle) ? output.right + merged.throttle*0.45 : merged.combinedGrip
+            case .leftTrigger: value = output.brake
+            case .rightTrigger: value = output.throttle
+            default: value = output.combinedGrip
             }
-            return true
-        } catch {
-            let issue = error as NSError
-            hapticError = "\(issue.domain) \(issue.code)"
-            preferCombinedHaptics = !usingCombinedHaptics
-            releaseHaptics()
-            hapticRetry = 2
-            hapticStatus = "震动播放失败 · 将重试"
-            return false
+            do {
+                try channel.play(value,sharpness:output.sharpness,now:now)
+            } catch {
+                let issue = error as NSError
+                hapticError = "\(channel.locality.rawValue): \(issue.domain) \(issue.code)"
+                failures.append(channel)
+                failedHapticLocalities.insert(channel.locality)
+            }
         }
+        guard !failures.isEmpty else { return true }
+        for channel in failures {
+            Self.shutdownHapticChannel(channel)
+        }
+        hapticChannels.removeAll { channel in failures.contains { $0 === channel } }
+        if hasHapticGrip {
+            updateHapticStatus()
+            return true
+        }
+        releaseHaptics()
+        hapticRetry = 2
+        hapticStatus = "震动播放失败 · 将重试"
+        return false
     }
 
     func keyDown(_ event: NSEvent, navigateMenu: Bool = false) {
@@ -303,7 +438,8 @@ final class InputManager {
         // A held menu key can generate repeats after leaving the overlay.
         // Require its next physical key-down before using it to drive.
         guard !event.isARepeat else { return }
-        keys.insert(event.keyCode)
+        if navigateMenu && KeyboardDrivingTimeline.isDrivingKey(event.keyCode) { return }
+        setKey(event.keyCode,pressed:true,at:event.timestamp)
         let action: String?
         switch event.keyCode {
         case 36: action = "confirm"       // Return
@@ -346,12 +482,76 @@ final class InputManager {
         if let action { onAction?(action) }
     }
 
+    func setKey(_ code: UInt16,pressed: Bool,at timestamp: Double = ProcessInfo.processInfo.systemUptime) {
+        let changed = pressed ? keys.insert(code).inserted : keys.remove(code) != nil
+        if changed { keyboard.record(code,pressed:pressed,at:timestamp) }
+    }
+
     func clear() {
         keys = []
-        keyboardPedals = KeyboardPedals()
+        shiftPresses.removeAll(keepingCapacity:true)
+        keyboard = KeyboardDrivingTimeline()
+        clearConfirmAndMenuStick()
+        stopHaptics()
+    }
+
+    private func clearConfirmAndMenuStick() {
+        confirmMode = nil
+        confirmPress = nil
+        confirmDown = controller?.extendedGamepad?.buttonA.isPressed ?? false
+        cancelResetHold()
+        menuStickArmed = false
+        lastControllerPoll = nil
+    }
+
+    private func cancelResetHold() {
+        confirmCanReset = false
         resetHold = 0
         resetFired = false
-        stopHaptics()
+    }
+
+    private func observeConfirm(pressed: Bool,now: Double) {
+        guard pressed != confirmDown else { return }
+        confirmDown = pressed
+        cancelResetHold()
+        if pressed { confirmPress = now }
+    }
+
+    private func readConfirm(_ mode: ConfirmMode,pressed: Bool,dt: Double,now: Double) {
+        if let previous = confirmMode, previous != mode {
+            // A queued driving press belongs to the previous context.
+            confirmPress = nil
+            cancelResetHold()
+        }
+        confirmMode = mode
+        if let edge = confirmPress {
+            confirmPress = nil
+            if (0...Self.buttonEdgeLifetime).contains(now-edge) {
+                switch mode {
+                case .menu: onAction?("menuAccept")
+                case .driving:
+                    confirmCanReset = confirmDown && pressed
+                    onAction?("confirm")
+                case .inactive: break
+                }
+            }
+        }
+        guard mode == .driving, confirmCanReset, pressed else { return }
+        resetHold += dt
+        if resetHold > 0.8 && !resetFired {
+            resetFired = true
+            onAction?("reset")
+        }
+    }
+
+    private func menuStickAction(x: Double,y: Double,enabled: Bool) -> String? {
+        guard enabled else { menuStickArmed = false; return nil }
+        let radius = hypot(x,y)
+        if radius <= 0.28 { menuStickArmed = true }
+        guard menuStickArmed, radius >= 0.66 else { return nil }
+        menuStickArmed = false
+        if abs(x) > abs(y) { return x > 0 ? "menuRight" : "menuLeft" }
+        return y > 0 ? "menuUp" : "menuDown"
     }
 
     private var keyboardThrottle: Bool { keys.contains(13) || keys.contains(126) }
@@ -373,56 +573,68 @@ final class InputManager {
     func read(dt: Double, deadzone: Double, acceptDriving: Bool = true, diagnose: Bool = false, navigateMenu: Bool = false,
               now: Double = ProcessInfo.processInfo.systemUptime) -> DrivingInput {
         var input = controllerPedals
-        if acceptDriving {
-            keyboardPedals.update(throttle:keyboardThrottle,brake:keyboardBrake,dt:dt)
-            input.brake = max(input.brake,keyboardPedals.brake)
-            input.throttle = max(input.throttle,keyboardPedals.throttle)
-        } else {
-            keyboardPedals = KeyboardPedals()
-        }
+        if !acceptDriving { keyboard.rebase(at:now,holding:keys) }
         if let pad = controller?.extendedGamepad {
-            func press(_ name: String, _ isPressed: Bool, _ action: String) {
-                if isPressed && !heldButtons.contains(name) { onAction?(action) }
-                if isPressed { heldButtons.insert(name) } else { heldButtons.remove(name) }
+            if let previous = lastControllerPoll, now-previous > 0.25 {
+                // Waking or returning from a stalled frame needs fresh input.
+                menuStickArmed = false
+                cancelResetHold()
             }
-            press("confirm", pad.buttonA.isPressed, navigateMenu ? "menuAccept" : "confirm")
-            press("b", pad.buttonB.isPressed, navigateMenu ? "menuBack" : "upshift")
-            press("x", pad.buttonX.isPressed, "downshift")
+            lastControllerPoll = now
+            @discardableResult func press(_ name: String, _ isPressed: Bool, _ action: String) -> Bool {
+                let fresh = isPressed && !heldButtons.contains(name)
+                if fresh { onAction?(action) }
+                if isPressed { heldButtons.insert(name) } else { heldButtons.remove(name) }
+                return fresh
+            }
+            let mode: ConfirmMode = navigateMenu ? .menu : acceptDriving ? .driving : .inactive
+            readConfirm(mode,pressed:pad.buttonA.isPressed,dt:dt,now:now)
+            // A complete shoulder press can land between two game polls.
+            let edges = shiftPresses
+            shiftPresses.removeAll(keepingCapacity:true)
+            for edge in edges where now - edge.time <= Self.buttonEdgeLifetime {
+                onAction?(navigateMenu ? edge.menu ?? edge.drive : edge.drive)
+            }
             press("y", pad.buttonY.isPressed, "camera")
             press("rightStick", pad.rightThumbstickButton?.isPressed ?? false, "autoDrive")
             press("leftStick", pad.leftThumbstickButton?.isPressed ?? false, "racingLine")
-            press("lb", pad.leftShoulder.isPressed, navigateMenu ? "menuPrevious" : "downshift")
-            press("rb", pad.rightShoulder.isPressed, navigateMenu ? "menuNext" : "upshift")
-            press("service", pad.dpad.down.isPressed, navigateMenu ? "menuDown" : "service")
-            press("trackNext",pad.dpad.up.isPressed,navigateMenu ? "menuUp" : "trackNext")
-            press("dpadLeft", pad.dpad.left.isPressed, navigateMenu ? "menuLeft" : "brakeBiasDown")
-            press("dpadRight", pad.dpad.right.isPressed, navigateMenu ? "menuRight" : "brakeBiasUp")
-            if pad.buttonA.isPressed && acceptDriving && !heldMenuConfirm {
-                resetHold += dt
-                if resetHold > 0.8 && !resetFired { resetFired = true; onAction?("reset") }
-            } else { resetHold = 0; resetFired = false }
-            if !pad.buttonA.isPressed { heldMenuConfirm = false }
-            else if navigateMenu { heldMenuConfirm = true }
+            let down = press("service",pad.dpad.down.isPressed,navigateMenu ? "menuDown" : "service")
+            let up = press("trackNext",pad.dpad.up.isPressed,navigateMenu ? "menuUp" : "trackNext")
+            let left = press("dpadLeft",pad.dpad.left.isPressed,navigateMenu ? "menuLeft" : "brakeBiasDown")
+            let right = press("dpadRight",pad.dpad.right.isPressed,navigateMenu ? "menuRight" : "brakeBiasUp")
             let steering = Double(pad.leftThumbstick.xAxis.value)
+            if let direction = menuStickAction(x:steering,y:Double(pad.leftThumbstick.yAxis.value),enabled:navigateMenu),
+               !down && !up && !left && !right {
+                onAction?(direction)
+            }
             input.steering = ControllerCalibration.steering(steering,deadzone:deadzone)
             if diagnose {
                 samples.update(raw:DrivingInput(throttle:Double(pad.rightTrigger.value),brake:Double(pad.leftTrigger.value),steering:steering),
-                               deadzone:deadzone,at:now)
+                               deadzone:deadzone,at:now,systemEvent:pad.lastEventTimestamp)
             }
         }
-        let left = keys.contains(0) || keys.contains(123)
-        let right = keys.contains(2) || keys.contains(124)
-        if left || right { input.steering = (right ? 1.0 : 0) - (left ? 1.0 : 0) }
         return acceptDriving ? input : DrivingInput()
     }
 
     func resetDiagnostics() { samples.reset() }
+
 
     var sideLook: Double {
         if keys.contains(38) { return -1 } // J
         if keys.contains(37) { return 1 }  // L
         let x = Double(controller?.extendedGamepad?.rightThumbstick.xAxis.value ?? 0)
         return abs(x) <= 0.16 ? 0 : copysign((abs(x)-0.16)/0.84,x)
+    }
+
+    var showcaseCamera: SIMD3<Double> {
+        guard let pad = controller?.extendedGamepad else { return .zero }
+        let x = Double(pad.rightThumbstick.xAxis.value)
+        let y = Double(pad.rightThumbstick.yAxis.value)
+        let radius = min(1,hypot(x,y))
+        let magnitude = clamp((radius-0.16)/0.84,0,1)
+        let stick = SIMD2(x,y) * (magnitude/max(0.16,hypot(x,y)))
+        let zoom = Double(pad.rightTrigger.value - pad.leftTrigger.value)
+        return SIMD3(stick.x,stick.y,abs(zoom) > 0.08 ? zoom : 0)
     }
 
 }

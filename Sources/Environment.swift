@@ -9,6 +9,16 @@ final class TrackEnvironment {
     let circuit: Circuit
     let assets: URL
     private var root = SCNNode()
+    private static let pavementLift = 0.025
+    private static let vergeEdge = 6.38
+    private static let vergeLift = 0.016
+    // The wet film is sampled at regular stations. Its road edge, paved
+    // verge, striping and graded shoulders must follow the same chords.
+    private lazy var wetPavementStations: [TrackSample]? = {
+        guard circuit.condition == .wet else { return nil }
+        let count = Int(ceil(circuit.length/3))
+        return (0..<count).map { circuit.sample(at:Double($0)*circuit.length/Double(count)) }
+    }()
     private let dark = material(NSColor(rgb: 0x25282A), roughness: 0.9)
     private let paint = material(NSColor(rgb: 0xCFCDC1), roughness: 0.95)
     init(scene: SCNScene, circuit: Circuit, assets: URL) {
@@ -16,13 +26,16 @@ final class TrackEnvironment {
         root.name = "CircuitEnvironment"
         scene.rootNode.addChildNode(root)
     }
-    func build() {
+    func build() -> [SCNMaterial] {
         ground(); road(); pitLane(); barriers(); pits(); circuitDetails()
+        let landmarkClearings = cornerLandmarks()
+        let startLenses = startingLights()
         // Posts, rails, garages and paint never move. Submit them by material
         // rather than submitting every small part separately on every frame.
         let fixed = root.flattenedClone()
         root.removeFromParentNode(); root = fixed; scene.rootNode.addChildNode(root)
-        vegetation()
+        vegetation(avoiding:landmarkClearings)
+        return startLenses
     }
     private func texture(_ path: String, _ property: SCNMaterialProperty, tile: CGFloat = 1) {
         property.contents = assets.appendingPathComponent(path)
@@ -54,7 +67,8 @@ final class TrackEnvironment {
     }
 
     @discardableResult private func mesh(_ v: [SCNVector3], _ uv: [CGPoint], _ indices: [Int32], _ m: SCNMaterial,
-                      normals: [SCNVector3]? = nil, colors: [SIMD4<Float>]? = nil, name: String = "") -> SCNNode {
+                      normals: [SCNVector3]? = nil, colors: [SIMD4<Float>]? = nil,
+                      name: String = "", batch: Bool = true) -> SCNNode {
         let ns = normals ?? v.map { _ in SCNVector3(0,1,0) }
         var sources: [SCNGeometrySource] = [.init(vertices:v),.init(normals:ns),.init(textureCoordinates:uv)]
         if let colors {
@@ -64,7 +78,9 @@ final class TrackEnvironment {
         }
         let g = SCNGeometry(sources:sources,elements:[SCNGeometryElement(indices:indices,primitiveType:.triangles)])
         g.materials = [m]
-        let n = SCNNode(geometry:g); n.name = name; root.addChildNode(n); return n
+        let n = SCNNode(geometry:g); n.name = name
+        (batch ? root : scene.rootNode).addChildNode(n)
+        return n
     }
     @discardableResult private func box(_ w: CGFloat,_ h: CGFloat,_ l: CGFloat,_ p: SCNVector3,
                                         _ m: SCNMaterial, parent: SCNNode? = nil, bevel: CGFloat = 0) -> SCNNode {
@@ -139,36 +155,51 @@ final class TrackEnvironment {
         mesh(v,uv,ix,grass,normals:ns,name:"ContouredGrassTerrain")
         if circuit.hasElevation {
             // Fine shoulder mesh keeps the coarse terrain from intersecting the bank.
+            let stations = wetPavementStations
             for side in [-1.0,1.0] {
-                for (a,b) in [(6.38,9.0),(9,13),(13,18),(18,24),(24,34)] {
-                    strip(min(a*side,b*side),max(a*side,b*side),-0.012,grass,name:"GradedShoulder")
+                for (a,b) in [(Self.vergeEdge,9.0),(9,13),(13,18),(18,24),(24,34)] {
+                    let pavedEdge = a == Self.vergeEdge && stations != nil
+                    let nearHeight = pavedEdge ? Self.vergeLift : -0.012
+                    let startHeight = side > 0 ? nearHeight : -0.012
+                    let endHeight = side < 0 ? nearHeight : -0.012
+                    strip(min(a*side,b*side),max(a*side,b*side),startHeight,grass,
+                          endHeight:endHeight,stations:stations,name:"GradedShoulder")
                 }
             }
         }
     }
     private func strip(_ a: Double,_ b: Double,_ height: Double,_ m: SCNMaterial,
-                       filter: ((Int)->Bool)? = nil, offset: ((TrackSample)->Double)? = nil, name: String = "") {
+                       filter: ((Int)->Bool)? = nil, offset: ((TrackSample)->Double)? = nil,
+                       endHeight: Double? = nil, stations: [TrackSample]? = nil,
+                       name: String = "", batch: Bool = true) {
+        let samples = stations ?? circuit.samples
+        let finalHeight = endHeight ?? height
+        let crossfall = (finalHeight-height)/(b-a)
+        let hasNormals = circuit.hasElevation || crossfall != 0
         var v = [SCNVector3](), uv = [CGPoint](), ix = [Int32](), ns = [SCNVector3]()
-        for i in 0...circuit.samples.count {
-            let s = circuit.samples[i%circuit.samples.count], shift = offset?(s) ?? 0
-            let d = i == circuit.samples.count ? circuit.length : s.distance
-            v += [roadVector(s,a+shift,height),roadVector(s,b+shift,height)]
-            if circuit.hasElevation { ns += [normal(s,a+shift),normal(s,b+shift)] }
+        for i in 0...samples.count {
+            let s = samples[i%samples.count], shift = offset?(s) ?? 0
+            let d = i == samples.count ? circuit.length : s.distance
+            v += [roadVector(s,a+shift,height),roadVector(s,b+shift,finalHeight)]
+            if hasNormals {
+                let gradient = crossfall == 0 ? .zero : s.right*crossfall
+                ns += [normal(s,a+shift,additional:gradient),normal(s,b+shift,additional:gradient)]
+            }
             uv += [CGPoint(x:a/3,y:d/3),CGPoint(x:b/3,y:d/3)]
-            if i<circuit.samples.count && (filter?(i) ?? true) {
+            if i<samples.count && (filter?(i) ?? true) {
                 let n = Int32(i*2); ix += [n,n+2,n+1,n+1,n+2,n+3]
             }
         }
         m.isDoubleSided = true
-        if !ix.isEmpty { mesh(v,uv,ix,m,normals:circuit.hasElevation ? ns : nil,name:name) }
+        if !ix.isEmpty { mesh(v,uv,ix,m,normals:hasNormals ? ns : nil,name:name,batch:batch) }
     }
     private func road() {
         let asphalt = scanMaterial("asphalt_track",tint:0xC6C5C1)
         asphalt.normal.intensity = 0.30
         if circuit.condition == .wet {
-            asphalt.roughness.contents = 0.24
-            asphalt.clearCoat.contents = 0.34
-            asphalt.clearCoatRoughness.contents = 0.24
+            asphalt.normal.intensity = 0.18
+            asphalt.clearCoat.contents = 0.25
+            asphalt.clearCoatRoughness.contents = 0.11
         }
         asphalt.shaderModifiers = [.surface: """
         #pragma body
@@ -183,28 +214,46 @@ final class TrackEnvironment {
                     * (1.0-smoothstep(0.34,0.42,abs(p.x+3.64)));
         _surface.diffuse.rgb *= 0.99 + 0.07*variation + 0.04*aggregate - 0.15*rubber - 0.21*joint + 0.17*patch;
         """]
-        if circuit.condition == .wet {
-            asphalt.shaderModifiers?[.surface, default:""] += "\n_surface.diffuse.rgb *= 0.76;"
-            wetRoad(asphalt)
+        let stations = wetPavementStations
+        if let stations {
+            let filmVarying = "#pragma varyings\nfloat waterFilm;\n"
+            asphalt.shaderModifiers?[.geometry] = "#pragma arguments\nfloat dryingBlend;\n" + filmVarying + """
+            #pragma body
+            out.waterFilm = mix(_geometry.color.r,_geometry.color.g,dryingBlend);
+            _geometry.color.rgb = float3(1.0);
+            """
+            asphalt.setValue(NSNumber(value:1.0 as Float),forKey:"dryingBlend")
+            if let roadShader = asphalt.shaderModifiers?[.surface] {
+                asphalt.shaderModifiers?[.surface] = filmVarying + roadShader + """
+
+                float film = smoothstep(0.0,1.0,in.waterFilm);
+                float3 n = normalize(_surface.geometryNormal);
+                float headOn = abs(dot(n,normalize(_surface.view)));
+                // Approximate low-frequency sky reflection in pooled water.
+                // At grazing angles its Fresnel term brightens markedly.
+                float sky = 0.0204 + 0.9796*pow(saturate(1.0-headOn),5.0);
+                _surface.diffuse.rgb *= 0.89 - 0.18*film;
+                _surface.roughness = mix(_surface.roughness,0.10,film*0.92);
+                _surface.clearCoat = 0.12 + 0.72*film;
+                _surface.clearCoatRoughness = 0.23 - 0.17*film;
+                _surface.emission.rgb += sky*film*float3(0.17,0.20,0.24);
+                """
+            }
+            wetRoad(asphalt,stations:stations)
         } else {
-            strip(-6,6,0.025,asphalt,name:"DrivingSurface")
+            // SceneKit's flattened clone can strip shader modifiers and vertex inputs.
+            strip(-6,6,Self.pavementLift,asphalt,name:"DrivingSurface",batch:false)
         }
         let edge = scanMaterial("asphalt_02",tint:0x8D8678)
-        strip(-6.38,-6,0.016,edge); strip(6,6.38,0.016,edge)
+        let seamHeight = stations == nil ? Self.vergeLift : Self.pavementLift
+        strip(-Self.vergeEdge,-6,Self.vergeLift,edge,endHeight:seamHeight,stations:stations)
+        strip(6,Self.vergeEdge,seamHeight,edge,endHeight:Self.vergeLift,stations:stations)
         let wornPaint = trackPaint(0xB6B4A9)
-        strip(-5.94,-5.80,0.033,wornPaint); strip(5.80,5.94,0.033,wornPaint)
+        strip(-5.94,-5.80,0.033,wornPaint,stations:stations)
+        strip(5.80,5.94,0.033,wornPaint,stations:stations)
         raisedKerbs(red:scanMaterial("asphalt_02",tint:0xA64B40),white:scanMaterial("asphalt_02",tint:0xEEE9DA))
         brakingMarks()
-        for target in circuit.cornerDistances {
-            for distance in [100.0,50.0] {
-                let s = circuit.sample(at:target-distance)
-                let n = SCNNode(); n.position = roadVector(s,9.4,0); n.eulerAngles.y = CGFloat(atan2(s.tangent.x,s.tangent.y)+Double.pi); root.addChildNode(n)
-                box(1.1,1.25,0.07,SCNVector3(0,1.25,0),paint,parent:n)
-                tube(SCNVector3(-0.36,0,0),SCNVector3(-0.36,1.8,0),0.025,dark,parent:n)
-                tube(SCNVector3(0.36,0,0),SCNVector3(0.36,1.8,0),0.025,dark,parent:n)
-                label(String(Int(distance)),size:0.48,at:SCNVector3(0,1.25,0.04),parent:n,color:dark)
-            }
-        }
+        distanceBoards()
         for slot in 0..<12 {
             let s = circuit.gridSlot(slot, frontMark:true)
             let n = SCNNode(); n.position = vector(s.point); n.eulerAngles.y = CGFloat(atan2(s.tangent.x,s.tangent.y)); root.addChildNode(n)
@@ -226,23 +275,146 @@ final class TrackEnvironment {
         box(5.5,0.7,0.04,SCNVector3(0,6,-0.43),dark,parent:n)
         let front = SCNNode(); front.eulerAngles.y = .pi; n.addChildNode(front)
         label(circuit.name,size:0.38,at:SCNVector3(0,5.82,0.46),parent:front,color:paint)
-        for i in 0..<5 { box(0.26,0.48,0.18,SCNVector3(CGFloat(i-2)*0.34,5.35,0),dark,parent:n,bevel:0.05) }
     }
 
-    private func wetRoad(_ asphalt: SCNMaterial) {
-        let across = 12, along = Int(ceil(circuit.length/3))
+    private func startingLights() -> [SCNMaterial] {
+        let sample = circuit.sample(at:circuit.gridSlot(0,frontMark:true).distance+18)
+        let beam = material(NSColor(rgb:0x707A7D),metal:0.54,roughness:0.53)
+        let housing = material(NSColor(rgb:0x171C1E),roughness:0.78)
+        let frame = SCNNode()
+        frame.position = roadVector(sample,0,0)
+        frame.eulerAngles.y = CGFloat(atan2(sample.tangent.x,sample.tangent.y))
+        root.addChildNode(frame)
+
+        // Single support behind the catch fence; the arm clears the full
+        // grid and avoids putting a post in the pit lane or the run-off.
+        let support: CGFloat = 18.2
+        let footY = roadVector(sample,Double(support),-0.5).y-frame.position.y
+        box(0.48,5.98-footY,0.68,SCNVector3(support,(5.98+footY)/2,0),beam,parent:frame)
+        box(21.7,0.40,0.56,SCNVector3(7.55,5.78,0),beam,parent:frame)
+        tube(SCNVector3(support,4.18,0),SCNVector3(15.0,5.69,0),0.075,beam,parent:frame)
+        box(2.58,0.72,0.20,SCNVector3(0,5.31,0),housing,parent:frame,bevel:0.06)
+
+        // A lower repeater sits beyond the pit exit. Its shallower sight line
+        // clears low windscreens and sun visors when the overhead lamps don't.
+        let repeater = circuit.sample(at:PitLane.exit+7)
+        let pedestal = SCNNode()
+        pedestal.position = roadVector(repeater,-8.4,0)
+        pedestal.eulerAngles.y = CGFloat(atan2(repeater.tangent.x,repeater.tangent.y))
+        root.addChildNode(pedestal)
+        box(0.22,2.75,0.26,SCNVector3(0,1.32,0),beam,parent:pedestal)
+        box(0.48,0.14,0.50,SCNVector3(0,0.03,0),beam,parent:pedestal)
+        box(2.58,0.81,0.20,SCNVector3(0,2.60,0),housing,parent:pedestal,bevel:0.06)
+
+        func lenses(at frame: SCNNode, height: CGFloat, radius: CGFloat, name: String) -> [SCNMaterial] {
+            let signal = SCNNode()
+            signal.name = name
+            signal.position = frame.position
+            signal.eulerAngles.y = frame.eulerAngles.y
+            scene.rootNode.addChildNode(signal)
+            return (0..<3).map { index in
+                // The front of each lens points toward cars on the grid.
+                let lens = SCNMaterial()
+                lens.lightingModel = .constant
+                lens.diffuse.contents = NSColor(rgb:0x412327)
+                let geometry = SCNCylinder(radius:radius,height:0.048)
+                geometry.radialSegmentCount = 28
+                geometry.materials = [lens]
+                let node = SCNNode(geometry:geometry)
+                node.eulerAngles.x = .pi/2
+                node.position = SCNVector3(CGFloat(1-index)*0.72,height,-0.127)
+                node.castsShadow = false
+                signal.addChildNode(node)
+                return lens
+            }
+        }
+        return lenses(at:frame,height:5.31,radius:0.253,name:"RaceStartLenses") +
+            lenses(at:pedestal,height:2.60,radius:0.31,name:"RaceStartRepeater")
+    }
+
+    private func distanceBoards() {
+        let leg = material(NSColor(rgb:0x737A79),metal:0.4,roughness:0.65)
+        let back = material(NSColor(rgb:0xAAAFA7),roughness:0.7)
+        let distances = [100.0,50.0]
+        let faces = distances.map {
+            Self.signFace(String(Int($0)),background:0xEBEBDF,foreground:0x202625,aspect:1.56)
+        }
+        let lane = circuit.pitLane
+        for target in circuit.cornerDistances {
+            let before = circuit.sample(at:target-12).tangent
+            let after = circuit.sample(at:target+12).tangent
+            let outside = before.x*after.y-before.y*after.x >= 0 ? 1.0 : -1.0
+            for (index,distance) in distances.enumerated() {
+                let sample = circuit.sample(at:target-distance)
+                let local = lane.localProgress(sample.distance)
+                let inPit = (PitLane.entry...PitLane.exit).contains(local)
+                // Keep posts off all pavement, including the merge where it
+                // widens along the outside edge of the racing surface.
+                let offset = inPit && outside < 0 ? min(-8.5,lane.lateral(at:local)-PitLane.halfWidth-1.7) : outside*8.5
+                signPanel(sample,offset:offset,width:1.82,height:1.17,centre:1.25,
+                          backing:back,post:leg,face:faces[index])
+            }
+        }
+    }
+
+    static func signFace(_ title: String, background: UInt32, foreground: UInt32, aspect: CGFloat) -> SCNMaterial {
+        let size = NSSize(width:384,height:(384/aspect).rounded(.up))
+        let image = NSImage(size:size)
+        image.lockFocus()
+        NSColor(rgb:background).setFill()
+        NSRect(origin:.zero,size:size).fill()
+        let attributes: [NSAttributedString.Key:Any] = [
+            .font:NSFont.systemFont(ofSize:size.height*0.70,weight:.heavy),
+            .foregroundColor:NSColor(rgb:foreground)
+        ]
+        let text = NSAttributedString(string:title,attributes:attributes)
+        let bounds = text.size()
+        text.draw(at:NSPoint(x:(size.width-bounds.width)/2,y:(size.height-bounds.height)/2))
+        image.unlockFocus()
+        let face = SCNMaterial()
+        face.lightingModel = .constant
+        face.diffuse.contents = image
+        face.diffuse.mipFilter = .linear
+        face.diffuse.maxAnisotropy = 8
+        return face
+    }
+
+    @discardableResult private func signPanel(_ sample: TrackSample, offset: Double, width: CGFloat, height: CGFloat,
+                                              centre: CGFloat, backing: SCNMaterial, post: SCNMaterial,
+                                              face: SCNMaterial) -> SCNNode {
+        let anchor = SCNNode()
+        anchor.position = roadVector(sample,offset,0)
+        anchor.eulerAngles.y = CGFloat(atan2(sample.tangent.x,sample.tangent.y)+Double.pi)
+        root.addChildNode(anchor)
+        let panel = SCNPlane(width:width,height:height)
+        panel.materials = [face]
+        let front = SCNNode(geometry:panel)
+        front.position = SCNVector3(0,centre,0.042)
+        front.castsShadow = false
+        anchor.addChildNode(front)
+        box(width+0.05,height+0.05,0.08,SCNVector3(0,centre,0),backing,parent:anchor,bevel:0.016)
+        for side in [-1.0,1.0] {
+            let x = CGFloat(side)*width*0.30
+            tube(SCNVector3(x,-0.12,-0.045),SCNVector3(x,centre+height*0.36,-0.045),0.027,post,parent:anchor)
+        }
+        return anchor
+    }
+
+    private func wetRoad(_ asphalt: SCNMaterial, stations: [TrackSample]) {
+        let across = 12, along = stations.count
         var points: [SCNVector3] = [], normals: [SCNVector3] = [], coords: [CGPoint] = []
         var colors: [SIMD4<Float>] = [], indices: [Int32] = []
         for i in 0...along {
-            let distance = Double(i)*circuit.length/Double(along), sample = circuit.sample(at:distance)
+            let distance = Double(i)*circuit.length/Double(along)
+            let sample = stations[i%along]
             for j in 0...across {
                 let lateral = Double(j)-6
                 let depth = circuit.waterDepth(at:distance,lateral:lateral)
-                let wet = Float(clamp((depth-0.30)/0.80,0,1))
-                points.append(roadVector(sample,lateral,0.025))
+                let wet = Float(clamp((depth-0.25)/0.80,0,1))
+                points.append(roadVector(sample,lateral,Self.pavementLift))
                 normals.append(normal(sample,lateral))
                 coords.append(CGPoint(x:lateral/3,y:distance/3))
-                colors.append(SIMD4(1-wet*0.25,1-wet*0.21,1-wet*0.14,1))
+                colors.append(SIMD4(wet,wet,wet,1))
                 if i < along && j < across {
                     let a = Int32(i*(across+1)+j), b = a+Int32(across+1)
                     indices += [a,b,a+1,a+1,b,b+1]
@@ -250,7 +422,7 @@ final class TrackEnvironment {
             }
         }
         asphalt.isDoubleSided = true
-        mesh(points,coords,indices,asphalt,normals:normals,colors:colors,name:"WetDrivingSurface")
+        mesh(points,coords,indices,asphalt,normals:normals,colors:colors,name:"WetDrivingSurface",batch:false)
     }
     private func brakingMarks() {
         let width = 32, height = 128
@@ -303,22 +475,28 @@ final class TrackEnvironment {
     }
 
     private func raisedKerbs(red: SCNMaterial, white: SCNMaterial) {
-        let edges = [0.0,0.12,0.70,0.85]
+        let edges = [0.0,0.12/0.85,0.70/0.85,1.0]
         let count = Int(ceil(circuit.length/0.25))
         for side in [-1.0,1.0] { for stripe in 0...1 {
             var vertices:[SCNVector3]=[],uv:[CGPoint]=[],normals:[SCNVector3]=[],indices:[Int32]=[]
             for i in 0..<count {
                 let d=Double(i)*circuit.length/Double(count), next=Double(i+1)*circuit.length/Double(count)
-                guard circuit.hasKerb(at:(d+next)/2),Int(d/2.5)%2==stripe else { continue }
+                guard Int(d/2.5)%2==stripe, circuit.kerb(at:(d+next)/2,side:side).scale > 0.001 else { continue }
                 let start=Int32(vertices.count)
                 for distance in [d,next] {
                     let sample=circuit.sample(at:distance)
-                    for edge in edges {
-                        let h=kerbElevation(progress:distance,distanceFromEdge:edge)
-                        vertices.append(roadVector(sample,side*(6+edge),0.025+h))
+                    let profile=circuit.kerb(at:distance,side:side)
+                    // Differentiate the same tapered shape at a fixed lateral
+                    // distance so the ramp and bank shade like the driven surface.
+                    let before=circuit.kerb(at:distance-0.01,side:side)
+                    let after=circuit.kerb(at:distance+0.01,side:side)
+                    for fraction in edges {
+                        let edge=fraction*profile.width
+                        let h=profile.elevation(progress:distance,distanceFromEdge:edge)
+                        vertices.append(roadVector(sample,side*(6+edge),Self.pavementLift+h))
                         uv.append(CGPoint(x:edge/3,y:distance/3))
-                        let across=(kerbElevation(progress:distance,distanceFromEdge:edge+0.001)-kerbElevation(progress:distance,distanceFromEdge:edge-0.001))/0.002
-                        let along=(kerbElevation(progress:distance+0.001,distanceFromEdge:edge)-kerbElevation(progress:distance-0.001,distanceFromEdge:edge))/0.002
+                        let across=(profile.elevation(progress:distance,distanceFromEdge:edge+0.001)-profile.elevation(progress:distance,distanceFromEdge:edge-0.001))/0.002
+                        let along=(after.elevation(progress:distance+0.01,distanceFromEdge:edge)-before.elevation(progress:distance-0.01,distanceFromEdge:edge))/0.02
                         let gradient=sample.right*side*across+sample.tangent*along
                         normals.append(normal(sample,side*(6+edge),additional:gradient))
                     }
@@ -380,13 +558,168 @@ final class TrackEnvironment {
         }
     }
 
+    static func landmarkFootprint(_ form: CornerLandmark.Form) -> SIMD2<Double> {
+        switch form {
+        case .marshalPost: return SIMD2(2.4,2.1)
+        case .wall: return SIMD2(4.0,1.35)
+        case .lightRig: return SIMD2(3.15,1.5)
+        case .observationDeck: return SIMD2(3.1,2.1)
+        case .shelter: return SIMD2(3.2,2.1)
+        case .mast: return SIMD2(2.4,1.8)
+        }
+    }
+
+    private func cornerLandmarks() -> [SIMD2<Double>] {
+        let landmarks = SCNNode()
+        landmarks.name = "CornerLandmarks"
+        scene.rootNode.addChildNode(landmarks)
+        let cement = scanMaterial("concrete_wall_006",tint:0xA3A399,tile:1.4)
+        let steel = material(NSColor(rgb:0x666E70),metal:0.42,roughness:0.58)
+        let roof = material(NSColor(rgb:0xD7D7CB),metal:0.16,roughness:0.68)
+        let window = material(NSColor(rgb:0x26323A),metal:0.25,roughness:0.4)
+        var clearings: [SIMD2<Double>] = []
+        for landmark in circuit.kind.landmarks {
+            let station = circuit.sample(at:landmark.station)
+            let centre = station.point+station.right*landmark.offset
+            let approach = circuit.sample(at:landmark.corner-120)
+            let facing = simd_normalize(approach.point-centre)
+            let across = SIMD2(facing.y,-facing.x)
+            let half = Self.landmarkFootprint(landmark.form)
+            let clear = [-1.0,0,1].allSatisfy { x in
+                [-1.0,0,1].allSatisfy { z in
+                    let point = centre+across*(half.x*x)+facing*(half.y*z)
+                    return circuit.nearest(to:point).distance > 18.1
+                }
+            }
+            guard clear else { continue }
+
+            let anchor = SCNNode()
+            anchor.name = landmark.name
+            anchor.position = vector(centre,y:terrainHeight(centre))
+            anchor.eulerAngles.y = CGFloat(atan2(facing.x,facing.y))
+            let accent = material(NSColor(rgb:landmark.accent),roughness:0.65)
+            func part(_ width: CGFloat,_ height: CGFloat,_ depth: CGFloat,_ x: CGFloat,_ y: CGFloat,_ z: CGFloat,
+                      _ finish: SCNMaterial,bevel: CGFloat = 0) {
+                box(width,height,depth,SCNVector3(x,y,z),finish,parent:anchor,bevel:bevel)
+            }
+            func member(_ a: SCNVector3,_ b: SCNVector3,_ radius: CGFloat,_ finish: SCNMaterial) {
+                tube(a,b,radius,finish,parent:anchor)
+            }
+            func plate(width: CGFloat,height: CGFloat,y: CGFloat,z: CGFloat) {
+                part(width+0.13,height+0.11,0.10,0,y,z,window,bevel:0.025)
+                let plaque = SCNPlane(width:width,height:height)
+                plaque.materials = [Self.signFace(landmark.name,background:0x23303B,foreground:0xF2EEDF,aspect:width/height)]
+                let surface = SCNNode(geometry:plaque)
+                surface.castsShadow = false
+                surface.position = SCNVector3(0,y,z+0.054)
+                anchor.addChildNode(surface)
+            }
+
+            switch landmark.form {
+            case .marshalPost:
+                part(4.12,1.22,3.46,0,-0.43,0,cement,bevel:0.08)
+                part(3.72,2.65,3.18,0,1.51,0,accent,bevel:0.06)
+                part(3.48,0.76,0.035,0,2.37,1.601,window)
+                part(0.035,0.76,2.0,-1.881,2.37,0,window)
+                part(0.05,0.82,0.052,0,2.37,1.626,roof)
+                part(0.06,1.91,0.96,1.874,1.19,-0.38,window,bevel:0.02)
+                part(0.047,0.047,0.14,1.924,1.17,-0.13,roof)
+                part(4.63,0.21,3.99,0,2.91,0.07,roof,bevel:0.045)
+                part(3.77,0.34,0.16,0,3.16,1.49,accent)
+                plate(width:3.38,height:0.64,y:3.49,z:1.62)
+            case .wall:
+                part(7.75,1.13,2.44,0,-0.39,0,cement,bevel:0.09)
+                part(7.35,1.62,1.53,0,0.99,-0.12,cement,bevel:0.08)
+                part(5.40,1.06,1.38,0.21,2.23,-0.20,cement,bevel:0.08)
+                for x: CGFloat in [-2.35,0,2.35] {
+                    part(0.24,2.52,0.40,x,1.38,0.66,cement,bevel:0.04)
+                }
+                part(5.61,0.19,1.60,0.21,2.80,-0.08,accent)
+                part(3.49,0.50,0.49,0,2.99,0,accent,bevel:0.05)
+                plate(width:3.40,height:0.62,y:3.25,z:0.31)
+            case .lightRig:
+                for x: CGFloat in [-2.64,2.64] {
+                    part(0.83,1.18,2.24,x,-0.38,0,cement,bevel:0.06)
+                    member(SCNVector3(x,0,0),SCNVector3(x,6.32,0),0.124,steel)
+                    part(0.32,0.47,0.33,x,5.59,0,accent)
+                    for shift: CGFloat in [-0.17,0.17] {
+                        part(0.30,0.27,0.25,x+shift,6.23,0.15,window,bevel:0.025)
+                        part(0.25,0.23,0.03,x+shift,6.23,0.282,roof,bevel:0.02)
+                    }
+                }
+                member(SCNVector3(-2.64,5.79,0),SCNVector3(2.64,5.79,0),0.064,steel)
+                part(5.50,0.21,0.31,0,3.74,0,accent)
+                plate(width:3.75,height:0.64,y:3.74,z:0.19)
+            case .observationDeck:
+                part(5.03,1.13,3.31,0,-0.40,0,cement,bevel:0.08)
+                for x: CGFloat in [-2.04,2.04] {
+                    for z: CGFloat in [-1.21,1.21] { part(0.17,3.65,0.17,x,1.83,z,steel) }
+                    member(SCNVector3(x,0.17,-1.20),SCNVector3(x,3.51,1.20),0.048,steel)
+                    member(SCNVector3(x,3.68,-1.38),SCNVector3(x,4.50,-1.38),0.051,steel)
+                    member(SCNVector3(x,3.68,1.38),SCNVector3(x,4.50,1.38),0.051,steel)
+                    member(SCNVector3(x,4.50,-1.38),SCNVector3(x,4.50,1.38),0.050,steel)
+                }
+                part(5.21,0.27,3.19,0,3.63,0,accent)
+                member(SCNVector3(-2.04,4.50,1.38),SCNVector3(2.04,4.50,1.38),0.05,steel)
+                member(SCNVector3(-2.04,4.50,-1.38),SCNVector3(0.88,4.50,-1.38),0.05,steel)
+                for x: CGFloat in [0.91,1.52] {
+                    member(SCNVector3(x,0.11,-1.92),SCNVector3(x,4.1,-1.43),0.041,steel)
+                }
+                for level in 1...10 {
+                    let y = CGFloat(level)*0.34
+                    let z = -1.92+(y-0.11)*0.123
+                    member(SCNVector3(0.91,y,z),SCNVector3(1.52,y,z),0.028,steel)
+                }
+                part(1.26,0.10,0.95,0.82,4.48,-0.41,roof,bevel:0.04)
+                part(0.13,0.85,0.13,0.82,4.06,-0.41,steel)
+                plate(width:4.08,height:0.72,y:3.63,z:1.66)
+            case .shelter:
+                part(5.74,1.10,3.68,0,-0.43,0,cement,bevel:0.08)
+                for x: CGFloat in [-2.37,2.37] {
+                    part(0.23,3.50,0.31,x,1.76,1.25,accent)
+                    part(0.23,2.98,0.31,x,1.54,-1.25,accent)
+                    member(SCNVector3(x,2.99,-1.25),SCNVector3(x,3.50,1.25),0.071,steel)
+                }
+                let canopy = box(6.16,0.20,4.06,SCNVector3(0,3.28,0),roof,parent:anchor,bevel:0.04)
+                canopy.eulerAngles.x = -0.19
+                part(4.60,1.98,0.19,0,1.21,-1.26,accent,bevel:0.03)
+                part(2.26,0.14,0.48,0,0.66,-0.92,steel,bevel:0.04)
+                part(5.08,0.19,0.26,0,3.46,1.30,accent)
+                plate(width:4.02,height:0.67,y:3.46,z:1.46)
+            case .mast:
+                part(3.35,1.19,3.27,0,-0.41,0,cement,bevel:0.09)
+                for x: CGFloat in [-1,1] {
+                    for z: CGFloat in [-1,1] {
+                        member(SCNVector3(x*1.11,0,z*1.05),SCNVector3(x*0.27,7.65,z*0.27),0.058,steel)
+                    }
+                    member(SCNVector3(x*1.10,0,1.04),SCNVector3(x*0.81,2.71,-0.79),0.045,steel)
+                    member(SCNVector3(x*0.81,2.71,-0.79),SCNVector3(x*0.53,5.18,0.53),0.045,steel)
+                    member(SCNVector3(x*0.53,5.18,0.53),SCNVector3(x*0.27,7.65,-0.27),0.043,steel)
+                }
+                for (y,width,finish) in [(2.71,1.81,roof),(5.18,1.22,accent),(7.37,0.73,roof)] {
+                    part(width,0.17,width,0,y,0,finish)
+                }
+                member(SCNVector3(0,7.31,0),SCNVector3(0,8.56,0),0.051,steel)
+                member(SCNVector3(-1.49,8.21,0),SCNVector3(1.49,8.21,0),0.040,steel)
+                part(0.88,0.19,0.17,0.64,8.22,0,accent,bevel:0.027)
+                plate(width:3.28,height:0.65,y:3.59,z:1.18)
+                member(SCNVector3(-1.65,3.59,1.12),SCNVector3(1.65,3.59,1.12),0.052,steel)
+            }
+            // Each footprint can be culled independently around the lap.
+            landmarks.addChildNode(anchor.flattenedClone())
+            clearings.append(centre)
+        }
+        return clearings
+    }
+
     private func barriers() {
         let metal = material(NSColor(rgb:0xA2A4A1),metal:0.48,roughness:0.64)
         texture("Environment/metal_plate_diff_2k.jpg",metal.diffuse)
         texture("Environment/metal_plate_rough_2k.jpg",metal.roughness)
         metal.roughness.intensity = 0.75
         metal.multiply.contents = NSColor(rgb:0xE3E7E4)
-        let profile: [(Double,Double)] = [(0.29,0.08),(0.35,-0.08),(0.43,0.08),(0.50,-0.08),(0.58,0.08)]
+        let rib = Circuit.guardRailCorrugation
+        let profile: [(Double,Double)] = [(0.29,rib),(0.35,-rib),(0.43,rib),(0.50,-rib),(0.58,rib)]
         for side in [-1.0,1.0] {
             var v = [SCNVector3](),uv = [CGPoint](),ix = [Int32](),normals = [SCNVector3]()
             for i in 0...circuit.samples.count {
@@ -397,7 +730,7 @@ final class TrackEnvironment {
                     let slope = Float((upper.1-lower.1)/(upper.0-lower.0))
                     let normal = simd_normalize(SIMD3<Float>(-Float(s.right.x*side),slope,-Float(s.right.y*side)))
                     for (height, offset) in [lower,upper] {
-                        v.append(roadVector(s,(15.8+offset)*side,height))
+                        v.append(roadVector(s,(Circuit.guardRailOffset+offset)*side,height))
                         uv.append(CGPoint(x:s.distance/4,y:height*2))
                         normals.append(SCNVector3(normal))
                     }
@@ -445,6 +778,12 @@ final class TrackEnvironment {
     private func pitLane() {
         let lane = circuit.pitLane
         let asphalt = scanMaterial("asphalt_track",tint:0xA7ADB0)
+        if circuit.condition == .wet {
+            asphalt.multiply.contents = NSColor(rgb:0x858F97)
+            asphalt.roughness.contents = 0.36
+            asphalt.clearCoat.contents = 0.26
+            asphalt.clearCoatRoughness.contents = 0.20
+        }
         let blue = trackPaint(0x508393)
         let yellow = trackPaint(0xC8AA57)
         func ribbon(from start:Double,to end:Double,left:Double,right:Double,height:Double,
@@ -476,9 +815,30 @@ final class TrackEnvironment {
         for end in [bay-3.3,bay+3.3] {
             ribbon(from:end-0.06,to:end+0.06,left:-1.15,right:1.15,height:0.039,material:yellow,name:"PitBoxEnd")
         }
+        let arrows = [PitLane.entry+23,PitLane.entry+36,PitLane.limitEntry+7,
+                      PitLane.limitExit+13,PitLane.limitExit+30]
+        let arrowCorners: [(Double,Double)] = [(-0.15,-1.30),(0.15,-1.30),(-0.15,0.25),(0.15,0.25),
+                                             (-0.52,0.25),(0.52,0.25),(0,1.26)]
+        var arrowVertices: [SCNVector3] = [], arrowUV: [CGPoint] = [], arrowIndices: [Int32] = []
+        for distance in arrows {
+            let base = Int32(arrowVertices.count)
+            for (side,along) in arrowCorners {
+                let sample = circuit.sample(at:distance+along)
+                arrowVertices.append(roadVector(sample,lane.lateral(at:distance+along)+side,0.041))
+                arrowUV.append(CGPoint(x:side/3,y:along/3))
+            }
+            arrowIndices += [base,base+2,base+1,base+1,base+2,base+3,base+4,base+6,base+5]
+        }
+        mesh(arrowVertices,arrowUV,arrowIndices,trackPaint(0xDCDBD0),name:"PitDirectionArrows").castsShadow = false
+
         let backing = material(NSColor(rgb:0x293B42),roughness:0.82)
         let speedRim = material(NSColor(rgb:0xA73833),roughness:0.65)
         let speedFace = material(NSColor(rgb:0xECE8D9),roughness:0.7)
+        let speedInk = material(NSColor(rgb:0x222A2A))
+        for finish in [speedRim,speedFace,speedInk] { finish.lightingModel = .constant }
+        let approach = circuit.sample(at:PitLane.entry-17)
+        signPanel(approach,offset:-8.4,width:2.28,height:0.90,centre:1.41,backing:backing,post:backing,
+                  face:Self.signFace("PIT →",background:0xE8E9DF,foreground:0x253136,aspect:2.53))
         for (distance,title) in [(PitLane.entry+5,"PIT IN"),(PitLane.limitEntry,"60"),(bay,"BOX"),(PitLane.limitExit,"PIT OUT")] {
             let sample = circuit.sample(at:distance)
             let position = sample.point + sample.right * (lane.lateral(at:distance)-3.0)
@@ -496,7 +856,7 @@ final class TrackEnvironment {
                 let insert = SCNNode(geometry:centre)
                 insert.position = SCNVector3(0,1.22,0.029); insert.eulerAngles.x = .pi/2
                 face.addChildNode(insert)
-                label(title,size:0.27,at:SCNVector3(0,1.22,0.039),parent:face,color:dark)
+                label(title,size:0.27,at:SCNVector3(0,1.22,0.039),parent:face,color:speedInk)
             } else {
                 box(1.43,0.55,0.07,SCNVector3(0,1.22,0),backing,parent:face,bevel:0.03)
                 label(title,size:0.23,at:SCNVector3(0,1.22,0.046),parent:face,color:paint)
@@ -548,7 +908,7 @@ final class TrackEnvironment {
         for z in stride(from:-4.5,through:4.5,by:1.5) { box(0.12,2.1,0.06,SCNVector3(4.6,6.7,z),wall,parent:n) }
         tube(SCNVector3(0,8.2,0),SCNVector3(0,12,0),0.04,shutter,parent:n)
     }
-    private func vegetation() {
+    private func vegetation(avoiding landmarkClearings: [SIMD2<Double>]) {
         var random = SeededRandom()
         random.state &+= UInt64(circuit.kind.rawValue)*7919
         let variants = (0..<4).map { i -> SCNMaterial in
@@ -573,17 +933,20 @@ final class TrackEnvironment {
             guard !used.contains(where:{simd_distance_squared($0,p)<36}) else { continue }
             used.append(p)
             let height = 6+random.next()*9
-            let plane = SCNPlane(width:CGFloat(height),height:CGFloat(height))
-            plane.materials = [variants[index%4]]
-            let tree = SCNNode(geometry:plane); tree.name = "TreeImpostor"
-            tree.position = vector(p,y:terrainHeight(p)+height*0.47)
-            let facing = SCNBillboardConstraint(); facing.freeAxes = .Y; tree.constraints = [facing]
-            tree.castsShadow = false; root.addChildNode(tree)
+            if !landmarkClearings.contains(where:{simd_distance_squared($0,p)<121}) {
+                let plane = SCNPlane(width:CGFloat(height),height:CGFloat(height))
+                plane.materials = [variants[index%4]]
+                let tree = SCNNode(geometry:plane); tree.name = "TreeImpostor"
+                tree.position = vector(p,y:terrainHeight(p)+height*0.47)
+                let facing = SCNBillboardConstraint(); facing.freeAxes = .Y; tree.constraints = [facing]
+                tree.castsShadow = false; root.addChildNode(tree)
+            }
             if index%5==0 {
                 let bushHeight = 1.4+random.next()*1.2
+                let p2 = p+SIMD2(3,2)
+                guard !landmarkClearings.contains(where:{simd_distance_squared($0,p2)<30}) else { continue }
                 let bush = SCNNode(geometry:SCNPlane(width:CGFloat(bushHeight*1.5),height:CGFloat(bushHeight)))
                 bush.geometry!.materials = [shrubs[(index+1)%4]]
-                let p2 = p+SIMD2(3,2)
                 bush.position = vector(p2,y:terrainHeight(p2)+bushHeight*0.45)
                 let f = SCNBillboardConstraint(); f.freeAxes = .Y; bush.constraints = [f]; bush.castsShadow = false
                 root.addChildNode(bush)

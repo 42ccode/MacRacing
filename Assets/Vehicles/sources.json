@@ -1,13 +1,5 @@
 [
   {
-    "file": "Ferrari458.glb",
-    "source": "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/ferrari.glb",
-    "source_sha256": "cafe3f48da6797aa9bde75ca768bc5b57db366575fd233e90df186ae988a876e",
-    "sha256": "77d273787464292206577c650ff7b4b1281b63475173ef3d22b875881fb39530",
-    "author": "vicent091036",
-    "license": "CC-BY-4.0"
-  },
-  {
     "file": "Porsche911.glb",
     "source": "https://huggingface.co/datasets/allenai/objaverse/resolve/main/glbs/000-019/ee69c474a1cc4085944cde4cb7ae87db.glb",
     "source_sha256": "67bfbe153a25906f81ce37e10a249cde2b2863f997728851c93aba99f25730bb",
@@ -17,48 +9,12 @@
     "original": "https://sketchfab.com/3d-models/porsche-911-c4s-2020-aerokit-ee69c474a1cc4085944cde4cb7ae87db"
   },
   {
-    "file": "BMWM3E30.glb",
-    "source": "https://huggingface.co/datasets/allenai/objaverse/resolve/main/glbs/000-134/6d67d12a2abe4e119842f65e46fa2f67.glb",
-    "source_sha256": "4dccd89b3a0f601ee63f1a38fcc161c482d0f71a7566ec901f166eec3745e56f",
-    "sha256": "52a07ab1f2d649cba6fd0c676257b609f99e71c037588568bdcbe015f3076e89",
-    "author": "Artem P",
-    "original": "https://sketchfab.com/3d-models/bmw-m3-e30-6d67d12a2abe4e119842f65e46fa2f67",
-    "license": "CC-BY-4.0"
-  },
-  {
-    "file": "MazdaMX5.glb",
-    "source": "https://huggingface.co/datasets/allenai/objaverse/resolve/main/glbs/000-108/d51fcd44b74f4daf8012c41e0400c041.glb",
-    "source_sha256": "56e6c972b7236fff190d8bee36d32bbe3f3f17a89a00be7b9b6ce5681e569cf6",
-    "sha256": "5cb7e3f814f79d43c01b0a6831c6ec37d2b766b5bdbac4141cb960bc1c7d4502",
-    "author": "Lexyc16",
-    "original": "https://sketchfab.com/3d-models/mazda-miata-mx-5-na-d51fcd44b74f4daf8012c41e0400c041",
-    "license": "CC-BY-4.0"
-  },
-  {
     "file": "Centenario.glb",
     "source": "https://huggingface.co/datasets/allenai/objaverse/resolve/main/glbs/000-131/d679af35b5694301a185c7454a700c73.glb",
     "source_sha256": "f9ea8fe321511d1a92f1b777d00bf9c22a64e5efdccbdab40546a964dec9d793",
     "sha256": "14de38326f323c40bb25cc3d95e062d08a7e88516e71bfbe7f038fe85e46ff83",
     "author": "SDC PERFORMANCE",
     "original": "https://sketchfab.com/3d-models/lamborghini-centenario-lp-770-interior-sdc-d679af35b5694301a185c7454a700c73",
-    "license": "CC-BY-4.0"
-  },
-  {
-    "file": "LotusElise.glb",
-    "source": "https://huggingface.co/datasets/allenai/objaverse/resolve/main/glbs/000-056/75e9045ac1af4cdbb69318108c81edfd.glb",
-    "source_sha256": "b08d16684febd7cb541ffb870df304b985cc7e9337e8d010cc3d4d665f3ff19a",
-    "sha256": "ef75e4cad787093328906059db7cc97f5107f57691794b3ab279ffb2120d2554",
-    "author": "Stéphane Agullo",
-    "original": "https://sketchfab.com/3d-models/lotus-elise-75e9045ac1af4cdbb69318108c81edfd",
-    "license": "CC-BY-4.0"
-  },
-  {
-    "file": "HondaE.glb",
-    "source": "https://huggingface.co/datasets/allenai/objaverse/resolve/main/glbs/000-149/814cf3f8cfd64594b1c4f96e873c3cef.glb",
-    "source_sha256": "d61490caac2b8a89997ab0cf25656c310783b35243d1af34cd79c47ca3c770f9",
-    "sha256": "dd6258688deae84703d2b4c8ef11760b25bb89d7a3db828bd9c1fccdf4e7b737",
-    "author": "Alex Murias",
-    "original": "https://sketchfab.com/3d-models/free-honda-e-detailed-interior-2021-814cf3f8cfd64594b1c4f96e873c3cef",
     "license": "CC-BY-4.0"
   }
 ]

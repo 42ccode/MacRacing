@@ -57,13 +57,34 @@ final class HUDView: NSView {
     private var pressedMenuFocus = false
     private var analysisCursorIndex: Int?
     var analysisMarker: Int? { analysisCursorIndex }
+    private var analysisZoomStart: Int?
+    private let analysisZoomWidth = LapInputs.intervals / 10
+    var analysisVisibleIndices: ClosedRange<Int> {
+        guard let start = analysisZoomStart else { return 0...LapInputs.intervals }
+        return start...(start+analysisZoomWidth)
+    }
+
+    func toggleAnalysisZoom() {
+        if analysisZoomStart != nil { analysisZoomStart = nil }
+        else {
+            let marker = analysisCursorIndex ?? LapInputs.intervals/2
+            analysisCursorIndex = marker
+            analysisZoomStart = clamp(marker-analysisZoomWidth/2,0,LapInputs.intervals-analysisZoomWidth)
+        }
+        needsDisplay = true
+    }
     private var analysisHitArea = CGRect.zero
     private var analysisTraceOrigin: CGFloat = 0
     private var analysisTraceWidth: CGFloat = 1
+    private var replayScrubArea = NSRect.zero
+    private var draggingReplay = false
+    private var vehiclePreviews: [VehicleKind:NSImage] = [:]
+    private var circuitPreviews: [CircuitKind:GarageCircuitPreview] = [:]
     private var menuMouseTracking: NSTrackingArea?
     private var mapGeometry: (circuit: Circuit, path: NSBezierPath, lane: NSBezierPath, project: (SIMD2<Double>) -> CGPoint)?
     private var panelFrames: [(HUDPanel, CGRect)] = []
     private var drag: (panel: HUDPanel, offset: CGPoint, size: CGSize)?
+    private var showcasePress: (point: CGPoint, moved: Bool)?
 
     func layoutModeChanged() {
         drag = nil
@@ -74,6 +95,8 @@ final class HUDView: NSView {
 
     private var menuIdentity: String? {
         guard let game, game.isNavigatingMenu else { return nil }
+        if game.replay != nil { return "replay" }
+        if game.showcase != nil { return "showcase" }
         if game.editingHUD { return "hudEditor" }
         if game.showingControllerReview { return "calibration" }
         if game.showingAnalysis { return "analysis" }
@@ -84,6 +107,17 @@ final class HUDView: NSView {
         if game.showingSeatPreview { return "seatPreview" }
         if let choice = game.settingsChoice { return "choice:"+choice.rawValue }
         if let page = game.settingsPage { return "settings:"+page.rawValue }
+        if game.reviewedRaceLaps != nil { return "raceLaps" }
+        if game.showingRaceHistory { return "raceHistory" }
+        if game.showingRaceSetup { return "raceSetup" }
+        if game.showingCupMenu { return "cups" }
+        if game.raceResultReady { return "raceResults" }
+        if game.showingSchool { return "school" }
+        if let lesson = game.lesson { return lesson.result == nil ? "lessonPause" : "lessonResult" }
+        if let qualifying = game.qualifying {
+            return qualifying.result == nil ? "qualifyingPause" :
+                (game.qualifyingGrid == nil ? "qualifyingWaiting" : "qualifyingResult")
+        }
         if !game.hasStarted { return "welcome" }
         return game.sprint == nil ? "pause" : "sprint"
     }
@@ -99,8 +133,13 @@ final class HUDView: NSView {
     func moveMenuFocus(_ direction: String) {
         guard let current = menuIdentity, current == renderedMenu, !actions.isEmpty else { return }
         if current == "analysis", analysisTraceWidth > 1, ["menuLeft","menuRight"].contains(direction) {
-            let delta = direction == "menuLeft" ? -2 : 2
-            analysisCursorIndex = clamp((analysisCursorIndex ?? 100)+delta,0,LapInputs.intervals)
+            let step = analysisZoomStart == nil ? LapInputs.intervals/100 : 1
+            let delta = direction == "menuLeft" ? -step : step
+            let marker = clamp((analysisCursorIndex ?? LapInputs.intervals/2)+delta,0,LapInputs.intervals)
+            analysisCursorIndex = marker
+            if analysisZoomStart != nil && !analysisVisibleIndices.contains(marker) {
+                analysisZoomStart = clamp(marker-analysisZoomWidth/2,0,LapInputs.intervals-analysisZoomWidth)
+            }
             needsDisplay = true
             return
         }
@@ -182,13 +221,19 @@ final class HUDView: NSView {
     override var isOpaque: Bool { false }
 
     override func keyDown(with event: NSEvent) { game?.input.keyDown(event,navigateMenu:game?.isNavigatingMenu == true) }
-    override func keyUp(with event: NSEvent) { game?.input.keys.remove(event.keyCode) }
+    override func keyUp(with event: NSEvent) { game?.input.setKey(event.keyCode,pressed:false,at:event.timestamp) }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
-        if let hit = actions.reversed().first(where: { $0.0.contains(point) }) {
+        showcasePress = nil
+        if game?.replay != nil && replayScrubArea.contains(point) {
+            draggingReplay = true
+            seekReplay(at:point)
+        } else if let hit = actions.reversed().first(where: { $0.0.contains(point) }) {
             activate(hit.1)
+        } else if game?.showcase != nil, point.y > 106, point.y < bounds.height-157 {
+            showcasePress = (point,false)
         } else if game?.editingHUD == true, let (panel, frame) = panelFrames.reversed().first(where: { $0.1.contains(point) }) {
             drag = (panel, CGPoint(x: point.x-frame.minX, y: point.y-frame.minY), frame.size)
             needsDisplay = true
@@ -212,7 +257,8 @@ final class HUDView: NSView {
         guard game?.showingAnalysis == true else { return }
         guard analysisHitArea.contains(point) else { return }
         let fraction = clamp((point.x-analysisTraceOrigin)/analysisTraceWidth,0,1)
-        let index = Int((fraction*CGFloat(LapInputs.intervals)).rounded())
+        let visible = analysisVisibleIndices
+        let index = visible.lowerBound + Int((fraction*CGFloat(visible.upperBound-visible.lowerBound)).rounded())
         if analysisCursorIndex != index { analysisCursorIndex = index; needsDisplay = true }
     }
 
@@ -222,6 +268,18 @@ final class HUDView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if draggingReplay {
+            seekReplay(at:convert(event.locationInWindow,from:nil))
+            return
+        }
+        if let game, let showcase = game.showcase, let press = showcasePress {
+            let point = convert(event.locationInWindow, from:nil)
+            guard press.moved || hypot(point.x-press.point.x,point.y-press.point.y) > 4 else { return }
+            showcasePress?.moved = true
+            showcase.orbit(dx:Double(event.deltaX),dy:Double(event.deltaY))
+            game.sceneView.requestFrame()
+            return
+        }
         guard let game, game.editingHUD, let drag else { return }
         let point = convert(event.locationInWindow, from: nil)
         let origin = CGPoint(x: point.x-drag.offset.x, y: point.y-drag.offset.y)
@@ -229,7 +287,24 @@ final class HUDView: NSView {
         needsDisplay = true
     }
 
+    override func scrollWheel(with event: NSEvent) {
+        if let game, let showcase = game.showcase {
+            showcase.zoom(Double(event.scrollingDeltaY))
+            game.sceneView.requestFrame()
+            return
+        }
+        super.scrollWheel(with:event)
+    }
+
     override func mouseUp(with event: NSEvent) {
+        if draggingReplay { draggingReplay = false; return }
+        if let press = showcasePress {
+            showcasePress = nil
+            let point = convert(event.locationInWindow,from:nil)
+            if !press.moved && hypot(point.x-press.point.x,point.y-press.point.y) <= 4 {
+                game?.pickShowcasePanel(at:event.locationInWindow)
+            }
+        }
         if drag != nil { drag = nil; needsDisplay = true }
     }
 
@@ -244,6 +319,8 @@ final class HUDView: NSView {
             if item == .delta && game.serviceRemaining > 0 && !game.editingHUD { continue }
             if item == .mirror && !game.showMirror && !game.editingHUD { continue }
             if item == .delta && game.sprint != nil && !game.editingHUD { continue }
+            if [.timing,.delta].contains(item) && (game.lesson != nil || game.qualifying != nil) &&
+                !game.editingHUD { continue }
             var frame = item.defaultFrame(in: bounds.size)
             if item == .map && game.compactHUD { frame.origin.y = 18 }
             if item == .map && !game.compactHUD && bounds.height < 690 {
@@ -278,7 +355,7 @@ final class HUDView: NSView {
             case .suspension: drawSuspension(game,x:x,y:y)
             case .acceleration: drawGForce(game,x:x,y:y)
             case .timing:
-                if let race = game.sprint { drawSprint(race, x:x, y:y) }
+                if let race = game.sprint { drawSprint(race,opponents:game.traffic.cars,x:x,y:y) }
                 else { drawCompactTiming(game,x:x,y:y) }
             case .delta:
                 if frame.width < 340 {
@@ -416,15 +493,20 @@ final class HUDView: NSView {
         panel(rect, color: primary ? lime : NSColor(rgb: active ? 0x38452F : 0x272E39, alpha: 0.98), radius: 7)
         text(label, x: rect.minX + 12, y: rect.minY + (rect.height - 19) / 2, size: 12,
              color: primary ? NSColor(rgb: 0x162012) : (active ? lime : white), weight: .semibold, width: rect.width - 24, align: .center)
+        registerAction(action,rect:rect,label:accessibility ?? label)
+    }
+
+    private func registerAction(_ action: String,rect: CGRect,label: String) {
         let a = interactionTransform.transform(rect.origin)
         let b = interactionTransform.transform(CGPoint(x:rect.maxX,y:rect.maxY))
         actions.append((NSRect(x:a.x,y:a.y,width:b.x-a.x,height:b.y-a.y),action))
-        buttonLabels[action] = accessibility ?? label
+        buttonLabels[action] = label
     }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let game else { return }
         actions = []
+        replayScrubArea = .zero
         panelFrames.removeAll(keepingCapacity:true)
         defer { synchronizeAccessibleButtons() }
         let w = bounds.width
@@ -435,17 +517,34 @@ final class HUDView: NSView {
             hoveredAction = nil
             pointerLocation = nil
             analysisCursorIndex = nil
+            analysisZoomStart = nil
             analysisTraceWidth = 1
             analysisHitArea = .zero
             switch identity {
             case "welcome": menuFocus = "start"
             case "pause","sprint": menuFocus = "resume"
+            case "raceSetup": menuFocus = "startSprint"
+            case "raceResults": menuFocus = game.cupRoundRecorded ? "cupContinue" : "raceAgain"
+            case "raceLaps": menuFocus = "closeRaceLaps"
+            case "raceHistory": menuFocus = "closeRaceHistory"
+            case "cups":
+                menuFocus = game.cupProgress(game.selectedCup).records.count < game.selectedCup.rounds.count
+                    ? "startCupRound" : "startNewCup"
+            case "school": menuFocus = "startLesson"
+            case "lessonPause": menuFocus = "resume"
+            case "qualifyingPause": menuFocus = "resume"
+            case "qualifyingWaiting": menuFocus = "qualifyingRetry"
+            case "qualifyingResult": menuFocus = "launchQualifiedRace"
+            case "replay": menuFocus = "replayPlay"
+            case "lessonResult":
+                if case .some(.passed) = game.lesson?.result { menuFocus = "lessonNext" }
+                else { menuFocus = "lessonRetry" }
             case "help": menuFocus = "help"
             case "analysis": menuFocus = "analysis"
             case "calibration": menuFocus = "controllerReview"
             case "garage:vehicles": menuFocus = "car:"+String(game.vehicle.kind.rawValue)
             case "garage:circuits": menuFocus = "circuit:"+String(game.circuit.kind.rawValue)
-            case "prompt:restart","prompt:leave","prompt:pit": menuFocus = "cancelPrompt"
+            case "prompt:restart","prompt:leave","prompt:pit","prompt:retire": menuFocus = "cancelPrompt"
             case "resetSettings": menuFocus = "cancelSettingsReset"
             case "seatPreview": menuFocus = "seatPreview"
             case "hudEditor": menuFocus = "hudLayout"
@@ -468,6 +567,14 @@ final class HUDView: NSView {
                     lime.setStroke(); path.lineWidth = 2; path.stroke()
                 }
             } else { menuFocus = nil }
+        }
+        if let showcase = game.showcase {
+            drawShowcase(showcase,error:game.showcaseError,hasController:game.input.controller != nil,width:w,height:h)
+            return
+        }
+        if let replay = game.replay {
+            drawReplay(game,replay:replay,width:w,height:h)
+            return
         }
         if game.showingControllerReview {
             drawControllerReview(game,width:w,height:h)
@@ -507,6 +614,38 @@ final class HUDView: NSView {
             drawGarage(game,selection:selection,width:w,height:h)
             return
         }
+        if let record = game.reviewedRaceLaps {
+            drawRaceLaps(record,width:w,height:h)
+            return
+        }
+        if game.showingRaceHistory {
+            drawRaceHistory(game,width:w,height:h)
+            return
+        }
+        if game.showingRaceSetup {
+            drawRaceSetup(game,width:w,height:h)
+            return
+        }
+        if game.showingCupMenu {
+            drawCups(game,width:w,height:h)
+            return
+        }
+        if let race = game.sprint, game.raceResultReady {
+            drawRaceResults(game,race:race,width:w,height:h)
+            return
+        }
+        if game.showingSchool {
+            drawSchool(game,width:w,height:h)
+            return
+        }
+        if let lesson = game.lesson, game.isPaused && !game.editingHUD {
+            drawLessonMenu(game,lesson:lesson,width:w,height:h)
+            return
+        }
+        if let qualifying = game.qualifying, game.isPaused && !game.editingHUD {
+            drawQualifyingMenu(game,qualifying:qualifying,width:w,height:h)
+            return
+        }
         if !game.hasStarted { drawHeader(game, width: w) }
         if game.hasStarted {
             if game.isPaused && !game.editingHUD { drawPause(game,width:w,height:h); return }
@@ -518,7 +657,8 @@ final class HUDView: NSView {
                 drawLayoutToolbar()
                 return
             }
-            if game.noticeRemaining > 0, game.serviceRemaining == 0,
+            if game.noticeRemaining > 0, game.serviceRemaining == 0, game.lesson == nil, game.qualifying == nil,
+               game.raceCaution == nil, game.raceBlueFlag == nil, !game.isWrongWay,
                (game.sprint?.countdown ?? 0) == 0, game.sprint?.showGo != true {
                 let font = NSFont.systemFont(ofSize:11,weight:.semibold)
                 let rect = statusCard(width:clamp(ceil((game.notice as NSString).size(withAttributes:[.font:font]).width)+36,118,440),
@@ -526,16 +666,18 @@ final class HUDView: NSView {
                 panel(rect,radius:6)
                 text(game.notice,x:rect.minX+12,y:rect.minY+5,size:11,color:lime,weight:.semibold,width:rect.width-24,align:.center)
             }
-            if game.sprint == nil && !game.session.validLap && !game.isPaused {
+            if game.sprint == nil && game.lesson == nil && game.qualifying == nil && !game.session.validLap && !game.isPaused {
                 text(game.session.status, x: (w - 440) / 2, y: h - 266, size: 13,
                      color: NSColor(rgb: 0xFFD19A), weight: .semibold, width: 440, align: .center)
             }
             if game.serviceRemaining > 0 {
                 let rect = statusCard(width:400,height:62,game:game,at:76)
                 panel(rect)
-                text(String(format: "维修与换胎 · 剩余 %.1f 秒", game.serviceRemaining),
+                let work = game.activeRaceService?.work ?? .both
+                text(work.title+String(format:" · 剩余 %.1f 秒",game.serviceRemaining),
                      x:rect.minX+10,y:rect.minY+9,size:17,weight:.semibold,width:rect.width-20,align:.center)
-                text("维修位停车中 · 暂停时计时冻结",x:rect.minX+10,y:rect.minY+37,
+                let serviceStatus = game.sprint == nil ? "维修位停车中 · 暂停时计时冻结" : "比赛继续计时 · 对手继续行驶"
+                text(serviceStatus,x:rect.minX+10,y:rect.minY+37,
                      size:11,color:muted,width:rect.width-20,align:.center)
             }
             if let race = game.sprint, !game.isPaused {
@@ -548,10 +690,26 @@ final class HUDView: NSView {
                          color:NSColor(rgb:waiting ? 0xF26759 : 0x86D786),weight:.bold,mono:true,width:164,align:.center)
                 }
                 if race.playerFinished || race.entries.first?.runningOffTrack == true {
-                    let warning = race.playerFinished ? "已过终点 · Esc 查看结果" : "四轮出界 · 持续 1.5 秒加罚 2 秒"
+                    let finish = race.finished ? "已过终点 · 车辆正减速" : "已过终点 · 等待其他车手"
+                    let warning = race.playerFinished ? finish : "四轮出界 · 持续 1.5 秒加罚 2 秒"
                     text(warning,x:(w-380)/2,y:h-221,size:13,color:NSColor(rgb:0xFFD19A),weight:.semibold,width:380,align:.center)
                 }
+                if game.isWrongWay {
+                    let card = statusCard(width:294,height:32,game:game,at:game.showHUD ? (game.showMirror ? 216 : 111) : 18)
+                    panel(card,color:NSColor(rgb:0x5A2925,alpha:0.96),radius:6)
+                    text("逆向行驶 · 安全调头",x:card.minX+12,y:card.minY+7,size:13,color:NSColor(rgb:0xFFD0B7),
+                         weight:.bold,width:card.width-24,align:.center)
+                } else if let caution = game.raceCaution {
+                    drawRaceCaution(caution,game:game)
+                } else if let blue = game.raceBlueFlag {
+                    let card = statusCard(width:344,height:31,game:game,at:game.showHUD ? (game.showMirror ? 216 : 111) : 18)
+                    panel(card,color:NSColor(rgb:0x20476A,alpha:0.96),radius:6)
+                    text("蓝旗   后方套圈车 · 约 \(Int(blue.distance.rounded())) 米",x:card.minX+12,y:card.minY+7,
+                         size:12,color:NSColor(rgb:0xD6F0FF),weight:.semibold,width:card.width-24,align:.center)
+                }
             }
+            if let lesson = game.lesson { drawLessonCoach(game,lesson:lesson) }
+            if let qualifying = game.qualifying { drawQualifyingCoach(game,qualifying:qualifying) }
         } else {
             drawWelcome(game, width: w, height: h)
         }
@@ -590,19 +748,67 @@ final class HUDView: NSView {
         }
     }
 
-    private func drawSprint(_ race: SprintRace, x: CGFloat, y: CGFloat) {
+    private func drawSprint(_ race: SprintRace,opponents: [TrafficCar],x: CGFloat,y: CGFloat) {
         panel(NSRect(x:x,y:y,width:196,height:105))
         let driver = race.entries[0]
-        let status = driver.finishTime != nil ? "已完赛" : "第 \(min(driver.laps+1,race.lapCount)) / \(race.lapCount) 圈"
-        text("短赛   P\(race.driverPosition) / \(race.entries.count)   \(status)",x:x+12,y:y+6,size:11,color:lime,weight:.semibold,width:172)
+        let status: String
+        switch RaceFlags.phase(for:0,in:race) {
+        case .finished: status = "已完赛"
+        case .finalLap: status = "最后一圈"
+        default: status = "第 \(min(driver.laps+1,race.lapCount)) / \(race.lapCount) 圈"
+        }
+        text("比赛   P\(race.driverPosition) / \(race.entries.count)   \(status)",x:x+12,y:y+6,size:11,color:lime,weight:.semibold,width:172)
         for (place,index) in race.order.enumerated() {
             let entry = race.entries[index]
-            let name = index == 0 ? "你" : "电脑 \(index)"
-            let time = entry.classifiedTime.map { lapTime($0) } ?? (entry.penalties > 0 ? "+\(entry.penalties*2)s" : "—")
+            let name = driverLabel(index)
+            let pitStatus = index > 0 && opponents.indices.contains(index-1) ? opponents[index-1].pitStatus : nil
+            let pitLabel: String?
+            switch pitStatus {
+            case .entering: pitLabel = "进站"
+            case let .servicing(remaining): pitLabel = "服务 \(Int(ceil(remaining))) 秒"
+            case .leaving: pitLabel = "出站"
+            case nil: pitLabel = nil
+            }
+            let time = entry.classifiedTime.map { lapTime($0) } ?? pitLabel ??
+                (entry.penalties > 0 ? "+\(entry.penalties*2)s" : "—")
             let row = y + 25 + CGFloat(place) * 16
-            text("\(place+1)   \(name)",x:x+12,y:row,size:10,color:index == 0 ? white : muted,mono:true,width:92)
-            text(time,x:x+104,y:row,size:10,color:muted,mono:true,width:80,align:.right)
+            driverMark(index,x:x+12,y:row+5)
+            text("\(place+1)   \(name)",x:x+24,y:row,size:10,color:index == 0 ? white : muted,mono:true,width:80)
+            text(time,x:x+104,y:row,size:10,color:pitLabel == nil ? muted : lime,mono:true,width:80,align:.right)
         }
+        if let gap = race.driverGapAhead {
+            let label: String
+            switch gap {
+            case let .distance(metres): label = String(format:"前车距离  %.0f m",metres)
+            case let .timed(seconds): label = String(format:"计时点距前车  +%.1f s",seconds)
+            case let .laps(laps): label = "落后前车 \(laps) 圈"
+            }
+            text(label,x:x+12,y:y+90,size:9,color:muted,mono:true,width:172,align:.right)
+        }
+    }
+
+    private func driverLabel(_ index: Int) -> String {
+        let names = ["你","林岳","许澄","周远"]
+        return names.indices.contains(index) ? names[index] : "电脑 \(index)"
+    }
+
+    private func driverMark(_ index: Int,x: CGFloat,y: CGFloat) {
+        let palette = RacingWorld.rivalPaintColors
+        let color = index > 0 && palette.indices.contains(index-1) ? NSColor(rgb:palette[index-1]) : lime
+        panel(NSRect(x:x,y:y,width:6,height:6),color:color,radius:2)
+    }
+
+    private func drawRaceCaution(_ caution: RaceFlags.Caution,game: RacingGame) {
+        let name: String
+        switch caution.reason {
+        case .stopped: name = "前方有停驶车辆"
+        case .slow: name = "前方有慢车"
+        case .oncoming: name = "前方有逆行车辆"
+        }
+        let frame = statusCard(width:344,height:31,game:game,at:game.showHUD ? (game.showMirror ? 216 : 111) : 18)
+        panel(frame,color:NSColor(rgb:0x55451D,alpha:0.96),radius:6)
+        text("黄旗   \(name) · 约 \(Int(caution.distance.rounded())) 米",x:frame.minX+12,y:frame.minY+7,
+             size:12,color:NSColor(rgb:0xFFE5A0),weight:.semibold,width:frame.width-24,align:.center)
     }
 
     private func drawVehicleInfo(_ game: RacingGame, x: CGFloat, y: CGFloat) {
@@ -610,7 +816,8 @@ final class HUDView: NSView {
         panel(NSRect(x:x,y:y,width:238,height:292),color:NSColor(white:0.035,alpha:0.86),radius:5)
         text(car.kind.label,x:x+12,y:y+10,size:14,weight:.semibold,width:214)
         let drive = car.kind.frontDriveShare > 0 ? "四驱" : "后驱"
-        text(String(format:"实验预设 · %.0f kg · %@ / 6 挡",car.mass,drive),x:x+12,y:y+34,size:10,color:muted,width:214)
+        let gearing = "\(car.gearRatios.count) 挡"
+        text(String(format:"实验预设 · %.0f kg · %@ / %@",car.mass,drive,gearing),x:x+12,y:y+34,size:10,color:muted,width:214)
         button("ABS \(game.assists.absLevel)/5",NSRect(x:x+12,y:y+57,width:100,height:28),action:"abs",active:car.absActive)
         button("TCS \(game.assists.tcLevel)/5",NSRect(x:x+124,y:y+57,width:100,height:28),action:"tc",active:car.tcActive)
         text("点击循环调节 · 0 关闭 / 5 强介入",x:x+12,y:y+91,size:9,color:muted,width:214)
@@ -621,7 +828,8 @@ final class HUDView: NSView {
         text(String(format:"水温 %.0f°C   可用动力 %.0f%%",car.coolantTemperature,car.powerFactor*100),x:x+12,y:y+142,size:11,width:214)
         text(String(format:"车头损伤 %.0f%%   车尾 %.0f%%",car.damage.front*100,car.damage.rear*100),x:x+12,y:y+164,size:10,color:muted,width:214)
         text(String(format:"引擎损伤 %.0f%%   悬架 %.0f%%",car.damage.engine*100,(car.damage.suspension.max() ?? 0)*100),x:x+12,y:y+184,size:10,color:muted,width:214)
-        text(String(format:"刹车 %.0f°C   制动力 %.0f%%",car.wheels.map(\.brakeTemperature).max() ?? 40,(car.wheels.map(\.brakeFadeFactor).min() ?? 1)*100),x:x+12,y:y+205,size:10,color:muted,width:214)
+        text(String(format:"刹车盘面 %.0f°C   制动力 %.0f%%",car.wheels.map(\.brakeSurfaceTemperature).max() ?? 40,
+                    car.brakeCapacityShare*100),x:x+12,y:y+205,size:10,color:car.brakeCapacityShare < 0.96 ? active : muted,width:214)
         let drivingCue = car.wakeStrength > 0.15 ?
             String(format:"尾流 %.0f%%   前轴下压力 %.0f N",car.wakeStrength*100,car.aeroLoad.x) :
             String(format:"滑移 %.0f%%   复位后 %.2f km",car.tyreSlip*100,car.distanceTravelled/1000)
@@ -854,9 +1062,9 @@ final class HUDView: NSView {
             let box = game.circuit.pitLane.inServiceBox(game.location)
             panel(NSRect(x:x,y:y-34,width:414,height:27),color:NSColor(rgb:0x162C33,alpha:0.94),radius:3)
             let status: String
-            if game.serviceRemaining > 0 { status = "维修进行中" }
+            if game.serviceRemaining > 0 { status = (game.activeRaceService?.work.title ?? "维修")+"进行中" }
             else if game.pitOverspeed { status = "维修道超速 · 请减速" }
-            else if box && game.sprint == nil { status = "黄框内停车后按 P 维修" }
+            else if box && game.canPitService { status = "在黄框内停稳后按 P 开始服务" }
             else if game.inPitSpeedZone { status = "维修道 · 限速 60 km/h" }
             else { status = game.pitApproachLabel ?? "驶出限速区 · 注意并线" }
             text(status,x:x+10,y:y-28,size:10,color:game.pitOverspeed ? NSColor(rgb:0xFF8669) : white,width:233)
@@ -936,7 +1144,7 @@ final class HUDView: NSView {
         }
 
         // The wheel follows the same steering rack angle as the car animation.
-        let angle=CGFloat(clamp(-game.vehicle.steeringAngle*9,-2.45,2.45))
+        let angle = CGFloat(-game.vehicle.handwheelAngle)
         let centre=CGPoint(x:x+371,y:y+41), radius:CGFloat=28
         func rotated(_ dx:CGFloat,_ dy:CGFloat) -> CGPoint {
             CGPoint(x:centre.x+dx*cos(angle)-dy*sin(angle),y:centre.y+dx*sin(angle)+dy*cos(angle))
@@ -973,54 +1181,725 @@ final class HUDView: NSView {
     }
 
     private func drawWelcome(_ game: RacingGame, width: CGFloat, height: CGFloat) {
-        let x: CGFloat = 28, w: CGFloat = 446, y = max(96,(height-461)/2+30)
-        panel(NSRect(x:x,y:y,width:w,height:461),color:NSColor(rgb:0x141B28,alpha:0.96),radius:14)
-        screenHeader("开始驾驶",subtitle:"选择车辆与赛道，再决定练习或参加两圈短赛。",x:x,y:y,width:w)
+        let left: CGFloat = 28, paneWidth: CGFloat = 510, paneHeight: CGFloat = 474
+        let top = max(98,(height-paneHeight)/2+23)
+        let setup = game.vehicle.kind
+        panel(NSRect(x:left,y:top,width:paneWidth,height:paneHeight),color:NSColor(rgb:0x141B28,alpha:0.96),radius:14)
+        screenHeader("开始驾驶",subtitle:"选好车辆和赛道，再进入练习或一场自定义赛。",x:left,y:top,width:paneWidth)
 
-        func choice(_ title: String, value: String, at offset: CGFloat, action: String) {
-            text(title,x:x+28,y:y+offset+10,size:12,color:muted,width:80)
-            button(value+"   ›",NSRect(x:x+113,y:y+offset,width:305,height:36),action:action,accessibility:"选择"+title+"，当前 "+value)
+        let image = CGRect(x:left+28,y:top+113,width:180,height:112.5)
+        drawVehiclePreview(setup,in:image)
+        text(setup.label,x:left+226,y:top+119,size:19,weight:.bold,width:254)
+        text(setup.frontDriveShare > 0 ? "四轮驱动" : "后轮驱动",x:left+226,y:top+149,size:11,color:muted,width:254)
+        button("换车  ›",NSRect(x:left+226,y:top+178,width:254,height:37),action:"selectVehicle",
+               accessibility:"选择车辆，当前 "+setup.label)
+
+        let road = game.circuit.kind.label
+        text(String(format:"%@ · %.2f km",road,game.circuit.length/1000),x:left+30,y:top+245,size:12,color:muted,width:452)
+        button("赛道  ›",NSRect(x:left+28,y:top+270,width:128,height:37),action:"selectCircuit",
+               accessibility:"选择赛道，当前 "+road)
+        button(game.circuit.condition.label,NSRect(x:left+168,y:top+270,width:138,height:37),action:"trackCondition",
+               accessibility:"更改路况，当前 "+game.circuit.condition.label)
+        button("练习车流 · \(game.opponentCount) 辆",NSRect(x:left+318,y:top+270,width:162,height:37),action:"opponents")
+        button("进入练习  ↵",NSRect(x:left+28,y:top+329,width:253,height:50),action:"start",primary:true)
+        button("比赛设置  ›",NSRect(x:left+293,y:top+329,width:187,height:50),action:"raceSetup")
+        button("练习分析",NSRect(x:left+28,y:top+397,width:144,height:39),action:"analysis")
+        button("车辆展示",NSRect(x:left+181,y:top+397,width:146,height:39),action:"openShowcase")
+        button("驾驶记录",NSRect(x:left+337,y:top+397,width:143,height:39),action:"raceHistory")
+        if let notice = game.showcaseError ?? game.practiceReadNotice {
+            text(notice,x:left+28,y:top+446,size:10,color:muted,width:451)
         }
-        choice("车辆",value:game.vehicle.kind.label,at:113,action:"selectVehicle")
-        choice("赛道",value:game.circuit.kind.label,at:158,action:"selectCircuit")
-        button("路况 · "+game.circuit.condition.label,NSRect(x:x+28,y:y+210,width:187,height:38),action:"trackCondition")
-        button("电脑对手 · \(game.opponentCount)",NSRect(x:x+231,y:y+210,width:187,height:38),action:"opponents")
-        text(game.circuit.kind.detail,x:x+29,y:y+261,size:11,color:muted,width:388)
-        text(game.input.controller == nil ? "WASD 驾驶  ·  Esc 暂停" : "RT 油门  ·  LT 制动  ·  Menu 暂停",
-             x:x+29,y:y+291,size:12,color:muted,width:388)
-        button("进入练习  ↵",NSRect(x:x+28,y:y+329,width:222,height:49),action:"start",primary:true)
-        button("两圈短赛",NSRect(x:x+262,y:y+329,width:156,height:49),action:"startSprint")
-        button("练习分析",NSRect(x:x+28,y:y+395,width:132,height:37),action:"analysis")
-        text("方向键 / 十字键选择 · A / 回车确认",x:x+174,y:y+405,size:10,color:muted,width:244,align:.right)
-        drawTrackMap(game,x:width-266,y:112)
+
+        let right = width-328
+        panel(NSRect(x:right,y:top,width:300,height:paneHeight),color:NSColor(rgb:0x141B28,alpha:0.94),radius:14)
+        screenHeader("驾驶生涯",subtitle:"先练一项技巧，再用它完成比赛。",x:right,y:top,width:300)
+        let schoolCount = game.lessonRecords.count
+        let cupsComplete = CupSeries.allCases.filter { game.cupProgress($0).bestPoints != nil }.count
+        let routes: [(name:String, detail:String, status:String, button:String, action:String)] = [
+            ("驾驶学院","起步停车 · 松刹入弯 · 湿地出弯",
+             "\(schoolCount) / \(DrivingLessonKind.allCases.count) 课通过",schoolCount == 0 ? "开始训练" : "查看课程","school"),
+            ("巡回赛","俱乐部杯 · 雨地杯 · 速度杯",
+             "\(cupsComplete) / \(CupSeries.allCases.count) 杯完成","选择赛事","cups")]
+        for (index,route) in routes.enumerated() {
+            let y = top+112+CGFloat(index)*163
+            panel(NSRect(x:right+18,y:y,width:264,height:147),color:NSColor(rgb:0x1A2736),radius:8)
+            text(route.name,x:right+33,y:y+14,size:15,weight:.semibold,width:234)
+            text(route.detail,x:right+33,y:y+43,size:10,color:muted,width:234)
+            text(route.status,x:right+33,y:y+67,size:11,color:lime,mono:true,width:234)
+            button(route.button+"  ›",NSRect(x:right+33,y:y+98,width:234,height:34),action:route.action)
+        }
     }
 
-    private func drawGarage(_ game: RacingGame, selection: GarageSelection, width: CGFloat, height: CGFloat) {
+    private func drawSchool(_ game: RacingGame, width: CGFloat, height: CGFloat) {
+        menuScrim(0.70)
+        let w: CGFloat = 776, h: CGFloat = 502
+        let x = (width-w)/2, y = (height-h)/2
+        let selected = game.selectedLesson
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.98),radius:16)
+        screenHeader("驾驶学院",subtitle:"在赛道的短段练习起步、制动与出弯。",x:x,y:y,width:w)
+        for (index,kind) in DrivingLessonKind.allCases.enumerated() {
+            let record = game.lessonRecords[kind]
+            let top = y+115+CGFloat(index)*73
+            let status = record?.medal.label ?? "待练习"
+            button(kind.title,NSRect(x:x+28,y:top,width:276,height:40),action:"lesson:"+kind.rawValue,
+                   active:kind == selected,accessibility:kind.title+"，"+status+(kind == selected ? "，已选择" : ""))
+            text(status,x:x+40,y:top+44,size:11,color:record == nil ? muted : lime,width:104)
+            if let record {
+                text(String(format:"%.2f 秒",record.time),x:x+156,y:top+44,size:11,color:muted,mono:true,width:135,align:.right)
+            }
+        }
+        panel(NSRect(x:x+325,y:y+114,width:423,height:283),color:NSColor(rgb:0x1A2331),radius:10)
+        text(selected.title,x:x+348,y:y+135,size:23,weight:.bold,width:377)
+        text(selected.subtitle,x:x+349,y:y+174,size:12,color:muted,width:377)
+        let schedule = selected.circuitKind.label+" · "+selected.condition.label+" · "+selected.vehicleKind.label
+        text(schedule,x:x+349,y:y+202,size:12,color:lime,width:377)
+        for (index,step) in selected.instructions.enumerated() {
+            text(step,x:x+349,y:y+247+CGFloat(index)*38,size:12,width:377)
+        }
+        text("课程使用自动挡和固定轮胎，保留你的手柄响应。",x:x+349,y:y+357,size:11,color:muted,width:377)
+        button("返回",NSRect(x:x+28,y:y+431,width:164,height:42),action:"closeSchool")
+        button("开始这课",NSRect(x:x+500,y:y+431,width:248,height:42),action:"startLesson",primary:true)
+    }
+
+    private func drawLessonCoach(_ game: RacingGame, lesson: DrivingLessonRun) {
+        let at: CGFloat = game.showMirror ? 128 : 18
+        let area = statusCard(width:392,height:82,game:game,at:at)
+        panel(area,color:NSColor(rgb:0x141B28,alpha:0.90),radius:9)
+        text(lesson.kind.title,x:area.minX+14,y:area.minY+11,size:11,color:muted,weight:.semibold,width:area.width-139)
+        text(String(format:"%.1f 秒",lesson.elapsed),x:area.maxX-104,y:area.minY+10,size:11,color:muted,mono:true,width:90,align:.right)
+        let hasCountdown = game.rollingCountdown > 0
+        let message = hasCountdown ? "准备  \(Int(ceil(game.rollingCountdown)))" :
+            (game.showRollingGo ? "开始" : lesson.status(at:game.location))
+        text(message,x:area.minX+14,y:area.minY+31,size:15,color:hasCountdown ? white : lime,weight:.semibold,width:area.width-28)
+        let track = NSRect(x:area.minX+14,y:area.maxY-13,width:area.width-28,height:4)
+        panel(track,color:NSColor(rgb:0x33414D),radius:2)
+        let length = track.width*CGFloat(lesson.progress(at:game.location))
+        if length > 0 { panel(NSRect(x:track.minX,y:track.minY,width:length,height:track.height),color:lime,radius:2) }
+    }
+
+    private func drawLessonMenu(_ game: RacingGame, lesson: DrivingLessonRun, width: CGFloat, height: CGFloat) {
+        menuScrim(0.70)
+        let metrics = lessonMetrics(lesson.feedback)
+        let w: CGFloat = 640, h: CGFloat = metrics.isEmpty ? 340 : 400
+        let x = (width-w)/2, y = (height-h)/2
+        let buttonsY = y+h-74
+        let status = lesson.result
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.98),radius:16)
+        screenHeader(status == nil ? "训练已暂停" : "课程结果",subtitle:lesson.kind.title+" · "+lesson.kind.circuitKind.label,x:x,y:y,width:w)
+        if let status {
+            if case .passed(let medal) = status {
+                text(medal.label,x:x+29,y:y+110,size:32,color:lime,weight:.bold,width:215)
+                if game.lessonPersonalBest { text("个人最佳",x:x+142,y:y+123,size:12,color:lime,width:118) }
+            } else {
+                text("再试一次",x:x+29,y:y+111,size:26,weight:.bold,width:280)
+                text(status.label,x:x+29,y:y+152,size:14,color:muted,width:w-58)
+            }
+            let speed = lesson.exitSpeedKPH ?? lesson.peakSpeedKPH
+            let measure = lesson.exitSpeedKPH == nil ? "最高速度" : "终点速度"
+            text(String(format:"用时 %.2f 秒",lesson.elapsed),x:x+29,y:y+198,size:15,mono:true,width:225)
+            text(String(format:"%@ %.1f km/h",measure,speed),x:x+297,y:y+198,size:15,mono:true,width:310)
+            if !metrics.isEmpty {
+                panel(NSRect(x:x+28,y:y+235,width:w-56,height:55),color:NSColor(rgb:0x1A2634),radius:7)
+                let column = min(268,(w-86)/CGFloat(metrics.count))
+                for (index,metric) in metrics.enumerated() {
+                    let left = x+43+CGFloat(index)*column
+                    text(metric.0,x:left,y:y+243,size:10,color:muted,width:column-15)
+                    text(metric.1,x:left,y:y+259,size:14,weight:.semibold,width:column-15)
+                }
+            }
+        } else {
+            for (index,step) in lesson.kind.instructions.enumerated() {
+                text(step,x:x+29,y:y+127+CGFloat(index)*34,size:14,width:w-58)
+            }
+        }
+        button("返回课程",NSRect(x:x+28,y:buttonsY,width:165,height:43),action:"leaveLesson")
+        if status == nil {
+            button("重新开始",NSRect(x:x+213,y:buttonsY,width:165,height:43),action:"lessonRetry")
+            button("继续训练",NSRect(x:x+411,y:buttonsY,width:201,height:43),action:"resume",primary:true)
+        } else if case .some(.passed) = status {
+            button("再练一次",NSRect(x:x+213,y:buttonsY,width:165,height:43),action:"lessonRetry")
+            button(lesson.kind == DrivingLessonKind.allCases.last ? "完成课程" : "下一课",
+                   NSRect(x:x+411,y:buttonsY,width:201,height:43),action:"lessonNext",primary:true)
+        } else {
+            button("重试",NSRect(x:x+411,y:buttonsY,width:201,height:43),action:"lessonRetry",primary:true)
+        }
+    }
+
+    private func lessonMetrics(_ feedback: DrivingLessonFeedback?) -> [(String,String)] {
+        func time(_ value: Double) -> String { String(format:"%.2f 秒",value) }
+        switch feedback {
+        case .braking(.inBox(let offset)):
+            let direction = offset < 0 ? "中心前 " : "过中心 "
+            let distance = abs(offset) < 0.05 ? "停在中心" : direction+String(format:"%.1f 米",abs(offset))
+            return [("停车位置",distance)]
+        case .braking(.shortOfBox(let metres)):
+            return [("停车位置",String(format:"距停车区入口 %.1f 米",metres))]
+        case .braking(.crossedBoxEnd(let speed)):
+            return [("驶出停车区时的速度",String(format:"%.1f km/h",speed))]
+        case .trailBraking(let overlap,let release,let progressive):
+            return [("带刹车转向",time(overlap)),("逐步松刹",progressive > 0 ? time(progressive) : "未检测到"),
+                    ("完全松刹后持续",time(release))]
+        case .wetExit(let early,let slip):
+            return [("提前大油门",time(early)),("带油打滑",time(slip))]
+        default: return []
+        }
+    }
+
+    private func drawQualifyingCoach(_ game: RacingGame,qualifying: QualifyingSession) {
+        let area = statusCard(width:392,height:82,game:game,at:game.showMirror ? 128 : 18)
+        panel(area,color:NSColor(rgb:0x141B28,alpha:0.90),radius:9)
+        let timing = qualifying.timing
+        text("单圈排位",x:area.minX+14,y:area.minY+11,size:11,color:muted,weight:.semibold,width:area.width-139)
+        let time = timing.waitingForStart ? "—" : lapTime(timing.elapsed)
+        text(time,x:area.maxX-132,y:area.minY+10,size:11,color:muted,mono:true,width:118,align:.right)
+        let countdown = game.rollingCountdown
+        let message = game.isWrongWay ? "逆向行驶 · 安全调头" : (countdown > 0 ? "准备  \(Int(ceil(countdown)))" : timing.status)
+        text(message,x:area.minX+14,y:area.minY+30,size:15,color:timing.validLap && !game.isWrongWay ? lime : NSColor(rgb:0xFFAD83),
+             weight:.semibold,width:area.width-28)
+        let track = NSRect(x:area.minX+14,y:area.maxY-13,width:area.width-28,height:4)
+        panel(track,color:NSColor(rgb:0x33414D),radius:2)
+        let fraction = timing.waitingForStart ? 0 : clamp(game.location.progress/game.circuit.length,0,1)
+        let length = track.width*CGFloat(fraction)
+        if length > 0 { panel(NSRect(x:track.minX,y:track.minY,width:length,height:4),color:lime,radius:2) }
+    }
+
+    private func drawQualifyingMenu(_ game: RacingGame,qualifying: QualifyingSession,width: CGFloat,height: CGFloat) {
+        menuScrim(0.70)
+        let w: CGFloat = 706, h: CGFloat = 438
+        let x = (width-w)/2, y = (height-h)/2
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.98),radius:16)
+        let context = [game.circuit.kind.label,game.circuit.condition.label,game.vehicle.kind.label].joined(separator:" · ")
+        screenHeader(qualifying.result == nil ? "排位已暂停" : "排位结果",subtitle:context,x:x,y:y,width:w)
+        if let result = qualifying.result {
+            let outcome: String
+            switch result.outcome {
+            case .valid: outcome = "有效飞驰圈"
+            case .invalid: outcome = "本圈无效"
+            case .assisted: outcome = "使用了自动驾驶"
+            case .timedOut: outcome = "排位计时结束"
+            case .skipped: outcome = "已跳过排位"
+            }
+            text(outcome+"   "+lapTime(result.time),x:x+29,y:y+108,size:18,color:result.time == nil ? white : lime,
+                 weight:.semibold,width:378)
+            if let grid = game.qualifyingGrid {
+                text("发车位  P\(grid.playerGridSlot+1)",x:x+440,y:y+110,size:16,color:lime,
+                     weight:.semibold,mono:true,width:231,align:.right)
+                for (index,row) in grid.rows.enumerated() {
+                    let top = y+150+CGFloat(index)*39
+                    panel(NSRect(x:x+28,y:top,width:w-56,height:34),
+                          color:NSColor(rgb:row.entrantIndex == 0 ? 0x253645 : 0x1A2331),radius:6)
+                    driverMark(row.entrantIndex,x:x+43,y:top+14)
+                    text("P\(row.position)     "+driverLabel(row.entrantIndex),x:x+58,y:top+8,size:13,
+                         weight:.semibold,width:269)
+                    text(row.time.map { lapTime($0) } ?? "无有效成绩",x:x+439,y:top+8,size:12,
+                         color:muted,mono:true,width:232,align:.right)
+                }
+            } else {
+                text("正在等待电脑车手的测时成绩。",x:x+30,y:y+164,size:13,color:muted,width:w-60)
+            }
+        } else {
+            text("通过起点后开始计时，完成一圈决定本场发车位。",x:x+30,y:y+128,size:14,width:w-60)
+            text("本圈状态  "+qualifying.timing.status,x:x+30,y:y+168,size:13,color:muted,width:w-60)
+            text("也可以跳过排位，从末位发车。",x:x+30,y:y+206,size:12,color:muted,width:w-60)
+        }
+        button("返回比赛设置",NSRect(x:x+28,y:y+365,width:155,height:42),action:"leaveQualifying")
+        button("重跑排位",NSRect(x:x+197,y:y+365,width:135,height:42),action:"qualifyingRetry")
+        if qualifying.result == nil {
+            button("跳过排位",NSRect(x:x+347,y:y+365,width:143,height:42),action:"qualifyingSkip")
+            button("继续排位",NSRect(x:x+504,y:y+365,width:174,height:42),action:"resume",primary:true)
+        } else if game.qualifyingGrid != nil {
+            button("前往发车格",NSRect(x:x+491,y:y+365,width:187,height:42),action:"launchQualifiedRace",primary:true)
+        }
+    }
+
+    private func drawCups(_ game: RacingGame, width: CGFloat, height: CGFloat) {
+        menuScrim(0.70)
+        let w: CGFloat = 776, h: CGFloat = 550
+        let x = (width-w)/2, y = (height-h)/2
+        let series = game.selectedCup
+        let progress = game.cupProgress(series)
+        let complete = progress.records.count == series.rounds.count
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.98),radius:16)
+        screenHeader("巡回赛",subtitle:"每杯三站。手动完成本站可累计积分，自动驾驶成绩仅进入普通比赛记录。",x:x,y:y,width:w)
+        for (index,item) in CupSeries.allCases.enumerated() {
+            button(item.name,NSRect(x:x+28+CGFloat(index)*244,y:y+110,width:232,height:38),action:"cup:"+item.rawValue,
+                   active:item == series,accessibility:item.name+(item == series ? "，已选择" : ""))
+        }
+        text(series.detail,x:x+30,y:y+167,size:13,width:410)
+        text("总分  \(progress.points) / 30",x:x+30,y:y+191,size:17,color:complete ? lime : white,weight:.semibold,width:282)
+        if let best = progress.bestPoints {
+            let medal = CupMedal(points:best).map { " · "+$0.label } ?? ""
+            text("历史最佳  \(best) 分"+medal,x:x+410,y:y+193,size:12,color:muted,width:336,align:.right)
+        }
+        for (index,round) in series.rounds.enumerated() {
+            let top = y+229+CGFloat(index)*67
+            let canStart = index == progress.records.count
+            panel(NSRect(x:x+28,y:top,width:w-56,height:56),color:NSColor(rgb:canStart ? 0x253645 : 0x1A2331),radius:7)
+            text("第 \(index+1) 站",x:x+42,y:top+17,size:12,color:canStart ? lime : muted,weight:.semibold,width:64)
+            text(round.circuit.label,x:x+117,y:top+7,size:15,weight:.semibold,width:254)
+            text(round.vehicle.label+" · "+round.condition.label+" · \(round.configuration.laps) 圈",
+                 x:x+117,y:top+31,size:11,color:muted,width:323)
+            text(round.configuration.difficulty.label,x:x+462,y:top+17,size:12,color:muted,width:95)
+            let status: String
+            if progress.records.indices.contains(index) {
+                let result = progress.records[index]
+                let place = result.place.map { "P\($0)" } ?? "退赛"
+                status = place+" · \(CupRound.points(for:result.place)) 分"
+            } else { status = canStart ? "待发车" : "待进行" }
+            text(status,x:x+560,y:top+17,size:12,color:canStart ? lime : white,width:171,align:.right)
+        }
+        text("前四名 10 / 7 / 5 / 3 分    奖牌  铜 14 · 银 20 · 金 27",x:x+29,y:y+440,size:11,color:muted,width:716)
+        button("返回",NSRect(x:x+28,y:y+480,width:164,height:42),action:"closeCupMenu")
+        button(complete ? "再开一轮" : "参加第 \(progress.records.count+1) 站",
+               NSRect(x:x+500,y:y+480,width:248,height:42),action:complete ? "startNewCup" : "startCupRound",primary:true)
+    }
+
+    private func drawRaceSetup(_ game: RacingGame, width: CGFloat, height: CGFloat) {
+        menuScrim(0.69)
+        let wet = game.circuit.condition == .wet
+        let w: CGFloat = 760, h: CGFloat = wet ? 583 : 536
+        let x = (width-w)/2, y = (height-h)/2
+        let setup = game.raceConfiguration
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.98),radius:16)
+        screenHeader("比赛设置",subtitle:"车辆调校会带入比赛。发车后轮胎保持本场选择。",x:x,y:y,width:w)
+        let columns: [(String,String,String)] = [
+            ("车辆",game.vehicle.kind.label,"selectVehicle"),
+            ("赛道",game.circuit.kind.label,"selectCircuit")]
+        for (index,column) in columns.enumerated() {
+            let left = x+28+CGFloat(index)*356
+            text(column.0,x:left,y:y+108,size:11,color:muted)
+            button(column.1+"  ›",NSRect(x:left,y:y+128,width:348,height:38),action:column.2,
+                   accessibility:"选择"+column.0+"，当前 "+column.1)
+        }
+        func options(_ title: String, key: String, values: [(Int,String)], selected: Int, at top: CGFloat) {
+            text(title,x:x+29,y:y+top+10,size:13,color:muted,width:160)
+            let gap: CGFloat = 8
+            let slot = (514-gap*CGFloat(values.count-1))/CGFloat(values.count)
+            for (index,item) in values.enumerated() {
+                let active = item.0 == selected
+                button(item.1,NSRect(x:x+217+CGFloat(index)*(slot+gap),y:y+top,width:slot,height:34),
+                       action:"raceOption:"+key+":"+String(item.0),active:active,
+                       accessibility:title+" · "+item.1+(active ? "，已选择" : ""))
+            }
+        }
+        button("路况 · "+game.circuit.condition.label,NSRect(x:x+28,y:y+181,width:176,height:35),action:"trackCondition")
+        let fitted = setup.fittedTyres(from:game.tyreSetup,on:game.circuit.condition)
+        text("本场轮胎  "+fitted.compound.label,x:x+219,y:y+191,size:13,color:muted,width:510)
+        options("比赛圈数",key:"laps",values:RaceConfiguration.lapOptions.map { ($0,"\($0) 圈") },selected:setup.laps,at:231)
+        options("电脑对手",key:"rivals",values:(1...3).map { ($0,"\($0) 辆") },selected:setup.rivals,at:278)
+        options("对手难度",key:"difficulty",values:RaceDifficulty.allCases.map { ($0.rawValue,$0.label) },
+                selected:setup.difficulty.rawValue,at:325)
+        options("发车位",key:"grid",values:[(0,"最后一位"),(1,"杆位"),(2,"单圈排位")],
+                selected:setup.usesQualifying ? 2 : (setup.startAtFront ? 1 : 0),at:372)
+        options("轮胎选择",key:"tyres",values:[(1,"随路况选择"),(0,"使用车库调校")],
+                selected:setup.matchTyresToWeather ? 1 : 0,at:419)
+        if wet {
+            options("正赛水膜",key:"surface",values:[(0,"保持湿地"),(1,"雨后渐干")],
+                    selected:setup.usesDryingTrack ? 1 : 0,at:466)
+        }
+        let bottom = y+h-61
+        text("领跑者完赛后，其他车手在下次过线结算。",x:x+204,y:bottom+13,size:11,color:muted,width:267,align:.center)
+        button("返回",NSRect(x:x+28,y:bottom,width:164,height:41),action:"closeRaceSetup")
+        button(setup.usesQualifying ? "前往排位" : "前往发车格",
+               NSRect(x:x+485,y:bottom,width:246,height:41),action:"startSprint",primary:true)
+    }
+
+    private static let raceDate: DateFormatter = {
+        let format = DateFormatter()
+        format.dateStyle = .short
+        format.timeStyle = .short
+        return format
+    }()
+
+    private func drawRaceHistory(_ game: RacingGame, width: CGFloat, height: CGFloat) {
+        menuScrim(0.72)
+        let w: CGFloat = 760, h: CGFloat = 582
+        let x = (width-w)/2, y = (height-h)/2
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.98),radius:16)
+        let practice = game.showingPracticeBests
+        let subtitle = practice ? "每辆车在六条赛道的最佳有效练习圈。" : "最近的比赛结果，按完赛或退赛的时间排列。"
+        screenHeader("驾驶记录",subtitle:subtitle,x:x,y:y,width:w)
+        button("比赛历史",NSRect(x:x+28,y:y+108,width:150,height:34),action:"historyRaces",active:!practice)
+        button("练习最佳圈",NSRect(x:x+190,y:y+108,width:150,height:34),action:"historyBests",active:practice)
+        button("返回",NSRect(x:x+28,y:y+519,width:164,height:40),action:"closeRaceHistory",primary:true)
+        if practice { drawPracticeBests(game,x:x,y:y); return }
+
+        let total = max(1,(game.raceRecords.count+RaceRecord.pageSize-1)/RaceRecord.pageSize)
+        let results = game.raceRecords.dropFirst(game.raceHistoryPage*RaceRecord.pageSize).prefix(RaceRecord.pageSize)
+        if results.isEmpty {
+            text("完成第一场比赛后，名次和最快圈会显示在这里。",x:x+29,y:y+177,size:14,color:muted,width:w-58)
+        }
+        for (index,record) in results.enumerated() {
+            let top = y+160+CGFloat(index)*56
+            let status = record.place.map { "P\($0) / \(record.configuration.rivals+1)" } ?? (record.timedOut == true ? "未完赛" : "退赛")
+            panel(NSRect(x:x+28,y:top,width:w-56,height:48),color:NSColor(rgb:0x1A2331),radius:6)
+            text(status,x:x+41,y:top+12,size:15,color:record.place == 1 ? lime : white,weight:.semibold,mono:true,width:83)
+            text(record.recordedVehicleLabel+" · "+record.circuit.label,x:x+133,y:top+5,size:13,weight:.semibold,width:321)
+            let road = record.wet ? (record.configuration.usesDryingTrack ? "雨后渐干" : "湿地") : "干地"
+            let detail = [road, record.configuration.difficulty.label,
+                          "\(record.completedLaps)/\(record.configuration.laps) 圈"].joined(separator:" · ") +
+                (record.assisted ? " · 自动驾驶" : "")
+            text(detail,x:x+133,y:top+26,size:10,color:muted,width:321)
+            let timing = record.totalTime.map { lapTime($0) } ?? Self.raceDate.string(from:record.date)
+            let hasLaps = record.lapHistory?.isEmpty == false
+            let timeWidth: CGFloat = hasLaps ? 160 : 258
+            text(timing,x:x+457,y:top+7,size:13,mono:true,width:timeWidth,align:.right)
+            let lap = record.bestLap.map { "最快圈  "+lapTime($0) } ?? "最快圈  —"
+            text(lap,x:x+452,y:top+26,size:10,color:muted,width:timeWidth+5,align:.right)
+            if hasLaps {
+                button("圈速",NSRect(x:x+633,y:top+9,width:82,height:30),action:"viewRaceLaps:"+record.id.uuidString,
+                       accessibility:"查看 \(record.circuit.label) \(record.recordedVehicleLabel) 的圈速")
+            }
+        }
+        if game.raceHistoryPage > 0 {
+            button("上一页",NSRect(x:x+381,y:y+519,width:98,height:40),action:"raceHistoryPrevious")
+        }
+        if game.raceHistoryPage+1 < total {
+            button("下一页",NSRect(x:x+633,y:y+519,width:98,height:40),action:"raceHistoryNext")
+        }
+        text("\(game.raceHistoryPage+1) / \(total)",x:x+488,y:y+533,size:12,color:muted,mono:true,width:135,align:.center)
+    }
+
+    private func drawPracticeBests(_ game: RacingGame,x: CGFloat,y: CGFloat) {
+        button("干地",NSRect(x:x+551,y:y+108,width:84,height:34),action:"bestsDry",active:game.bestsCondition == .dry)
+        button("湿地",NSRect(x:x+647,y:y+108,width:84,height:34),action:"bestsWet",active:game.bestsCondition == .wet)
+        button("‹",NSRect(x:x+28,y:y+158,width:49,height:37),action:"bestsPreviousCar",accessibility:"上一辆车")
+        if game.hasLegacyPorscheBests {
+            button(game.bestsShowsLegacyPorsche ? "查看现行成绩" : "查看旧车重成绩",NSRect(x:x+352,y:y+108,width:183,height:34),
+                   action:"bestsPorscheSpecification",active:game.bestsShowsLegacyPorsche)
+        }
+        let label = game.bestsVehicle.label + (game.bestsShowsLegacyPorsche ? " · 旧车重 1420 kg" : "")
+        text(label,x:x+90,y:y+166,size:18,weight:.semibold,width:579,align:.center)
+        button("›",NSRect(x:x+682,y:y+158,width:49,height:37),action:"bestsNextCar",accessibility:"下一辆车")
+        text("赛道",x:x+40,y:y+212,size:11,color:muted,width:178)
+        let columns: [(CGFloat,String)] = [(245,"最佳圈"),(366,"第一段"),(481,"第二段"),(596,"第三段")]
+        for (left,label) in columns {
+            text(label,x:x+left,y:y+212,size:11,color:muted,width:110,align:.right)
+        }
+        for (index,circuit) in CircuitKind.allCases.enumerated() {
+            let top = y+235+CGFloat(index)*44
+            let record = game.bestPracticeLap(at:circuit)
+            panel(NSRect(x:x+28,y:top,width:704,height:38),color:NSColor(rgb:0x1A2331),radius:6)
+            text(circuit.label,x:x+40,y:top+10,size:13,weight:.semibold,width:174)
+            text(record.map { lapTime($0.time) } ?? "—",x:x+245,y:top+10,size:13,color:record == nil ? muted : lime,
+                 weight:.semibold,mono:true,width:110,align:.right)
+            for (sector,column) in columns.dropFirst().enumerated() {
+                let seconds = record?.sectors[sector]
+                text(seconds.map { String(format:"%.3f",$0) } ?? "—",x:x+column.0,y:top+11,
+                     size:12,color:muted,mono:true,width:110,align:.right)
+            }
+        }
+    }
+
+    private func drawRaceLaps(_ race: RaceRecord,width: CGFloat,height: CGFloat) {
+        menuScrim(0.72)
+        let w: CGFloat = 680, h: CGFloat = 579
+        let x = (width-w)/2, y = (height-h)/2
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.98),radius:16)
+        let road = race.wet ? (race.configuration.usesDryingTrack ? "雨后渐干" : "湿地") : "干地"
+        let venue = [race.recordedVehicleLabel,race.circuit.label,road].joined(separator:" · ")
+        screenHeader("比赛圈速",subtitle:venue,x:x,y:y,width:w)
+        text("完成 \(race.completedLaps) / \(race.configuration.laps) 圈",x:x+29,y:y+113,size:13,weight:.semibold,width:170)
+        text("最快圈  "+lapTime(race.bestLap),x:x+220,y:y+113,size:13,color:lime,weight:.semibold,mono:true,width:242)
+        let penalty = race.penaltySeconds > 0 ? String(format:"罚时 +%.0f 秒",race.penaltySeconds) : "罚时 0 秒"
+        text(penalty,x:x+475,y:y+113,size:12,color:muted,width:177,align:.right)
+        text("圈数",x:x+43,y:y+152,size:11,color:muted,width:106)
+        text("过线用时",x:x+169,y:y+152,size:11,color:muted,width:151,align:.right)
+        text("距最快圈",x:x+351,y:y+152,size:11,color:muted,width:142,align:.right)
+        text("状态",x:x+524,y:y+152,size:11,color:muted,width:112,align:.right)
+        for (index,lap) in (race.lapHistory ?? []).enumerated() {
+            let row = y+173+CGFloat(index)*40
+            let timed = index > 0 && lap.clean
+            let difference = timed ? race.bestLap.map { lap.time-$0 } : nil
+            let best = difference.map { abs($0) < 0.0005 } == true
+            panel(NSRect(x:x+28,y:row,width:w-56,height:36),color:NSColor(rgb:best ? 0x253645 : 0x1A2331),radius:6)
+            text("\(index+1)",x:x+43,y:row+9,size:13,mono:true,width:106)
+            text(lapTime(lap.time),x:x+169,y:row+9,size:13,color:best ? lime : white,weight:.semibold,
+                 mono:true,width:151,align:.right)
+            let delta = difference.map { String(format:"%+.3f 秒",$0) } ?? "—"
+            text(delta,x:x+351,y:row+9,size:12,color:muted,mono:true,width:142,align:.right)
+            let status = lap.clean ? (index == 0 ? "发车圈" : (best ? "最快" : "有效")) : "无效"
+            text(status,x:x+524,y:row+9,size:12,color:best ? lime : muted,width:112,align:.right)
+        }
+        button("返回",NSRect(x:x+28,y:y+516,width:164,height:40),action:"closeRaceLaps",primary:true)
+    }
+
+    private func drawRaceResults(_ game: RacingGame, race: SprintRace, width: CGFloat, height: CGFloat) {
+        menuScrim(0.70)
+        let w: CGFloat = 720, h: CGFloat = 498
+        let x = (width-w)/2, y = (height-h)/2
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.98),radius:16)
+        let setup = game.activeRaceConfiguration
+        let road = game.trackDrying == nil ? game.circuit.condition.label : "雨后渐干"
+        var context = [game.circuit.kind.label,road,game.vehicle.kind.label,
+                       setup?.difficulty.label ?? RaceDifficulty.club.label]
+        if let cup = game.activeCup { context.insert(cup.series.name+" 第 \(cup.roundIndex+1) 站",at:0) }
+        if let grid = game.activeRaceGrid { context.append("起步 P\(grid.playerGridSlot+1)") }
+        if game.racePitStops > 0 { context.append("进站 \(game.racePitStops) 次") }
+        let subtitle = context.joined(separator:" · ")
+        screenHeader("比赛结果",subtitle:subtitle,x:x,y:y,width:w)
+        if let player = race.playerClassification {
+            let finish = player.status == .finished
+            panel(NSRect(x:x+28,y:y+110,width:w-56,height:71),color:NSColor(rgb:0x253645),radius:9)
+            text(finish ? "P\(player.position)" : "DNF",x:x+44,y:y+119,size:32,color:finish ? lime : white,weight:.bold,mono:true,width:117)
+            text("用时",x:x+176,y:y+120,size:10,color:muted,width:126)
+            text(lapTime(player.classifiedTime),x:x+176,y:y+138,size:19,weight:.semibold,mono:true,width:140)
+            text("最快圈",x:x+353,y:y+120,size:10,color:muted,width:126)
+            text(lapTime(player.bestLap),x:x+353,y:y+138,size:19,weight:.semibold,mono:true,width:145)
+            text("罚时",x:x+536,y:y+120,size:10,color:muted,width:107)
+            let penalty = player.penaltySeconds > 0 ? "+\(Int(player.penaltySeconds)) 秒" : "0 秒"
+            text(penalty,x:x+536,y:y+139,size:17,weight:.semibold,mono:true,width:122)
+        }
+        text("名次 / 车手",x:x+41,y:y+199,size:11,color:muted,width:216)
+        text("圈数",x:x+201,y:y+199,size:11,color:muted,width:67,align:.center)
+        text("罚时",x:x+277,y:y+199,size:11,color:muted,width:64,align:.center)
+        text("最快圈",x:x+361,y:y+199,size:11,color:muted,width:108,align:.right)
+        text("结算时间",x:x+478,y:y+199,size:11,color:muted,width:108,align:.right)
+        text("差距",x:x+597,y:y+199,size:11,color:muted,width:81,align:.right)
+        let classifications = race.classifications
+        let leaderTime = classifications.first?.classifiedTime
+        let leaderLaps = classifications.first?.laps ?? race.lapCount
+        let fastest = classifications.compactMap(\.bestLap).min()
+        for (index,entry) in classifications.enumerated() {
+            let row = y+221+CGFloat(index)*39
+            panel(NSRect(x:x+28,y:row,width:w-56,height:34),
+                  color:NSColor(rgb:entry.index == 0 ? 0x253645 : 0x1A2331),radius:6)
+            let name = driverLabel(entry.index)
+            let position = entry.status == .finished ? String(entry.position) : "—"
+            driverMark(entry.index,x:x+42,y:row+14)
+            text(position+"     "+name,x:x+55,y:row+8,size:13,weight:.semibold,width:141)
+            text("\(entry.laps) / \(race.lapCount)",x:x+201,y:row+8,size:12,mono:true,width:67,align:.center)
+            text(entry.penaltySeconds > 0 ? "+\(Int(entry.penaltySeconds)) 秒" : "—",x:x+277,y:row+8,size:12,mono:true,width:64,align:.center)
+            text(lapTime(entry.bestLap),x:x+361,y:row+8,size:12,
+                 color:fastest != nil && entry.bestLap == fastest ? lime : muted,mono:true,width:108,align:.right)
+            let status = entry.status == .retired ? "退赛" : "未完赛"
+            text(entry.classifiedTime.map { lapTime($0) } ?? status,x:x+478,y:row+8,size:12,mono:true,width:108,align:.right)
+            let gap = entry.classifiedTime.flatMap { time in leaderTime.map { max(0,time-$0) } }
+            let lapsDown = leaderLaps-entry.laps
+            let difference = entry.status == .finished && lapsDown > 0 ? "+\(lapsDown) 圈" :
+                (gap.map { String(format:"+%.3f", $0) } ?? "—")
+            text(index == 0 ? "—" : difference,
+                 x:x+597,y:row+8,size:12,color:muted,mono:true,width:81,align:.right)
+        }
+        if let cup = game.activeCup {
+            let progress = game.cupProgress(cup.series)
+            let points = CupRound.points(for:race.playerFinished ? race.driverPosition : nil)
+            let status = game.cupRoundRecorded ? "本站积分 +\(points) · 累计 \(progress.points) 分" :
+                "本场使用过自动驾驶，巡回赛进度停留在本站。"
+            text(status,x:x+29,y:y+386,size:12,color:game.cupRoundRecorded ? lime : muted,width:w-58)
+        } else if race.assisted { text("本场使用过自动驾驶",x:x+29,y:y+386,size:11,color:muted,width:w-58) }
+        var actions = [("主菜单","leaveSprint"),("比赛记录","raceHistory")]
+        if game.raceRecords.first?.lapHistory?.isEmpty == false { actions.append(("圈速","raceLaps")) }
+        if game.canReplay { actions.append(("回放","openReplay")) }
+        if game.cupRoundRecorded {
+            actions.append(("巡回赛进度","cupContinue"))
+        } else if game.activeCup != nil {
+            actions += [("巡回赛进度","cupContinue"),("重赛本站","raceAgain")]
+        } else {
+            actions += [("下一场","nextRaceSetup"),("再跑一次","raceAgain")]
+        }
+        let spacing: CGFloat = 10
+        let slot = (w-56-spacing*CGFloat(actions.count-1))/CGFloat(actions.count)
+        for (index,item) in actions.enumerated() {
+            button(item.0,NSRect(x:x+28+CGFloat(index)*(slot+spacing),y:y+432,width:slot,height:42),
+                   action:item.1,primary:index == actions.count-1)
+        }
+    }
+
+    private func seekReplay(at point: CGPoint) {
+        guard replayScrubArea.width > 0 else { return }
+        game?.seekReplay(fraction:Double((point.x-replayScrubArea.minX)/replayScrubArea.width))
+    }
+
+    private func drawReplay(_ game: RacingGame,replay: RacePlayback,width: CGFloat,height: CGFloat) {
+        let w: CGFloat = 792, h: CGFloat = 144
+        let x = (width-w)/2, y = height-h-18
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28,alpha:0.95),radius:12)
+        text(replay.interval.lowerBound > 0.1 ? "赛末回放" : "赛后回放",x:x+21,y:y+13,size:17,weight:.bold,width:105)
+        if let frame = game.replayFrame {
+            let controls = frame.controls
+            text(String(format:"%.0f km/h",frame.player.speedKPH),x:x+134,y:y+17,size:12,color:white,mono:true,width:89)
+            let values = [("油门开度",Float(frame.playerAudio.throttle),NSColor(rgb:0x82C98C)),
+                          ("刹车行程",controls.brakeTravel,NSColor(rgb:0xF58478)),
+                          (controls.absActive ? "压力 · ABS" : "刹车压力",controls.linePressure,
+                           NSColor(rgb:controls.absActive ? 0xF2C35D : 0xF58478))]
+            for (index,value) in values.enumerated() {
+                let left = x+234+CGFloat(index)*129
+                text(value.0,x:left,y:y+12,size:10,color:muted,width:67)
+                text(String(format:"%.0f%%",value.1*100),x:left+68,y:y+12,size:10,color:white,mono:true,width:42,align:.right)
+                let meter = NSRect(x:left,y:y+31,width:110,height:3)
+                panel(meter,color:NSColor(rgb:0x3F4D58),radius:1.5)
+                if value.1 > 0 {
+                    panel(NSRect(x:left,y:meter.minY,width:meter.width*CGFloat(clamp(value.1,0,1)),height:meter.height),
+                          color:value.2,radius:1.5)
+                }
+            }
+        }
+        text(String(format:"%.1f / %.1f 秒",replay.elapsed,replay.duration),x:x+w-153,y:y+17,size:12,
+             color:muted,mono:true,width:132,align:.right)
+        replayScrubArea = NSRect(x:x+21,y:y+44,width:w-42,height:34)
+        let track = NSRect(x:replayScrubArea.minX,y:replayScrubArea.midY-2,width:replayScrubArea.width,height:4)
+        panel(track,color:NSColor(rgb:0x3F4D58),radius:2)
+        let travel = track.width*CGFloat(replay.fraction)
+        if travel > 0 { panel(NSRect(x:track.minX,y:track.minY,width:travel,height:4),color:lime,radius:2) }
+        panel(NSRect(x:track.minX+travel-5,y:track.midY-5,width:10,height:10),color:lime,radius:5)
+        let actions = [("退后 5 秒","replayEarlier"),(replay.isPlaying ? "暂停" : "播放","replayPlay"),
+                       ("前进 5 秒","replayLater"),(replay.rate.label,"replayRate"),
+                       (game.replayView.label,"replayCamera"),("返回结果","closeReplay")]
+        let slot = (w-42-8*CGFloat(actions.count-1))/CGFloat(actions.count)
+        for (index,item) in actions.enumerated() {
+            button(item.0,NSRect(x:x+21+CGFloat(index)*(slot+8),y:y+93,width:slot,height:34),
+                   action:item.1,primary:item.1 == "replayPlay",
+                   accessibility:item.1 == "replayRate" ? "播放速度 "+item.0 : item.0)
+        }
+    }
+
+    private struct GarageCircuitPreview {
+        let lapLength: Double
+        let heightRange: Double
+        let shape: NSBezierPath
+        let start: CGPoint
+
+        init(_ kind: CircuitKind) {
+            let circuit = Circuit(kind:kind)
+            lapLength = circuit.length
+            let samples = circuit.samples
+            let points = samples.map(\.point)
+            let xs = points.map(\.x), zs = points.map(\.y)
+            let minX = xs.min()!, maxX = xs.max()!, minZ = zs.min()!, maxZ = zs.max()!
+            let magnification = min(183/(maxX-minX),69/(maxZ-minZ))
+            func project(_ p: SIMD2<Double>) -> CGPoint {
+                CGPoint(x:104+(p.x-(minX+maxX)/2)*magnification,y:43-(p.y-(minZ+maxZ)/2)*magnification)
+            }
+            shape = NSBezierPath()
+            start = project(points[0])
+            shape.move(to:start)
+            for point in points.dropFirst() { shape.line(to:project(point)) }
+            shape.close()
+            shape.lineJoinStyle = .round
+            shape.lineWidth = 2.2
+            let roadHeights = samples.map { circuit.roadProfile(at:$0.distance).height }
+            heightRange = (roadHeights.max() ?? 0)-(roadHeights.min() ?? 0)
+        }
+    }
+
+    private func drawGarage(_ game: RacingGame,selection: GarageSelection,width: CGFloat,height: CGFloat) {
         menuScrim(0.66)
         let vehicles = selection == .vehicles
-        let rows = ((vehicles ? VehicleKind.allCases.count : CircuitKind.allCases.count)+1)/2
-        let rowHeight = min(100,max(68,(height-219)/CGFloat(rows)))
-        let panelHeight = 190+CGFloat(rows)*rowHeight
-        let x = (width-762)/2, y = max(16,(height-panelHeight)/2)
-        panel(NSRect(x:x,y:y,width:762,height:panelHeight),color:NSColor(rgb:0x141B28),radius:16)
+        let w: CGFloat = 844, h: CGFloat = vehicles ? 486 : 520
+        let x = (width-w)/2, y = (height-h)/2
+        panel(NSRect(x:x,y:y,width:w,height:h),color:NSColor(rgb:0x141B28),radius:16)
         screenHeader(vehicles ? "选择车辆" : "选择赛道",
-                     subtitle:vehicles ? "选择后会恢复该车的调校和个人最佳。" : "选一条赛道。干地与湿地分别保留圈速。",
-                     x:x,y:y,width:762)
-        let entries: [(String,String,String,Bool)] = vehicles
-            ? VehicleKind.allCases.map { car in
-                (car.label,String(format:"%@  ·  %.0f kg",car.frontDriveShare > 0 ? "四轮驱动" : "后轮驱动",car.mass),
-                 "car:"+String(car.rawValue),car == game.vehicle.kind)
+                     subtitle:vehicles ? "选择车辆会载入该车的调校与个人最佳。" : "小圆点标记计时线。干地与湿地分别保留圈速。",
+                     x:x,y:y,width:w)
+        if vehicles {
+            for (index,kind) in VehicleKind.allCases.enumerated() {
+                let frame = CGRect(x:x+28+CGFloat(index)*400,y:y+104,width:388,height:300.25)
+                drawGarageCar(kind,selected:kind == game.vehicle.kind,frame:frame)
             }
-            : CircuitKind.allCases.map { track in
-                (track.label,track.detail,"circuit:"+String(track.rawValue),track == game.circuit.kind)
+            button("车辆展示",NSRect(x:x+w-389,y:y+h-58,width:169,height:39),action:"openShowcase")
+        } else {
+            for (index,kind) in CircuitKind.allCases.enumerated() {
+                let frame = CGRect(x:x+28+CGFloat(index%3)*266,y:y+112+CGFloat(index/3)*166,width:256,height:154)
+                drawGarageCircuit(kind,selected:kind == game.circuit.kind,frame:frame)
             }
-        for (i, entry) in entries.enumerated() {
-            let offsetX = x+28+CGFloat(i%2)*358, offsetY = y+116+CGFloat(i/2)*rowHeight
-            panel(NSRect(x:offsetX,y:offsetY,width:348,height:rowHeight-13),color:NSColor(rgb:0x1D2838),radius:8)
-            button(entry.0+(entry.3 ? "  ✓" : ""),NSRect(x:offsetX+10,y:offsetY+9,width:328,height:37),action:entry.2,active:entry.3)
-            text(entry.1,x:offsetX+16,y:offsetY+55,size:11,color:muted,width:316,align:.center)
         }
-        button("返回",NSRect(x:x+560,y:y+panelHeight-62,width:174,height:40),action:"closeGarage")
+        button("返回",NSRect(x:x+w-199,y:y+h-58,width:171,height:39),action:"closeGarage")
+    }
+
+    private func drawGarageCar(_ kind: VehicleKind,selected: Bool,frame: CGRect) {
+        panel(frame,color:NSColor(rgb:selected ? 0x2C3D43 : 0x1A2331),radius:9)
+        let imageFrame = CGRect(x:frame.minX+5,y:frame.minY+5,width:frame.width-10,height:frame.height-64)
+        drawVehiclePreview(kind,in:imageFrame)
+        let drive = kind.frontDriveShare > 0 ? "四驱" : "后驱"
+        let gears = "\(kind.gearRatios.count) 挡"
+        let layout = kind == .porsche ? "后置水平对置六缸" : "中置 V12"
+        let specs = [layout,drive,gears].joined(separator:" · ")
+        text(kind.label,x:frame.minX+10,y:frame.maxY-49,size:17,color:selected ? lime : white,weight:.semibold,width:frame.width-20)
+        text(specs,x:frame.minX+10,y:frame.maxY-23,size:11,color:muted,width:frame.width-20)
+        registerAction("car:"+String(kind.rawValue),rect:frame,label:kind.label+"，"+specs+(selected ? "，已选择" : ""))
+    }
+
+    private func drawVehiclePreview(_ kind: VehicleKind,in frame: CGRect) {
+        if vehiclePreviews[kind] == nil,
+           let url = Bundle.main.resourceURL?.appendingPathComponent("Assets/Vehicles/Previews/"+kind.assetName+".jpg"),
+           let image = NSImage(contentsOf:url) {
+            vehiclePreviews[kind] = image
+        }
+        if let image = vehiclePreviews[kind] {
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(roundedRect:frame,xRadius:6,yRadius:6).addClip()
+            image.draw(in:frame,from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+    }
+
+    private func drawGarageCircuit(_ kind: CircuitKind,selected: Bool,frame: CGRect) {
+        panel(frame,color:NSColor(rgb:selected ? 0x2C3D43 : 0x1A2331),radius:9)
+        let preview: GarageCircuitPreview
+        if let cached = circuitPreviews[kind] { preview = cached }
+        else {
+            preview = GarageCircuitPreview(kind)
+            circuitPreviews[kind] = preview
+        }
+        NSGraphicsContext.saveGraphicsState()
+        let transform = NSAffineTransform()
+        transform.translateX(by:frame.minX+24,yBy:frame.minY+5)
+        transform.concat()
+        NSColor(rgb:selected ? 0xCDDAAC : 0x8398A8).setStroke()
+        preview.shape.stroke()
+        lime.setFill()
+        NSBezierPath(ovalIn:NSRect(x:preview.start.x-2.7,y:preview.start.y-2.7,width:5.4,height:5.4)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        text(kind.label,x:frame.minX+14,y:frame.minY+94,size:14,color:selected ? lime : white,weight:.semibold,width:frame.width-28)
+        let distance = String(format:"%.2f km",preview.lapLength/1000)
+        let terrain = preview.heightRange > 0.1 ? String(format:" · 高差 %.0f m",preview.heightRange) : ""
+        text(distance+terrain,x:frame.minX+14,y:frame.minY+115,size:10,color:muted,mono:true,width:frame.width-28)
+        text(kind.detail,x:frame.minX+14,y:frame.minY+132,size:9.5,color:muted,width:frame.width-28)
+        registerAction("circuit:"+String(kind.rawValue),rect:frame,label:kind.label+"，"+distance+(selected ? "，已选择" : ""))
+    }
+
+    private func drawShowcase(_ gallery: VehicleShowcase, error: String?, hasController: Bool, width: CGFloat, height: CGFloat) {
+        let inset: CGFloat = 24
+        let footerY = height-157
+        panel(NSRect(x:inset,y:18,width:width-2*inset,height:88),color:ink,radius:13)
+        text("车辆展示",x:inset+18,y:31,size:12,color:lime,weight:.semibold,width:230)
+        text(gallery.kind.label,x:inset+18,y:52,size:28,weight:.bold,width:width-532)
+        button("上一辆",NSRect(x:width-397,y:43,width:91,height:34),action:"showcasePrevious")
+        button("下一辆",NSRect(x:width-294,y:43,width:91,height:34),action:"showcaseNext")
+        button("退出  Esc / B",NSRect(x:width-189,y:43,width:147,height:34),action:"closeShowcase")
+        text(error ?? gallery.kind.credit,x:inset+6,y:footerY-23,size:11,color:white,width:width-346)
+        let help = hasController ? "右摇杆旋转 · LT / RT 缩放 · Y 切换镜头" : "点击活动部件 · 拖动旋转 · 滚动缩放"
+        text(help,x:width-328,y:footerY-23,size:11,color:white,width:296,align:.right)
+        panel(NSRect(x:inset,y:footerY,width:width-2*inset,height:133),color:ink,radius:13)
+        let x = inset+16
+        let widthForButtons = width-2*x
+        let col = (widthForButtons-40)/6
+        let views: [(VehicleShowcase.Viewpoint,String)] = [(.front,"车头"),(.side,"侧面"),(.rear,"车尾"),(.cabin,"座舱")]
+        for (i, item) in views.enumerated() {
+            button(item.1,NSRect(x:x+CGFloat(i)*(col+8),y:footerY+12,width:col,height:30),
+                   action:"showcaseView:"+item.0.rawValue,active:gallery.viewpoint == item.0)
+        }
+        button("选用此车",NSRect(x:x+4*(col+8),y:footerY+12,width:2*col+8,height:30),action:"showcaseUse",primary:true)
+        for (i, part) in ShowcasePanel.allCases.enumerated() {
+            let frame = NSRect(x:x+CGFloat(i)*(col+8),y:footerY+51,width:col,height:30)
+            if gallery.supports(part) {
+                button(part.title(for:gallery.kind),frame,action:"showcasePanel:"+part.rawValue,
+                       active:gallery.openPanels.contains(part),accessibility:part.title(for:gallery.kind)+(gallery.openPanels.contains(part) ? "，已打开" : "，已关闭"))
+            } else if part == .left || part == .right {
+                text(part.title(for:gallery.kind)+"固定",x:frame.minX,y:frame.minY+6,size:11,color:muted,width:col,align:.center)
+            }
+        }
+        let lights: [(VehicleShowcase.Lamp,String)] = [(.head,"前灯"),(.tail,"尾灯"),(.hazard,"双闪")]
+        for (i, item) in lights.enumerated() where gallery.supports(item.0) {
+            button(item.1,NSRect(x:x+CGFloat(i)*(col+8),y:footerY+91,width:col,height:30),
+                   action:"showcaseLight:"+item.0.rawValue,active:gallery.activeLamps.contains(item.0))
+        }
+        button("座舱照明",NSRect(x:x+3*(col+8),y:footerY+91,width:col,height:30),
+               action:"showcaseCabinLight",active:gallery.cabinLightOn)
+        let all = gallery.allPanelsOpen ? "关闭活动部件" : "打开活动部件"
+        button(all,NSRect(x:x+4*(col+8),y:footerY+91,width:2*col+8,height:30),
+               action:"showcaseAllPanels",active:gallery.allPanelsOpen)
     }
 
     private func drawPause(_ game: RacingGame, width: CGFloat, height: CGFloat) {
@@ -1067,24 +1946,74 @@ final class HUDView: NSView {
 
     private func drawSessionPrompt(_ game: RacingGame, prompt: SessionPrompt, width: CGFloat, height: CGFloat) {
         menuScrim(0.73)
-        let x = (width-550)/2, y = max(14,(height-274)/2)
-        panel(NSRect(x:x,y:y,width:550,height:274),color:NSColor(rgb:0x141B28),radius:16)
+        let plan = prompt == .pit && game.serviceRemaining == 0 ? game.plannedRaceStop : nil
+        let h: CGFloat = plan == nil ? 274 : (plan?.tyreSetup == nil ? 334 : 477)
+        let x = (width-550)/2, y = max(14,(height-h)/2)
+        panel(NSRect(x:x,y:y,width:550,height:h),color:NSColor(rgb:0x141B28),radius:16)
         switch prompt {
-        case .restart, .leave:
+        case .restart, .leave, .retire:
             let restart = prompt == .restart
-            screenHeader(restart ? "重新开始？" : "返回开始界面？",subtitle:game.vehicle.kind.label+"  /  "+game.circuit.kind.label,x:x,y:y,width:550)
-            text("当前驾驶进度会结束，已完成的个人最佳与设置会保留。",x:x+28,y:y+116,size:13,width:494)
+            let retire = prompt == .retire
+            let cup = game.activeCup != nil
+            let title = retire ? "确认退赛？" : (restart ? "重新开始？" : (cup ? "离开本站？" : "返回开始界面？"))
+            screenHeader(title,subtitle:game.vehicle.kind.label+"  /  "+game.circuit.kind.label,x:x,y:y,width:550)
+            let detail: String
+            if retire && cup && game.sprint?.assisted != true { detail = "本站记 0 分，并进入下一站。" }
+            else if retire { detail = "本场比赛会结束，退赛结果写入普通比赛记录。" }
+            else if cup && prompt == .leave { detail = "保留已完成各站的积分，之后仍可从本站重新发车。" }
+            else { detail = "当前驾驶进度会结束，已完成的个人最佳与设置会保留。" }
+            text(detail,x:x+28,y:y+116,size:13,width:494)
             button("取消",NSRect(x:x+28,y:y+197,width:241,height:43),action:"cancelPrompt",primary:true)
-            button(restart ? "重新开始" : "返回开始界面",NSRect(x:x+281,y:y+197,width:241,height:43),action:"confirmPrompt")
+            button(retire ? "确认退赛" : (restart ? "重新开始" : (cup ? "离开本站" : "返回开始界面")),
+                   NSRect(x:x+281,y:y+197,width:241,height:43),action:"confirmPrompt")
         case .pit:
-            screenHeader("维修与拖车",subtitle:"进站限速 60 km/h。维修与换胎需要 12 秒。",x:x,y:y,width:550)
-            let ready = game.serviceRemaining == 0 && game.circuit.pitLane.inServiceBox(game.location) && game.vehicle.speed < 0.55
-            text(game.serviceRemaining > 0 ? "维修正在进行 · 返回后继续驾驶即可恢复计时" :
-                    (ready ? "已在维修位停稳，可以开始服务。" : "进入维修道并在黄框里停稳，或用拖车返回维修位。"),
-                 x:x+28,y:y+122,size:13,width:494)
-            button("返回",NSRect(x:x+28,y:y+197,width:135,height:43),action:"cancelPrompt",primary:true)
-            if ready { button("开始维修",NSRect(x:x+175,y:y+197,width:160,height:43),action:"service") }
-            if game.serviceRemaining == 0 { button("拖车回站",NSRect(x:x+347,y:y+197,width:175,height:43),action:"tow") }
+            let freePractice = game.sprint == nil
+            screenHeader(freePractice ? "维修与拖车" : "进站策略",
+                         subtitle:freePractice ? "进站限速 60 km/h。服务需要 12 秒。" : "进站限速 60 km/h。停车期间比赛继续计时。",
+                         x:x,y:y,width:550)
+            let ready = game.serviceRemaining == 0 && game.circuit.pitLane.inServiceBox(game.location) &&
+                game.vehicle.speed < 0.55 && (plan?.duration ?? PitServicePlan.tyreDuration) > 0
+            let directions = freePractice ? "进入维修道并在黄框里停稳，或用拖车返回维修位。" :
+                "在维修黄框内停稳后按 P，或从本菜单开始服务。"
+            let status: String
+            if game.serviceRemaining > 0 {
+                let task = game.activeRaceService?.work.title ?? "维修"
+                status = "\(task)还剩 \(Int(ceil(game.serviceRemaining))) 秒。恢复比赛后继续计时。"
+            } else if ready { status = "已在维修位停稳，可以开始服务。" }
+            else { status = directions }
+            text(status,x:x+28,y:y+119,size:13,width:494)
+            if let plan {
+                text("下次进站项目",x:x+28,y:y+152,size:13,weight:.semibold,width:494)
+                for (i,work) in PitServiceWork.allCases.enumerated() {
+                    button(work.title,NSRect(x:x+28+CGFloat(i)*168,y:y+177,width:158,height:36),
+                           action:"pitWork:"+work.rawValue,active:plan.work == work)
+                }
+                let estimate = plan.duration > 0 ? "预计停车 \(Int(plan.duration)) 秒" : "当前车辆无需维修"
+                let breakdown: String
+                if plan.work != .both { breakdown = "" }
+                else if plan.repairSeconds > 0 { breakdown = " · 换胎 \(Int(plan.tyreSeconds)) 秒 · 维修 \(Int(plan.repairSeconds)) 秒" }
+                else { breakdown = " · 车辆无损伤" }
+                text(estimate+breakdown,x:x+28,y:y+226,size:12,color:lime,width:494)
+            }
+            if let nextTyres = plan?.tyreSetup {
+                let installed = game.vehicle.wheels.first?.setup ?? nextTyres
+                text(String(format:"当前轮胎   %@ · %.2f bar 冷压",installed.compound.label,installed.coldPressure),
+                     x:x+28,y:y+255,size:11,color:muted,width:494)
+                text("下次轮胎配方",x:x+28,y:y+282,size:13,weight:.semibold,width:494)
+                let optionWidth: CGFloat = 116
+                for (i,compound) in TyreCompound.allCases.enumerated() {
+                    button(compound.label,NSRect(x:x+28+CGFloat(i)*126,y:y+307,width:optionWidth,height:36),
+                           action:"pitTyres:\(compound.rawValue)",active:nextTyres.compound == compound)
+                }
+                text("下次轮胎冷压",x:x+28,y:y+368,size:13,weight:.semibold,width:228)
+                button("−",NSRect(x:x+317,y:y+358,width:40,height:35),action:"pitTyres:down",accessibility:"降低下次轮胎冷压")
+                text(String(format:"%.2f bar",nextTyres.coldPressure),x:x+365,y:y+368,size:13,mono:true,width:109,align:.center)
+                button("+",NSRect(x:x+482,y:y+358,width:40,height:35),action:"pitTyres:up",accessibility:"提高下次轮胎冷压")
+            }
+            let buttonY = y+h-67
+            button("返回",NSRect(x:x+28,y:buttonY,width:135,height:43),action:"cancelPrompt",primary:!ready)
+            if ready { button("开始服务",NSRect(x:x+175,y:buttonY,width:160,height:43),action:"service",primary:true) }
+            if game.serviceRemaining == 0 && freePractice { button("拖车回站",NSRect(x:x+347,y:buttonY,width:175,height:43),action:"tow") }
         }
     }
 
@@ -1268,7 +2197,7 @@ final class HUDView: NSView {
 
     private func drawSprintPause(_ game: RacingGame, race: SprintRace, x: CGFloat, y: CGFloat) {
         panel(NSRect(x:x,y:y,width:550,height:456),color:NSColor(rgb:0x191B1D,alpha:0.99),radius:16)
-        text(race.finished ? "短赛结果" : (race.playerFinished ? "暂定结果" : "短赛已暂停"),x:x+28,y:y+24,size:27,weight:.bold)
+        text(race.playerFinished ? "暂定结果" : "比赛已暂停",x:x+28,y:y+24,size:27,weight:.bold)
         text("\(game.circuit.kind.label) · \(game.circuit.condition.label) · \(game.vehicle.kind.label)",
              x:x+28,y:y+71,size:13,color:muted,width:494)
         text("名次 / 车手",x:x+28,y:y+112,size:12,color:muted)
@@ -1277,24 +2206,36 @@ final class HUDView: NSView {
         text("总时间",x:x+400,y:y+112,size:12,color:muted,width:122,align:.right)
         for (place,index) in race.order.enumerated() {
             let entry = race.entries[index], row = y+143+CGFloat(place)*38
-            let name = index == 0 ? "你" : "电脑 \(index)"
+            let name = driverLabel(index)
             panel(NSRect(x:x+28,y:row-3,width:494,height:33),
                   color:NSColor(rgb:index == 0 ? 0x374249 : 0x242729),radius:5)
-            text("\(place+1)     \(name)",x:x+40,y:row+4,size:13,weight:.semibold,width:190)
+            driverMark(index,x:x+40,y:row+10)
+            text("\(place+1)     \(name)",x:x+53,y:row+4,size:13,weight:.semibold,width:177)
             text("\(entry.laps) / \(race.lapCount)",x:x+245,y:row+4,size:12,mono:true,width:63,align:.center)
             text(entry.penalties > 0 ? "+\(entry.penalties*2)s" : "—",x:x+319,y:row+4,size:12,mono:true,width:63,align:.center)
             let status = race.countdown > 0 ? "等待发车" : "行驶中"
             text(entry.classifiedTime.map { lapTime($0) } ?? status,x:x+400,y:row+4,size:12,mono:true,width:110,align:.right)
         }
-        text(race.assisted ? "本场使用过自动驾驶" : "四轮持续出界或维修道超速，均加罚 2 秒。",
+        let rules = game.activeCup != nil ? "使用自动驾驶时，比赛结果仅进入普通比赛记录。" :
+            (race.assisted ? "本场使用过自动驾驶" : "四轮持续出界或维修道超速，均加罚 2 秒。")
+        text(rules,
              x:x+28,y:y+311,size:11,color:muted,width:494)
-        button(game.drivingView.label+"  ›",NSRect(x:x+28,y:y+342,width:156,height:28),action:"camera")
-        button(game.autoDriveEnabled ? "自动驾驶 开 [ U ]" : "自动驾驶 关 [ U ]",
-               NSRect(x:x+194,y:y+342,width:158,height:28),action:"autoDrive",active:game.autoDriveEnabled)
-        button("设置",NSRect(x:x+363,y:y+342,width:159,height:28),action:"settings")
-        button("返回开始界面",NSRect(x:x+28,y:y+391,width:151,height:39),action:"askLeavePractice")
-        button("重新发车",NSRect(x:x+192,y:y+391,width:148,height:39),action:"askRestart")
-        button("继续驾驶",NSRect(x:x+353,y:y+391,width:169,height:39),action:"resume",primary:true)
+        button(game.drivingView.label+"  ›",NSRect(x:x+28,y:y+342,width:118,height:28),action:"camera")
+        button(game.autoDriveEnabled ? "自动驾驶 开" : "自动驾驶 关",
+               NSRect(x:x+153,y:y+342,width:118,height:28),action:"autoDrive",active:game.autoDriveEnabled)
+        if game.canPitService { button("进站策略",NSRect(x:x+278,y:y+342,width:118,height:28),action:"pitMenu") }
+        button("设置",NSRect(x:x+403,y:y+342,width:119,height:28),action:"settings")
+        var controls: [(String,String)] = []
+        if !race.playerDone {
+            if game.activeCup != nil { controls.append(("离开本站","askLeavePractice")) }
+            controls += [("退赛","askRetireRace"),("重新发车","askRestart")]
+        }
+        controls.append((race.playerDone ? "等待结算" : "继续驾驶","resume"))
+        let buttonWidth = (494-CGFloat(controls.count-1)*10)/CGFloat(controls.count)
+        for (index,control) in controls.enumerated() {
+            button(control.0,NSRect(x:x+28+CGFloat(index)*(buttonWidth+10),y:y+391,width:buttonWidth,height:39),
+                   action:control.1,primary:control.1 == "resume")
+        }
     }
 
     private func drawControllerReview(_ game: RacingGame, width: CGFloat, height: CGFloat) {
@@ -1347,8 +2288,11 @@ final class HUDView: NSView {
         let cadence = samples.pollHz.map { String(format:"游戏读取 %.0f Hz", $0) } ?? "游戏读取 —"
         let gap = samples.p95Milliseconds.map { String(format:"95%% 读取间隔 ≤ %.1f ms", $0) } ?? "读取间隔 —"
         text(cadence+"   ·   "+gap,x:x+28,y:y+413,size:12,color:lime,width:575)
-        text("变化 \(samples.distinctChanges) 次\(samples.isChanging ? " · 正在变化" : "")。上方只测游戏读取频率。",
-             x:x+28,y:y+437,size:11,color:muted,width:584)
+        let systemTiming = samples.systemEventMedianMilliseconds
+            .map { String(format:"macOS 输入事件中位间隔 %.1f ms", $0) }
+            ?? (samples.distinctChanges >= 12 ? "轴值已读取 · macOS 事件间隔等待采集" : "移动摇杆或扳机以测量 macOS 输入事件")
+        text(systemTiming,x:x+28,y:y+437,size:11,color:muted,width:403)
+        text("轴值变化 \(samples.distinctChanges) 次",x:x+432,y:y+437,size:11,color:samples.isChanging ? lime : muted,width:180,align:.right)
         button("−",NSRect(x:x+28,y:y+470,width:40,height:31),action:"deadzoneDown")
         text(String(format:"死区 %.0f%%",game.assists.steeringDeadzone*100),x:x+77,y:y+478,size:11,width:78,align:.center)
         button("+",NSRect(x:x+165,y:y+470,width:40,height:31),action:"deadzoneUp")
@@ -1359,9 +2303,10 @@ final class HUDView: NSView {
         button("转向：\(curve.label)",NSRect(x:x+215,y:y+516,width:174,height:31),action:"steeringCurve")
         text(connected == nil ? "踩 LT 预览压力" : String(format:"LT %.0f%% → 压力 %.0f%%",raw.brake*100,pressure*100),
              x:x+408,y:y+523,size:11,color:red,width:204,align:.right)
-        text(game.input.hapticStatus,x:x+28,y:y+568,size:11,color:muted,width:570)
+        text(game.input.hapticStatus,x:x+28,y:y+568,size:11,color:muted,width:364)
+        button("震动通道 · "+game.input.hapticRoute.label,NSRect(x:x+406,y:y+558,width:206,height:32),action:"hapticRoute")
         if game.noticeRemaining > 0 {
-            text(game.notice,x:x+28,y:y+589,size:10,color:lime,width:575)
+            text(game.notice,x:x+28,y:y+595,size:10,color:lime,width:575)
         }
     }
 
@@ -1384,12 +2329,19 @@ final class HUDView: NSView {
         text(fastestLabel,x:x+217,y:y+148,size:12,color:NSColor(rgb:0xFFBE78),mono:true,width:215)
         text("油门 / 刹车 0–100% · 虚线为制动压力 · 转向 −100% 左 / +100% 右",x:x+28,y:y+179,size:10,color:muted)
         if let latest = laps.latest, let fastest = laps.fastest {
+            button(analysisZoomStart == nil ? "放大弯段 10×" : "查看整圈",NSRect(x:x+429,y:y+109,width:149,height:30),
+                   action:"analysisZoom",active:analysisZoomStart != nil)
+            let visible = analysisVisibleIndices
+            let start = Double(visible.lowerBound)/Double(LapInputs.intervals)
+            let end = Double(visible.upperBound)/Double(LapInputs.intervals)
+            let recentTrace = analysisPoints(latest,from:start,to:end)
+            let bestTrace = analysisPoints(fastest,from:start,to:end)
             let first = interactionTransform.transform(CGPoint(x:x+28,y:y+229))
             let last = interactionTransform.transform(CGPoint(x:x+578,y:y+544))
             analysisTraceOrigin = first.x
             analysisTraceWidth = last.x-first.x
             analysisHitArea = CGRect(x:first.x,y:first.y,width:last.x-first.x,height:last.y-first.y)
-            let peak = (latest.inputs + fastest.inputs).lazy.map(\.speedKPH).max() ?? 0
+            let peak = max(latest.inputs.lazy.map(\.speedKPH).max() ?? 0,fastest.inputs.lazy.map(\.speedKPH).max() ?? 0)
             let maxSpeed = max(50, ceil(peak / 50) * 50)
             let rows: [(String, KeyPath<LapInputs, Double>, ClosedRange<Double>)] = [
                 ("油门", \.throttle, 0...1), ("刹车", \.brake, 0...1),
@@ -1409,30 +2361,39 @@ final class HUDView: NSView {
                 }
                 let reference = NSColor(rgb:0xFFBE78)
                 let current = NSColor(rgb:0x7FE1AB)
-                drawTrace(fastest.inputs, value:row.1, range:row.2, in:frame,color:reference,width:3.6)
-                drawTrace(latest.inputs, value:row.1, range:row.2, in:frame,color:current,width:1.5)
+                drawTrace(bestTrace, value:row.1, range:row.2, in:frame,color:reference,width:3.6)
+                drawTrace(recentTrace, value:row.1, range:row.2, in:frame,color:current,width:1.5)
                 if index == 1 {
-                    drawPressure(fastest.inputs,in:frame,color:reference.withAlphaComponent(0.68),phase:0)
-                    drawPressure(latest.inputs,in:frame,color:current.withAlphaComponent(0.85),phase:2)
+                    drawPressure(bestTrace,in:frame,color:reference.withAlphaComponent(0.68),phase:0)
+                    drawPressure(recentTrace,in:frame,color:current.withAlphaComponent(0.85),phase:2)
                 }
                 if let cursor = analysisCursorIndex {
-                    let markerX = frame.minX+frame.width*CGFloat(cursor)/CGFloat(LapInputs.intervals)
+                    let markerX = frame.minX+frame.width*CGFloat(cursor-visible.lowerBound)/CGFloat(visible.upperBound-visible.lowerBound)
                     line(CGPoint(x:markerX,y:frame.minY),CGPoint(x:markerX,y:frame.maxY),color:white.withAlphaComponent(0.75))
                 }
             }
             for tick in 0...4 {
-                text("\(tick * 25)%",x:x+8+CGFloat(tick)*137.5,y:y+551,size:10,color:muted,width:40,align:.center)
+                let progress = start+(end-start)*Double(tick)/4
+                let label = analysisZoomStart == nil ? "\(tick*25)%" : String(format:"%.0f m",progress*game.circuit.length)
+                text(label,x:x+CGFloat(tick)*137.5,y:y+551,size:10,color:muted,width:56,align:.center)
             }
-            if let cursor = analysisCursorIndex, latest.inputs.indices.contains(cursor), fastest.inputs.indices.contains(cursor) {
-                let a = latest.inputs[cursor], b = fastest.inputs[cursor]
-                let distance = Double(cursor)/Double(LapInputs.intervals)*game.circuit.length
+            if let cursor = analysisCursorIndex {
+                let fraction = Double(cursor)/Double(LapInputs.intervals)
+                let a = latest.input(at:fraction), b = fastest.input(at:fraction)
+                let distance = fraction*game.circuit.length
                 func pressure(_ lap: LapInputs) -> String {
                     lap.linePressure.map { String(format:"%.0f%%",$0*100) } ?? "—"
                 }
                 text(String(format:"%.0f m  ·  最近 / 最快",distance),x:x+28,y:y+572,size:11,color:lime,mono:true,width:194)
                 text(String(format:"速度 %.0f / %.0f km/h   刹车 %.0f / %.0f%%",a.speedKPH,b.speedKPH,a.brake*100,b.brake*100),
                      x:x+28,y:y+592,size:11,color:white,mono:true,width:545)
-                text("管路压力 "+pressure(a)+" / "+pressure(b),x:x+28,y:y+612,size:11,color:muted,mono:true,width:545)
+                func wheel(_ lap: LapInputs) -> String {
+                    guard let angle = lap.handwheelDegrees else { return "—" }
+                    if abs(angle) < 0.5 { return "0°" }
+                    return String(format:"%@%.0f°",angle < 0 ? "左" : "右",abs(angle))
+                }
+                let detail = "管路压力 "+pressure(a)+" / "+pressure(b)+"      方向盘 "+wheel(a)+" / "+wheel(b)
+                text(detail,x:x+28,y:y+612,size:11,color:muted,mono:true,width:550)
             } else {
                 text("沿图移动鼠标，或按 ← / → 查看该位置",x:x+28,y:y+580,size:11,color:muted,width:545,align:.center)
             }
@@ -1469,12 +2430,30 @@ final class HUDView: NSView {
         text("最近 \(laps.history.count) 个有效圈 · 从新到旧",x:tableX,y:y+603,size:11,color:muted)
     }
 
-    private func drawTrace(_ samples: [LapInputs], value: KeyPath<LapInputs, Double>, range: ClosedRange<Double>,
+    private typealias AnalysisPoint = (position: CGFloat, input: LapInputs)
+
+    /// Keep original observations, with one interpolated point at either edge of a zoomed section.
+    private func analysisPoints(_ lap: AnalysedLap,from start: Double,to end: Double) -> [AnalysisPoint] {
+        let count = lap.inputs.count-1
+        let first = Int(floor(start*Double(count)))+1
+        let last = Int(ceil(end*Double(count)))-1
+        var result: [AnalysisPoint] = [(0,lap.input(at:start))]
+        if first <= last {
+            for i in first...last {
+                let position = (Double(i)/Double(count)-start)/(end-start)
+                result.append((CGFloat(position),lap.inputs[i]))
+            }
+        }
+        result.append((1,lap.input(at:end)))
+        return result
+    }
+
+    private func drawTrace(_ samples: [AnalysisPoint], value: KeyPath<LapInputs, Double>, range: ClosedRange<Double>,
                            in frame: NSRect, color: NSColor, width: CGFloat) {
         let path = NSBezierPath()
         for (index, sample) in samples.enumerated() {
-            let share = (sample[keyPath: value] - range.lowerBound) / (range.upperBound - range.lowerBound)
-            let point = CGPoint(x:frame.minX + frame.width * CGFloat(index) / CGFloat(LapInputs.intervals),
+            let share = (sample.input[keyPath:value] - range.lowerBound) / (range.upperBound - range.lowerBound)
+            let point = CGPoint(x:frame.minX + frame.width * sample.position,
                                 y:frame.maxY - 2 - (frame.height - 4) * share)
             if index == 0 { path.move(to:point) } else { path.line(to:point) }
         }
@@ -1483,14 +2462,14 @@ final class HUDView: NSView {
         path.stroke()
     }
 
-    private func drawPressure(_ samples: [LapInputs], in frame: NSRect, color: NSColor, phase: CGFloat) {
+    private func drawPressure(_ samples: [AnalysisPoint], in frame: NSRect, color: NSColor, phase: CGFloat) {
         let path = NSBezierPath()
         path.lineWidth = 1.3
         path.setLineDash([3,3],count:2,phase:phase)
         var started = false
-        for (index,sample) in samples.enumerated() {
-            guard let pressure = sample.linePressure else { started = false; continue }
-            let point = CGPoint(x:frame.minX+frame.width*CGFloat(index)/CGFloat(LapInputs.intervals),
+        for sample in samples {
+            guard let pressure = sample.input.linePressure else { started = false; continue }
+            let point = CGPoint(x:frame.minX+frame.width*sample.position,
                                 y:frame.maxY-2-(frame.height-4)*pressure)
             if started { path.line(to:point) } else { path.move(to:point); started = true }
         }

@@ -13,8 +13,11 @@ struct HapticOutput: Equatable {
     var combinedGrip: Double {
         let road = max(left,right)
         let controls = max(brake*0.80,throttle*0.70)
-        let main = clamp(max(road,controls),0,0.8)
-        return main + 0.38*min(road,controls)*(1-main/0.8)
+        return Self.layeredGrip(road,controls)
+    }
+    fileprivate static func layeredGrip(_ a: Double,_ b: Double) -> Double {
+        let main = clamp(max(a,b),0,0.8)
+        return main + 0.38*min(a,b)*(1-main/0.8)
     }
     static func compatibilityLevel(for value: Double,previous: Int) -> Int {
         guard value.isFinite else { return 1 }
@@ -46,8 +49,9 @@ struct HapticOutput: Equatable {
 struct HapticFeedback {
     private var roadPhase = 0.0
     private var rearSlipPhase = 0.0
-    private var absPhase = 0.0
     private var absEnvelope = 0.0
+    private var absValveEnvelope = 0.0
+    private var brakeLoadEnvelope = 0.0
     private var output = HapticOutput.zero
 
     mutating func reset() { self = HapticFeedback() }
@@ -97,14 +101,34 @@ struct HapticFeedback {
             let a = road(front), b = road(rear)
             return max(a,b) + 0.22*min(a,b)
         }
-        let absTarget = vehicle.absActive && input.brake > 0.05 ? clamp(vehicle.absRelease,0,1)*rolling : 0
-        if absEnvelope < 0.002 && absTarget > 0 { absPhase = 0 }
+        let absActive = vehicle.absActive && input.brake > 0.05
+        let absTarget = absActive ? vehicle.absRelease*rolling : 0
+        let valveTarget = absActive ? vehicle.absValveActivity*rolling : 0
         absEnvelope = follow(absEnvelope,absTarget,attack:100,release:44)
-        if absEnvelope > 0.001 { absPhase = (absPhase+step*11).truncatingRemainder(dividingBy:1) }
-        let pulse = absEnvelope*(0.59+0.41*cos(2 * .pi * absPhase))
-        let heavyBrake = clamp((vehicle.brakeLinePressure-0.38)/0.62,0,1)*rolling
+        absValveEnvelope = follow(absValveEnvelope,valveTarget,attack:120,release:44)
+        let pulse = max(0,0.34*absEnvelope+1.05*absValveEnvelope)
+        // Strong valve events still vary near the trigger ceiling. The knee
+        // leaves normal pressure and weak ABS movement at their original gain.
+        let valveCue = 0.77*pulse
+        let excess = max(0,valveCue-0.50)
+        let compressedValve = valveCue-excess + 0.15*excess/(0.15+excess)
         let driveDirection = vehicle.gear < 0 ? -1.0 : 1.0
         let rollingDirection = vehicle.forwardSpeed < 0 ? -1.0 : 1.0
+        // After the pads take up their travel, actual tread force gives the
+        // trigger its sense of load. Add texture as the loaded front tyres
+        // scrub sideways under braking.
+        let braking = clamp((input.brake-0.035)/0.085,0,1) * min(1,vehicle.brakeLinePressure*12)
+        let tyreBrakingForce = vehicle.wheels.reduce(0.0) { total,wheel in
+            guard wheel.normalLoad > 100 else { return total }
+            return total+max(0,-wheel.longitudinalForce*rollingDirection)
+        }
+        let tyreDeceleration = tyreBrakingForce/(vehicle.mass*9.81)
+        let brakingLoad = clamp((tyreDeceleration-0.035)/0.86,0,1)
+        let pedalLoad = 0.25*brakingLoad/(brakingLoad+0.37)
+        let trailScrub = 0.15*frontSlip*clamp(tyreDeceleration/0.30,0,1)
+        let brakeLoad = braking*rolling*(pedalLoad+trailScrub)
+        let heavyBrake = clamp((vehicle.brakeLinePressure-0.38)/0.62,0,1)*clamp(tyreDeceleration/0.45,0,1)*rolling
+        brakeLoadEnvelope = follow(brakeLoadEnvelope,brakeLoad,attack:38,release:42)
         let locking = vehicle.wheels.reduce(0.0) { highest,wheel in
             let slip = clamp((-wheel.slipRatio*rollingDirection-0.13)/0.58,0,1)
             let loaded = clamp((wheel.normalLoad-250)/1100,0,1)
@@ -123,16 +147,19 @@ struct HapticFeedback {
         // produces this low, directional cue before the sharper scrub begins.
         let rackMoment = vehicle.wheels[0].aligningMoment + vehicle.wheels[1].aligningMoment
         let steeringLoad = 0.18 * tanh(rackMoment / 55) * rolling
-        let left = max(grip(1,3), max(0,steeringLoad))
-        let right = max(grip(0,2), max(0,-steeringLoad))
+        // As the driver trails off the brake, modest scrub can outgrow the
+        // aligning cue before the front tyres have actually lost that torque.
+        // Reserve a little of the stronger texture's headroom for the other.
+        let left = HapticOutput.layeredGrip(grip(1,3), max(0,steeringLoad))
+        let right = HapticOutput.layeredGrip(grip(0,2), max(0,-steeringLoad))
         output.left = follow(output.left,left+0.70*impact.x,attack:63,release:25)
         output.right = follow(output.right,right+0.70*impact.y,attack:63,release:25)
         let lockCue = input.brake > 0.12 && !vehicle.absActive ? locking*rolling*0.30 : 0
-        output.brake = max(0.77*pulse,heavyBrake*0.24,lockCue)
+        output.brake = max(compressedValve,heavyBrake*0.24,lockCue,brakeLoadEnvelope)
         output.throttle = follow(output.throttle,max(spin,tractionControl),attack:38,release:31)
         let roadSharpness = 0.38*clamp(vehicle.kerbFeedback+max(impact.x,impact.y),0,1)
         let frontSharpness = 0.37*max(0,frontSlip-rearSlip)*rolling
-        let sharp = 0.23 + max(roadSharpness,frontSharpness) + 0.12*pulse
+        let sharp = 0.23 + max(roadSharpness,frontSharpness) + 0.12*min(pulse,1)
         output.sharpness = follow(output.sharpness,sharp,attack:55,release:23)
         return output.scaled(1)
     }

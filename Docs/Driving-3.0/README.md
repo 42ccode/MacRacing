@@ -21,3 +21,8 @@
 - Porsche 911 Carrera 4S (992)，JK3Dstudios，CC BY 4.0。[外观](preview20-porsche-exterior.jpg) · [驾驶舱](preview20-porsche-cabin.jpg) · [从驾驶位看中央与右镜](preview20-porsche-mirrors.jpg)
 - Lotus Elise，Stéphane Agullo，CC BY 4.0。[外观](preview20-lotus-exterior.jpg) · [驾驶舱](preview20-lotus-cabin.jpg)
 - Honda e，Alex Murias，CC BY 4.0。[外观](preview20-honda-exterior.jpg) · [驾驶舱与电子镜屏](preview20-honda-cabin.jpg)
+
+## 仪表与赛道的原生对照
+
+- BMW E30 原模型由 Artem P 制作，CC BY 4.0。图中展示原车仪表在四组车速与转速下的刻度位置。[仪表近景](e30-live-instruments.jpg) · [原模型](https://sketchfab.com/3d-models/bmw-m3-e30-6d67d12a2abe4e119842f65e46fa2f67)
+- 技术公园与河谷环线的湿地铺装边缘。两列原生画面分别展示修复前、修复后的同一处白线与路肩。[湿地路肩对照](wet-track-edges.jpg)
